@@ -7,12 +7,14 @@
 .peel-under{position:absolute;inset:0;pointer-events:auto;color:#fff;clip-path:polygon(0 0,100% 0,100% 100%)}
 .peel-under svg{position:absolute;top:6px;right:6px;width:22px;height:22px}
 /* a wink shortly after the page loads, and on every hover or keyboard focus */
-.peel .eye-r{transform-box:fill-box;transform-origin:center;animation:peel-wink .5s ease-in-out 2.5s}
-.peel:focus-visible .eye-r{animation:peel-wink-again .5s ease-in-out}
-@media(hover:hover){.peel:hover .eye-r{animation:peel-wink-again .5s ease-in-out}}
+.rip-robot{position:absolute;top:6px;right:6px;z-index:4;width:22px;height:22px;color:#fff;pointer-events:none}
+.rip-robot svg{display:block;width:100%;height:100%}
+.peel .eye-r,.rip-robot .eye-r{transform-box:fill-box;transform-origin:center;animation:peel-wink .5s ease-in-out 2.5s}
+.peel:focus-visible .eye-r,.peel:focus-visible~.rip-robot .eye-r{animation:peel-wink-again .5s ease-in-out}
+@media(hover:hover){.peel:hover .eye-r,.peel:hover~.rip-robot .eye-r{animation:peel-wink-again .5s ease-in-out}}
 @keyframes peel-wink{0%,100%{transform:none}35%,65%{transform:scaleY(.12)}}
 @keyframes peel-wink-again{0%,100%{transform:none}35%,65%{transform:scaleY(.12)}}
-@media(prefers-reduced-motion:reduce){.peel .eye-r,.peel:hover .eye-r,.peel:focus-visible .eye-r{animation:none}}
+@media(prefers-reduced-motion:reduce){.peel .eye-r,.rip-robot .eye-r,.peel:hover .eye-r,.peel:hover~.rip-robot .eye-r,.peel:focus-visible .eye-r,.peel:focus-visible~.rip-robot .eye-r{animation:none}}
 .peel-hit{position:absolute;inset:0;pointer-events:auto;clip-path:polygon(0 0,100% 100%,0 100%)}
 .peel-label{position:absolute;top:calc(100% + 8px);right:12px;padding:5px 10px;border-radius:7px;background:#0b0f1a;color:#e6edf3;font:600 12.5px Inter,system-ui,-apple-system,"Segoe UI",sans-serif;white-space:nowrap;box-shadow:0 8px 20px -8px rgba(0,0,0,.6);opacity:0;transition:opacity .12s;pointer-events:none}
 .peel:focus-visible .peel-label{opacity:1}
@@ -28,9 +30,7 @@
 .banner.is-open .banner-front{cursor:pointer}
 .rip-in{position:absolute;display:flex;flex-direction:column;gap:10px}
 .rip-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;flex:none}
-.rip-bar .i-robot{width:22px;height:22px;flex:none;color:#1c0d03}
 .rip-bar h2{white-space:nowrap;color:#1c0d03;font-size:16px;font-weight:600;letter-spacing:-.01em;margin:0}
-.rip-bar h2{flex:1;min-width:0}
 .rip-bar button{display:inline-flex;align-items:center;gap:7px;height:34px;padding:0 13px;border:0;border-radius:7px;background:#0b0f1a;color:#e6edf3;font:600 13px Inter,system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer}
 .rip-bar button:hover:not(:disabled){background:#1f2433;color:#fff}
 .rip-bar button:disabled{opacity:.5;cursor:default}
@@ -44,7 +44,7 @@
 .rip-works{flex:none;display:flex;align-items:center;gap:12px;font-size:12px;font-weight:600;color:#1c0d03}
 .rip-works span{margin-right:2px;white-space:nowrap}
 .rip-works svg{width:18px;height:18px;flex:none;fill:currentColor}
-@media(max-width:600px){.peel-under svg{top:4px;right:4px;width:16px;height:16px}.rip-bar h2{font-size:15px}.rip-bar button{padding:0 8px}}
+@media(max-width:600px){.peel-under svg{top:4px;right:4px;width:16px;height:16px}.rip-robot{top:4px;right:4px;width:16px;height:16px}.rip-bar h2{font-size:15px}.rip-bar button{padding:0 8px}}
 /* the corner on pages without a banner: it links to the one that has it */
 .peel-link .peel-under{background:linear-gradient(225deg,#ea580c,#f97316 60%,#fb923c)}
 .peel-link{--p:60px;position:fixed;z-index:55;width:var(--p);height:var(--p);cursor:pointer;transition:width .18s ease-out,height .18s ease-out}

@@ -36,7 +36,7 @@
   back.className = 'rip-back';
   back.id = 'agents';
   back.inert = true;
-  back.innerHTML = '<div class="rip-in"><div class="rip-bar">' + ROBOT +
+  back.innerHTML = '<div class="rip-in"><div class="rip-bar">' +
     '<h2>Prompt for Agents</h2>' +
     '<button type="button" class="rip-copy" disabled>' + COPY + '<span>Copy</span></button>' +
     '<button type="button" class="rip-close">Close the prompt</button></div>' +
@@ -57,8 +57,14 @@
   peel.setAttribute('aria-label', 'Prompt for Agents');
   peel.setAttribute('aria-expanded', 'false');
   peel.setAttribute('aria-controls', 'agents');
-  peel.innerHTML = '<span class="peel-under">' + ROBOT + '</span><i class="peel-hit"></i>' + LABEL;
+  peel.innerHTML = '<span class="peel-under"></span><i class="peel-hit"></i>' + LABEL;
   banner.appendChild(peel);
+
+  // One robot, in the corner the whole time: always inside the part that has peeled.
+  var robot = document.createElement('span');
+  robot.className = 'rip-robot';
+  robot.innerHTML = ROBOT;
+  banner.appendChild(robot);
 
   var text = back.querySelector('pre'), copy = back.querySelector('.rip-copy'), label = copy.querySelector('span');
   var url = new URL('agent-prompt.txt', here).href;
@@ -90,7 +96,6 @@
     paper.style.setProperty('--crease', q / Math.SQRT2 + 'px');
     var size = Math.min(q, TIP);
     peel.style.width = peel.style.height = size + 'px';
-    peel.style.opacity = Math.max(0, Math.min(1, (170 - q) / 60));
   }
   // Open, the crease stops where SHARE of the banner has peeled or just short of the headline and
   // lede, whichever comes first, unless the prompt's panel needs more room, as on a phone. The

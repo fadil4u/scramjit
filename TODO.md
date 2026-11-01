@@ -22,6 +22,10 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
   temporaries. Both help any compiler; revisit what else can go once cimo merges repeated
   expressions (cimo `TODO.md`: "Slower than gcc -O3 on scramjit's kernels").
 
+- **The demo's WebAssembly tab calls `cimo.wasm.build`** (`docs/lab/lab.py`: `wasm_text`) for the
+  module's bytes, which isn't cimo's documented API. When cimo exposes a compiled module's
+  WebAssembly (or a disassembly), use that.
+
 ## Next
 
 0. **Math in Pyodide:** functions that involve no C library code (`sqrt`, `hypot`, `floor`,

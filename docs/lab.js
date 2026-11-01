@@ -41,6 +41,7 @@
     py.FS.writeFile('/home/pyodide/cimo.py', await text('py/cimo.py'));
     for (const f of SJ_FILES) py.FS.writeFile('/home/pyodide/scramjit/' + f, await text('py/scramjit/' + f));
     py.FS.writeFile('/home/pyodide/lab.py', await text('lab/lab.py'));
+    py.FS.writeFile('/home/pyodide/wat.py', await text('lab/wat.py'));
     await presetsLoaded;
     py.runPython("import sys; sys.path.insert(0, '/home/pyodide')");
     status('Importing…');
@@ -65,6 +66,15 @@
       wasm: info.state === 'compiled' ? `cimo compiled the C to WebAssembly in ${info.compile_ms} ms, in this page, and linked it into Pyodide's memory. The function now runs as native WebAssembly on the same numpy array.` : (info.state === 'fallback' ? 'Not compiled: ' + info.reason : 'Turn scramjit on to compile.'),
     }[s];
     pre.textContent = info.state === 'error' ? info.error : t;
+    if (s === 'wasm' && info.state === 'compiled') {        // disassemble when asked, then keep it
+      if (!info.wat) {
+        pre.textContent = ';; disassembling…';
+        setTimeout(() => {
+          try { info.wat = lab.wasm_text(); } catch (e) { info.wat = ';; could not disassemble: ' + e.message; }
+          if (stage === 'wasm') pre.textContent = info.wat;
+        }, 30);
+      } else pre.textContent = info.wat;
+    }
   }
   function lightStages(n) {
     root.querySelectorAll('.lab-chip').forEach((c, i) => c.classList.toggle('lit', i < n));

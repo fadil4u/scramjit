@@ -1,0 +1,41 @@
+{
+  "parts": [
+    {
+      "title": "Getting started",
+      "walk": true,
+      "pages": [
+        ["introduction", "Introduction"],
+        ["install", "Install"],
+        ["first-function", "Your first function"]
+      ]
+    },
+    {
+      "title": "Writing compiled functions",
+      "walk": true,
+      "pages": [
+        ["types", "Types and annotations"],
+        ["loops-and-builtins", "Loops and builtins"],
+        ["containers", "Arrays, lists and tuples"],
+        ["semantics", "Semantics"],
+        ["errors", "Errors"]
+      ]
+    },
+    {
+      "title": "Going further",
+      "walk": true,
+      "pages": [
+        ["caching", "Compilation and caching"],
+        ["browser", "In the browser"],
+        ["how-it-works", "How it works"]
+      ]
+    },
+    {
+      "title": "Reference",
+      "walk": false,
+      "pages": [
+        ["roadmap", "Roadmap"],
+        ["faq", "FAQ"]
+      ]
+    }
+  ]
+}

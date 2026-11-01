@@ -12,7 +12,6 @@ import sys
 import time
 import warnings
 
-os.environ.setdefault('CIMO_FMA', '0')
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'cimo', 'python'))
@@ -126,7 +125,7 @@ def main():
             row.append(best(lambda: run(f, n)) / units(n) * 1e9)
         print(f'{name:14s} {t_py:8.1f}n' + ''.join(f'{v:12.2f}n' for v in row) + f'   {t_py / row[0]:7.0f}x')
     import cimo
-    hand = cimo.compile(HAND_EMA).ema
+    hand = cimo.compile(HAND_EMA, fma=False).ema
     out = np.empty(N)
     print(f'{"ema, hand C":14s} {"":9s}{best(lambda: hand(x, N, out, 0.3)) / N * 1e9:12.2f}n')
 

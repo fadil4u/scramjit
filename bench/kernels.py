@@ -6,7 +6,6 @@ import os
 import sys
 import time
 
-os.environ.setdefault('CIMO_FMA', '0')
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
 sys.path.insert(0, os.path.join(HERE, '..', 'kernels'))
@@ -31,7 +30,7 @@ def best(f, repeat=5):
 
 
 def hand(name):
-    return getattr(cimo.load(os.path.join(HERE, '..', 'kernels', 'c', name + '.c')), name)
+    return getattr(cimo.load(os.path.join(HERE, '..', 'kernels', 'c', name + '.c'), fma=False), name)
 
 
 def main():

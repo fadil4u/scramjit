@@ -26,9 +26,8 @@ def mandelbrot(img, palette, cx: float, cy: float, scale: float, maxit: int, r0:
                 img[y, x, 2] = 0
             else:
                 # smooth colouring: the fractional escape count, from how far past the radius z got
-                # (s runs from 1 just past the radius down to 1/256, so the bands meet with no seam)
-                s = math.sqrt(math.sqrt(256.0 / (zr * zr + zi * zi)))
-                k = int((i + (s - 0.25) / 0.75) * 3.0) % n
+                nu = i + 1 - math.log(math.log(zr * zr + zi * zi) * 0.5) / math.log(2.0)
+                k = int(nu * 3.0) % n
                 img[y, x, 0] = palette[k, 0]
                 img[y, x, 1] = palette[k, 1]
                 img[y, x, 2] = palette[k, 2]

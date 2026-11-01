@@ -47,8 +47,6 @@ MATH_FUNCS = {
     'degrees': ('scale', 0), 'radians': ('scale', 0),
     'isnan': ('test', 0), 'isinf': ('test', 0), 'isfinite': ('test', 0),
 }
-EXACT_ANYWHERE = ('sqrt', 'fabs', 'fmod', 'copysign', 'hypot', 'floor', 'ceil', 'trunc', 'degrees',
-                  'radians', 'isnan', 'isinf', 'isfinite')   # no C library function involved
 
 
 def c_float(x):
@@ -485,8 +483,6 @@ class Compiler:
         kind, _ = MATH_FUNCS[name]
         if e.keywords:
             self.fail(e, f'math.{name}() with keyword arguments')
-        if sys.platform == 'emscripten' and name not in EXACT_ANYWHERE:
-            self.fail(e, f'math.{name}() is not compiled in Pyodide yet')
         ts = [self.typeof(a) for a in e.args]
         if not all(t.is_number for t in ts) or any(t.np and t.kind == 'bool' for t in ts):
             self.fail(e, f'math.{name}() of these arguments')

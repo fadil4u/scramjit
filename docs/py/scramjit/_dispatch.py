@@ -3,7 +3,6 @@
 import ast
 import functools
 import inspect
-import os
 import struct
 import sys
 import textwrap
@@ -26,14 +25,7 @@ def _get_cimo():
     if _cimo is None:
         with _cimo_lock:
             if _cimo is None:
-                already = 'cimo' in sys.modules
-                if not already:
-                    os.environ.setdefault('CIMO_FMA', '0')
                 import cimo
-                if os.environ.get('CIMO_FMA', '1') != '0':
-                    warnings.warn('cimo contracts multiply-adds (CIMO_FMA is not 0); compiled float '
-                                  'results can differ from Python\'s. Set CIMO_FMA=0 before importing cimo.',
-                                  RuntimeWarning, stacklevel=4)
                 _cimo = cimo
     return _cimo
 
@@ -49,7 +41,9 @@ def _libm_table():
         import ctypes
         import ctypes.util
         import struct as st
-        if sys.platform == 'win32':
+        if sys.platform == 'emscripten':         # Pyodide: libm is in the main module; addresses are table indices
+            lib = ctypes.CDLL(None)
+        elif sys.platform == 'win32':
             lib = ctypes.CDLL('ucrtbase')
         elif sys.platform == 'darwin':
             lib = ctypes.CDLL('libSystem.dylib')
@@ -242,7 +236,7 @@ class Function:
         source = c.generate()
         cimo = _get_cimo()
         try:
-            kernel = cimo.compile(PRELUDE + source).sj_kernel
+            kernel = cimo.compile(PRELUDE + source, fma=not self._parity).sj_kernel   # Python never contracts
         except cimo.CompileError as e:
             raise Unsupported(None, f'internal error: cimo rejected the generated C ({e}); please report it')
         if any(t.np for t in key) or c.ret.np:

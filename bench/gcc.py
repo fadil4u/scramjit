@@ -10,7 +10,6 @@ import sys
 import tempfile
 import time
 
-os.environ.setdefault('CIMO_FMA', '0')
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
 sys.path.insert(0, os.path.join(HERE, '..', 'kernels'))
@@ -89,7 +88,7 @@ def main():
         return getattr(gcc('hand_' + name, open(os.path.join(kdir, name + '.c')).read(), kdir), name)
 
     def hand_cimo(name):
-        return getattr(cimo.load(os.path.join(kdir, name + '.c')), name)
+        return getattr(cimo.load(os.path.join(kdir, name + '.c'), fma=False), name)
 
     # gray_scott
     n = 256

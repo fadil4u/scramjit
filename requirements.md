@@ -338,7 +338,7 @@ are benchmarked against pure CPython. **Done 2026-11-01** (see "M1 findings").
 9,500 checks, numpy scalars included) found zero mismatches. CPython quirks reproduced: `float *
 int` with the int equal to -1 is computed as a negation (a NaN's sign flips; other ints and
 numpy scalars don't). cimo doesn't inline `static inline` functions (5.15 vs 3.07 ns on `ema`),
-so hot helpers are macros. Facts from unit-step `range` loops (index non-negative, below
+so hot helpers were macros, until cimo learned to inline (now `static inline`, no slowdown). Facts from unit-step `range` loops (index non-negative, below
 `len(a)`) drop negative-index adjustment and bounds checks, and loop versioning (one test before
 the loop, checked copy otherwise) removes the rest without changing where an `IndexError` is
 raised. With those, parity and bounds checks cost nothing measurable on the M1 kernels:
@@ -402,6 +402,10 @@ hydraulic erosion, a viewshed beacon, thermal landslides) loads Pyodide, numpy, 
 200x faster than Pyodide's CPython (about 2,400 against 400,000 droplets per second), compiling
 in about 2.5 s. `tools/sync_site.py` refreshes the copies the site loads. Exact `math.hypot`
 is slow in WebAssembly (cimo's `fma` is software there), so the beacon uses `math.sqrt`.
+All of `math` compiles in Pyodide too, bit-exact: `ctypes.CDLL(None)` gives libm's addresses in the
+main module, which in WebAssembly are table indices, so kernels call the very functions `math` calls
+(`tests/test_math_cases.py`, run natively and through `tools/run_pyodide.mjs`). A pure `sin`, `log`,
+`exp` loop gains 12x there: most of its time is in libm.
 At compiled speed, erosion and landslides reach their steady state (a flat plain) in under a
 second, so the demo adds clock-based uplift toward the starting terrain (2 s time constant) and
 gentler droplets: the terrain shows the balance, and more work per second carves deeper.

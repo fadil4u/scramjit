@@ -819,7 +819,8 @@ def _i_fp4(a, mn, ops):
     _same(rd, rn, rm, ra)
     return _FP4[mn] | _ftype(rd) << 22 | rm[1] << 16 | ra[1] << 10 | rn[1] << 5 | rd[1]
 _FP1 = {'fneg': 0x1e214000, 'fabs': 0x1e20c000, 'fsqrt': 0x1e21c000, 'frintp': 0x1e24c000,
-        'frintm': 0x1e254000, 'frintz': 0x1e25c000, 'frinta': 0x1e264000}
+        'frintm': 0x1e254000, 'frintz': 0x1e25c000, 'frinta': 0x1e264000,
+        'frintx': 0x1e274000, 'frinti': 0x1e27c000}
 def _i_fneg(a, mn, ops):
     if len(ops) != 2:
         raise AssemblerError('%s needs 2 operands' % mn)
@@ -1053,7 +1054,8 @@ _INSNS = {
     'mov': _i_mov, 'movk': _i_movk, 'movz': _i_movk, 'movn': _i_movk, 'cset': _i_cset,
     'fadd': _i_fp3, 'fsub': _i_fp3, 'fmul': _i_fp3, 'fdiv': _i_fp3, 'fneg': _i_fneg,
     'fminnm': _i_fp3, 'fmaxnm': _i_fp3, 'fabs': _i_fneg, 'fsqrt': _i_fneg, 'frintp': _i_fneg,
-    'frintm': _i_fneg, 'frintz': _i_fneg, 'frinta': _i_fneg,
+    'frintm': _i_fneg, 'frintz': _i_fneg, 'frinta': _i_fneg, 'frintx': _i_fneg,
+    'frinti': _i_fneg,
     'clz': _i_dp1, 'rbit': _i_dp1, 'rev16': _i_dp1, 'rev': _i_dp1, 'cnt': _i_simd,
     'addv': _i_simd,
     'fmadd': _i_fp4, 'fmsub': _i_fp4, 'fnmadd': _i_fp4, 'fnmsub': _i_fp4,
@@ -2436,6 +2438,8 @@ omap = [
     (D.Ofceil, Ka, "frintp %=, %0"),
     (D.Oftrunc, Ka, "frintz %=, %0"),
     (D.Ofround, Ka, "frinta %=, %0"),
+    (D.Ofrint, Ka, "frintx %=, %0"),
+    (D.Ofnearbyint, Ka, "frinti %=, %0"),
     (D.Obclz, Ki, "clz %=, %0"),
     (D.Obctz, Ki, "rbit %=, %0\\n\\tclz %=, %="),
     (D.Obswap, Ki, "rev %=, %0"),
@@ -4331,6 +4335,67 @@ def phicopyref(fn, b, p):
         return d.jmp.arg
     return R
 ''',
+'backend/cse.py': '''\
+from . import defs as D
+from .defs import KBASE
+from .cfg import dom
+from .gvn import replaceuses
+from .util import newtmp
+_DIV = {D.Odiv: D.Odiv, D.Orem: D.Odiv, D.Oudiv: D.Oudiv, D.Ourem: D.Oudiv}
+def nload(fn):
+    n = 0
+    b = fn.start
+    while b:
+        n += sum(1 for i in b.ins[:b.nins] if D.isload(i.op))
+        b = b.link
+    return n
+def divrem(fn):
+    divs = {}
+    found = False
+    for b in fn.rpo[:fn.nblk]:
+        for i in b.ins[:b.nins]:
+            if i.op in _DIV and KBASE(i.cls) == 0:
+                k = (_DIV[i.op], i.cls, i.arg[0], i.arg[1])
+                if i.op in (D.Odiv, D.Oudiv):
+                    divs.setdefault(k, []).append(b)
+                else:
+                    found = True
+    if not found or not divs:
+        return False
+    done = {}
+    changed = False
+    for b in fn.rpo[:fn.nblk]:
+        out = []
+        for i in b.ins[:b.nins]:
+            if not (i.op in _DIV and KBASE(i.cls) == 0):
+                out.append(i)
+                continue
+            op = _DIV[i.op]
+            k = (op, i.cls, i.arg[0], i.arg[1])
+            have = next((r for bb, r in done.get(k, ()) if dom(bb, b)), None)
+            if i.op == op:
+                if have is None:
+                    done.setdefault(k, []).append((b, i.to))
+                    out.append(i)
+                else:
+                    replaceuses(fn, i.to, have)
+                    changed = True
+                continue
+            if have is None:
+                if not any(dom(b, x) for x in divs.get(k, ())):
+                    out.append(i)
+                    continue
+                have = newtmp('div', i.cls, fn)
+                out.append(D.Ins(op, i.cls, have, i.arg[0], i.arg[1]))
+                done.setdefault(k, []).append((b, have))
+            t = newtmp('mul', i.cls, fn)
+            out.append(D.Ins(D.Omul, i.cls, t, have, i.arg[1]))
+            out.append(D.Ins(D.Osub, i.cls, i.to, i.arg[0], t))
+            changed = True
+        b.ins = out
+        b.nins = len(out)
+    return changed
+''',
 'backend/defs.py': '''\
 import struct
 NIns = 1 << 20
@@ -4564,6 +4629,8 @@ _OPS = [
     ('fceil', ((Ke, Ke, Ks, Kd), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
     ('ftrunc', ((Ke, Ke, Ks, Kd), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
     ('fround', ((Ke, Ke, Ks, Kd), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+    ('frint', ((Ke, Ke, Ks, Kd), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+    ('fnearbyint', ((Ke, Ke, Ks, Kd), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
 ]
 _OPS += [('v' + _o[0],) + _o[1:] for _o in _OPS if _o[0].startswith('load')]
 _OPS += [('v' + _o[0],) + _o[1:] for _o in _OPS if _o[0].startswith('store')]
@@ -5128,11 +5195,13 @@ math = False
 trap = False
 volatile = False
 vla = False
+cse = False
 bigcopy = None
+inline = 0
 stkchk = None
 disjoint = None
-ALL = {'fma': True, 'ldp': True, 'layout': True, 'math': True, 'trap': True, 'volatile': True, 'vla': True}
-_NAMES = tuple(ALL) + ('stkchk', 'bigcopy')
+ALL = {'fma': True, 'ldp': True, 'layout': True, 'math': True, 'trap': True, 'volatile': True, 'vla': True, 'cse': True}
+_NAMES = tuple(ALL) + ('stkchk', 'bigcopy', 'inline')
 def configure(**kw):
     g = globals()
     old = {k: g[k] for k in _NAMES}
@@ -5140,7 +5209,7 @@ def configure(**kw):
         if k not in _NAMES:
             raise TypeError('unknown backend extension %r' % k)
         g[k] = ((frozenset(v) if v is not None else None) if k == 'stkchk'
-                else v if k == 'bigcopy' else bool(v))
+                else v if k == 'bigcopy' else int(v or 0) if k == 'inline' else bool(v))
     return old
 @contextlib.contextmanager
 def options(**kw):
@@ -5719,7 +5788,8 @@ from .defs import (R, RTmp, CON_Z, CBits, Con, Ins, KBASE, KWIDE, U32, Kx, Kw, K
 from .util import die, getcon, newcon, isconbits, argcls, addins
 from .cfg import dom, reachesnotvia, fillcfg, fillloop
 from .fold import foldint, foldref
-from .gcm import pinned
+from .gcm import pinned, isdivwl
+from . import ext as _ext
 con01 = [R, R]
 def mix(x0, x1):
     return (x0 + 17 * x1) & U32
@@ -5739,6 +5809,7 @@ def ieq(ia, ib):
     return 0
 gvntbl = None
 gvntbln = 0
+gvndivs = {}
 def gvndup(i, insert):
     idx = ihash(i) % gvntbln
     while True:
@@ -5869,9 +5940,21 @@ def assoccon(fn, b, i1):
 def killins(fn, i, r):
     replaceuses(fn, i.to, r)
     i.set(Ins(Onop))
+def dedupdiv(fn, b, i):
+    k = (i.op, i.cls, i.arg[0], i.arg[1])
+    seen = gvndivs.setdefault(k, [])
+    for b1, i1 in seen:
+        if dom(b1, b):
+            killins(fn, i, i1.to)
+            return
+    seen.append((b, i))
 def dedupins(fn, b, i):
     normins(fn, i)
-    if i.op == Onop or pinned(i):
+    if i.op == Onop:
+        return
+    if pinned(i):
+        if _ext.cse and isdivwl(i):
+            dedupdiv(fn, b, i)
         return
     assert i.op != Osel0
     assert i.to != R
@@ -5998,7 +6081,7 @@ def rebuildcfg(fn):
                 if gvndup(i, 0) is i:
                     addins(s, i)
 def gvn(fn):
-    global gvntbl, gvntbln
+    global gvntbl, gvntbln, gvndivs
     from .ssa import filluse, ssacheck
     from .parse import printfn
     con01[0] = getcon(0, fn)
@@ -6022,6 +6105,7 @@ def gvn(fn):
         b = b.link
     gvntbln = nins + nins // 2
     gvntbl = [None] * gvntbln
+    gvndivs = {}
     for n in range(fn.nblk):
         b = fn.rpo[n]
         dedupphi(fn, b)
@@ -6123,6 +6207,304 @@ def ifconvert(fn):
     if D.debug['K']:
         sys.stderr.write("\\n> After if-conversion:\\n")
         printfn(fn, sys.stderr)
+''',
+'backend/inline.py': '''\
+from . import defs as D
+from .defs import R, Kw, RTmp, RCon, Tmp0, CAddr, CON_Z, rtype, rval
+from .util import newtmp, newcon, str_
+from . import cfg
+_RETURNS_TWICE = frozenset(('setjmp', '_setjmp', '__setjmp', 'sigsetjmp', '__sigsetjmp',
+                            'savectx', 'vfork', 'getcontext'))
+CALLER_LIMIT = 4000
+SLOTS_LIMIT = 256
+_EXT = {D.Oparsb: D.Oextsb, D.Oparub: D.Oextub, D.Oparsh: D.Oextsh, D.Oparuh: D.Oextuh}
+_RETEXT = {D.Jretsb: D.Oextsb, D.Jretub: D.Oextub, D.Jretsh: D.Oextsh, D.Jretuh: D.Oextuh}
+class Body:
+    __slots__ = ('name', 'blocks', 'tmps', 'cons', 'pars', 'retk', 'size')
+def _symname(fn, r):
+    if rtype(r) != RCon:
+        return None
+    c = fn.con[rval(r)]
+    if c.type != CAddr or c.i != 0 or c.sym.type not in (D.SGlo, D.SExt):
+        return None
+    return c.sym.id
+def _count(fn):
+    n = 0
+    b = fn.start
+    while b:
+        n += len(b.ins)
+        b = b.link
+    return n
+def snapshot(fn, limit):
+    if fn.vararg or fn.dynalloc or fn.retty != D.Kx:
+        return None
+    index = {}
+    b = fn.start
+    while b:
+        index[b] = len(index)
+        b = b.link
+    size = slots = 0
+    retk = None
+    pars = []
+    blocks = []
+    b = fn.start
+    while b:
+        start = b is fn.start
+        for k, i in enumerate(b.ins):
+            o = i.op
+            if D.ispar(o):
+                if not start or k != len(pars) or o in (D.Oparc, D.Opare):
+                    return None
+                pars.append((o, i.cls, i.to))
+            elif D.isalloc(o):
+                if not start or rtype(i.arg[0]) != RCon:
+                    return None
+                slots += fn.con[rval(i.arg[0])].i
+                if slots > SLOTS_LIMIT:
+                    return None
+            elif o == D.Odbgloc:
+                pass
+            elif o in (D.Ovastart, D.Ogetsp, D.Osetsp, D.Oargc, D.Oarge):
+                return None
+            else:
+                if o == D.Ocall:
+                    s = _symname(fn, i.arg[0])
+                    if s is not None and str_(s) in _RETURNS_TWICE:
+                        return None
+                size += 1
+        j = b.jmp.type
+        if D.isret(j):
+            if j == D.Jretc:
+                return None
+            k = None if j == D.Jret0 else Kw if D.isretbh(j) else j - D.Jretw
+            if k is not None:
+                retk = k
+        if size > limit:
+            return None
+        phis = []
+        p = b.phi
+        while p:
+            phis.append((p.to, p.cls, list(p.arg), [index[x] for x in p.blk]))
+            p = p.link
+        blocks.append((b.name, phis, [i.copy() for i in b.ins], j, b.jmp.arg,
+                       index[b.s1] if b.s1 else None, index[b.s2] if b.s2 else None))
+        b = b.link
+    body = Body()
+    body.name = fn.name
+    body.blocks = blocks
+    body.tmps = [(t.name, t.cls) for t in fn.tmp[Tmp0:fn.ntmp]]
+    body.cons = [c.copy() for c in fn.con[:fn.ncon]]
+    body.pars = pars
+    body.retk = retk
+    body.size = size
+    return body
+def _args(b, j, body):
+    k = j
+    while k > 0 and D.isarg(b.ins[k - 1].op):
+        k -= 1
+    args = b.ins[k:j]
+    if len(args) != len(body.pars):
+        return None
+    for a, (po, pk, _) in zip(args, body.pars):
+        if a.op - D.Oarg != po - D.Opar or a.cls != pk:
+            return None
+    call = b.ins[j]
+    if call.arg[1] != R:
+        return None
+    if call.to != R and body.retk is not None and call.cls != body.retk:
+        return None
+    return k
+_serial = 0
+def _expand1(fn, b, k, j, body):
+    global _serial
+    _serial += 1
+    tag = '%s.i%d' % (body.name, _serial)
+    call = b.ins[j]
+    args = b.ins[k:j]
+    tmap = []
+    for name, cls in body.tmps:
+        r = newtmp(None, cls, fn)
+        fn.tmp[rval(r)].name = '%s.%s' % (name, tag) if name else None
+        tmap.append(r)
+    cmap = {}
+    def ref(r):
+        t = rtype(r)
+        if t == RTmp:
+            v = rval(r)
+            return r if v < Tmp0 else tmap[v - Tmp0]
+        if t == RCon:
+            v = rval(r)
+            c = cmap.get(v)
+            if c is None:
+                c = cmap[v] = newcon(body.cons[v], fn)
+            return c
+        return r
+    blks = []
+    for name, *_ in body.blocks:
+        nb = cfg.newblk()
+        nb.name = '%s.%s' % (name, tag)
+        nb.id = fn.nblk
+        fn.nblk += 1
+        blks.append(nb)
+    cont = cfg.newblk()
+    cont.name = 'ret.%s' % tag
+    cont.id = fn.nblk
+    fn.nblk += 1
+    allocs = []
+    rets = []
+    for nb, (_, phis, ins, jt, ja, s1, s2) in zip(blks, body.blocks):
+        out = []
+        for i in ins:
+            o = i.op
+            if D.ispar(o):
+                a = args[_parno(body, i)]
+                x = D.Ins(_EXT.get(o, D.Ocopy), i.cls, ref(i.to), a.arg[0], R)
+                out.append(x)
+                continue
+            x = D.Ins(o, i.cls, ref(i.to), ref(i.arg[0]), ref(i.arg[1]))
+            if D.isalloc(o):
+                allocs.append(x)
+            else:
+                out.append(x)
+        p = None
+        for to, cls, pa, pb in phis:
+            q = D.Phi()
+            q.to = ref(to)
+            q.cls = cls
+            q.arg = [ref(a) for a in pa]
+            q.blk = [blks[x] for x in pb]
+            q.narg = len(q.arg)
+            if p is None:
+                nb.phi = q
+            else:
+                p.link = q
+            p = q
+        if D.isret(jt):
+            if call.to != R:
+                if jt == D.Jret0:
+                    v = CON_Z
+                elif jt in _RETEXT:
+                    v = newtmp('inl', call.cls, fn)
+                    out.append(D.Ins(_RETEXT[jt], call.cls, v, ref(ja), R))
+                else:
+                    v = ref(ja)
+                rets.append((nb, v))
+            nb.jmp.type = D.Jjmp
+            nb.s1 = cont
+        else:
+            nb.jmp.type = jt
+            nb.jmp.arg = ref(ja)
+            nb.s1 = blks[s1] if s1 is not None else None
+            nb.s2 = blks[s2] if s2 is not None else None
+        nb.ins = out
+        nb.nins = len(out)
+    if rets:
+        q = D.Phi()
+        q.to = call.to
+        q.cls = call.cls
+        q.arg = [v for _, v in rets]
+        q.blk = [x for x, _ in rets]
+        q.narg = len(rets)
+        cont.phi = q
+    cont.ins = b.ins[j + 1:]
+    cont.nins = len(cont.ins)
+    cont.jmp.type = b.jmp.type
+    cont.jmp.arg = b.jmp.arg
+    cont.s1 = b.s1
+    cont.s2 = b.s2
+    for s in (b.s1, b.s2):
+        p = s.phi if s else None
+        while p:
+            p.blk = [cont if x is b else x for x in p.blk]
+            p = p.link
+    b.ins = b.ins[:k]
+    b.nins = len(b.ins)
+    b.jmp.type = D.Jjmp
+    b.jmp.arg = R
+    b.s1 = blks[0]
+    b.s2 = None
+    cont.link = b.link
+    prev = b
+    for nb in blks:
+        prev.link = nb
+        prev = nb
+    prev.link = cont
+    st = fn.start
+    n = 0
+    while n < len(st.ins) and D.ispar(st.ins[n].op):
+        n += 1
+    st.ins[n:n] = allocs
+    st.nins = len(st.ins)
+    return cont
+def _parno(body, i):
+    for n, (_, _, to) in enumerate(body.pars):
+        if to == i.to:
+            return n
+    raise AssertionError('parameter not found')
+def expand(fn, bodies):
+    if not bodies:
+        return 0
+    size = _count(fn)
+    n = 0
+    b = fn.start
+    while b:
+        j = 0
+        while j < len(b.ins):
+            i = b.ins[j]
+            if i.op == D.Ocall:
+                s = _symname(fn, i.arg[0])
+                body = bodies.get(s) if s is not None else None
+                if body is not None and body.name != fn.name and size + body.size <= CALLER_LIMIT:
+                    k = _args(b, j, body)
+                    if k is not None:
+                        b = _expand1(fn, b, k, j, body)
+                        size += body.size
+                        n += 1
+                        j = 0
+                        continue
+            j += 1
+        b = b.link
+    if n:
+        fn.rpo = [None] * fn.nblk
+    return n
+def _callees(fn):
+    out = []
+    b = fn.start
+    while b:
+        for i in b.ins:
+            if i.op == D.Ocall:
+                s = _symname(fn, i.arg[0])
+                if s is not None:
+                    out.append(s)
+        b = b.link
+    return out
+def expand_all(fns, limit):
+    from .util import intern
+    byid = {intern(fn.name): fn for fn in fns}
+    order = []
+    state = {}
+    for root in fns:
+        rid = intern(root.name)
+        if rid in state:
+            continue
+        state[rid] = 1
+        stack = [(root, iter(_callees(root)))]
+        while stack:
+            fn, it = stack[-1]
+            for s in it:
+                if s in byid and s not in state:
+                    state[s] = 1
+                    stack.append((byid[s], iter(_callees(byid[s]))))
+                    break
+            else:
+                stack.pop()
+                order.append(fn)
+    bodies = {}
+    for fn in order:
+        expand(fn, bodies)
+        body = snapshot(fn, limit)
+        if body is not None:
+            bodies[intern(fn.name)] = body
 ''',
 'backend/live.py': '''\
 import sys
@@ -6658,6 +7040,7 @@ class _Driver:
     def __init__(self, outf, dbg):
         self.outf = outf
         self.dbg = dbg
+        self.pending = []
     def data(self, d):
         from .emit import emitdat
         if self.dbg:
@@ -6672,6 +7055,31 @@ class _Driver:
         if d.type == D.DEnd:
             self.outf.write("/* end data */\\n\\n")
     def func(self, fn):
+        from . import ext
+        if ext.inline:
+            self.pending.append(fn)
+            return
+        self.compile(fn)
+    def finish(self):
+        from . import ext, inline
+        fns, self.pending = self.pending, []
+        if not fns:
+            return
+        inline.expand_all(fns, ext.inline)
+        for fn in fns:
+            self.compile(fn)
+    @staticmethod
+    def _cleanup(fn, cfg, ssa, gvn, gcm):
+        ssa.ssacheck(fn)
+        gvn.gvn(fn)
+        cfg.fillcfg(fn)
+        cfg.simplcfg(fn)
+        ssa.filluse(fn)
+        cfg.filldom(fn)
+        gcm.gcm(fn)
+        ssa.filluse(fn)
+        ssa.ssacheck(fn)
+    def compile(self, fn):
         T = D.T
         err = sys.stderr
         if self.dbg:
@@ -6706,17 +7114,25 @@ class _Driver:
         gcm.gcm(fn)
         ssa.filluse(fn)
         ssa.ssacheck(fn)
+        from . import ext, cse
+        if ext.cse:
+            loads = cse.nload(fn)
+            cfg.filldom(fn)
+            alias.fillalias(fn)
+            load.loadopt(fn)
+            ssa.filluse(fn)
+            ssa.ssacheck(fn)
+            if cse.nload(fn) != loads:
+                cfg.filldom(fn)
+                self._cleanup(fn, cfg, ssa, gvn, gcm)
         from .. import middle
         if middle.enabled:
             cfg.filldom(fn)
             if middle.run(fn):
-                ssa.ssacheck(fn)
-                gvn.gvn(fn)
-                cfg.fillcfg(fn)
-                cfg.simplcfg(fn)
-                ssa.filluse(fn)
-                cfg.filldom(fn)
-                gcm.gcm(fn)
+                self._cleanup(fn, cfg, ssa, gvn, gcm)
+        if ext.cse and T.name.startswith('arm64'):
+            cfg.filldom(fn)
+            if cse.divrem(fn):
                 ssa.filluse(fn)
                 ssa.ssacheck(fn)
         if T.name == 'wasm':
@@ -6825,6 +7241,7 @@ def main(argv=None):
                     sys.stderr.write("cannot open '%s'\\n" % f)
                     return 1
             parse(buf, f, drv.dbgfile, drv.data, drv.func)
+        drv.finish()
         if not dbg:
             D.T.emitfin(outf)
     except D.BackendError as e:
@@ -7238,7 +7655,8 @@ Ntok = NPubOp + len(_toks)
 del _i, _t
 Tfma = Ntok
 Tmath = Ntok + 1
-_MATHOPS = ('fsqrt', 'fabs', 'fmin', 'fmax', 'ffloor', 'fceil', 'ftrunc', 'fround')
+_MATHOPS = ('fsqrt', 'fabs', 'fmin', 'fmax', 'ffloor', 'fceil', 'ftrunc', 'fround', 'frint',
+            'fnearbyint')
 Tvol = Ntok + 2
 _VOLOPS = {optab[o].name: o for o in range(D.Ovloadsb, D.Ovstored + 1)}
 _VOLOPS.update(vloadw=D.Ovloadsw, vloadl=D.Ovload, vloads=D.Ovload, vloadd=D.Ovload)
@@ -9966,6 +10384,7 @@ _STORE = {D.Ostoreb: (0x3A, Kw, 0), D.Ostoreh: (0x3B, Kw, 1), D.Ostorew: (0x36, 
 _UNF = {
     D.Ofsqrt: (0x91, 0x9F), D.Ofabs: (0x8B, 0x99), D.Offloor: (0x8E, 0x9C),
     D.Ofceil: (0x8D, 0x9B), D.Oftrunc: (0x8F, 0x9D),
+    D.Ofrint: (0x90, 0x9E), D.Ofnearbyint: (0x90, 0x9E),
 }
 class WasmError(D.BackendError):
     pass
@@ -11857,6 +12276,7 @@ class Spinner:
 ''',
 'driver.py': '''\
 from __future__ import annotations
+import contextvars
 import ctypes
 import hashlib
 import io
@@ -11865,6 +12285,7 @@ import platform
 import re
 import struct
 import sys
+import threading
 import warnings
 import zlib
 from . import assembler as _asm
@@ -12054,22 +12475,26 @@ _PYODIDE = sys.platform == 'emscripten'
 _VERSION = b'cimo-2'
 MIDDLE = os.environ.get('CIMO_MIDDLE', '1') != '0'
 FMA = os.environ.get('CIMO_FMA', '1') != '0'
+_fma = contextvars.ContextVar('cimo_fma', default=None)
+_compile_lock = threading.RLock()
+INLINE = int(os.environ.get('CIMO_INLINE', '40'))
 def _qbe(ssa, params=None, middle=None, stkchk=None, target=None):
     from .backend import defs as D
     from .backend.main import _Driver, _targets
     from .backend.parse import parse
     from . import middle as _middle
     from .backend import ext as _ext
-    D.T = next(t for t in _targets() if t.name == (target or TARGET))
     out = io.StringIO()
     try:
-        with _middle.options(enabled=MIDDLE if middle is None else middle,
+        with _compile_lock, _middle.options(enabled=MIDDLE if middle is None else middle,
                              params=params or {}), \\
-                _ext.options(fma=True, ldp=True, layout=True, math=True, trap=True, volatile=True, vla=True, bigcopy=256,
-                             stkchk=stkchk), _Recursion():
-            parse(ssa.encode('latin-1'), '<cimo>', _Driver(out, 0).dbgfile,
-                  _Driver(out, 0).data, _Driver(out, 0).func)
-        D.T.emitfin(out)
+                _ext.options(fma=True, ldp=True, layout=True, math=True, trap=True, volatile=True, vla=True, cse=True, bigcopy=256,
+                             inline=INLINE, stkchk=stkchk), _Recursion():
+            D.T = next(t for t in _targets() if t.name == (target or TARGET))
+            drv = _Driver(out, 0)
+            parse(ssa.encode('latin-1'), '<cimo>', drv.dbgfile, drv.data, drv.func)
+            drv.finish()
+            D.T.emitfin(out)
     except D.BackendError as e:
         raise CompileError(str(e)) from None
     return out.getvalue()
@@ -12081,32 +12506,35 @@ def _qbe_wasm(ssa, params=None, middle=None):
     from .backend.wasm.obj import Object
     from . import middle as _middle
     from .backend import ext as _ext
-    D.T = T_wasm
     obj = Object()
     try:
-        with _middle.options(enabled=MIDDLE if middle is None else middle,
-                             params=params or {}), _ext.options(math=True, fma=True, volatile=True, vla=True), \\
+        with _compile_lock, _middle.options(enabled=MIDDLE if middle is None else middle,
+                             params=params or {}), _ext.options(math=True, fma=True, volatile=True, vla=True, cse=True,
+                                        inline=INLINE), \\
                 _Recursion():
+            D.T = T_wasm
             drv = _Driver(obj, 0)
             parse(ssa.encode('latin-1'), '<cimo>', drv.dbgfile, drv.data, drv.func)
+            drv.finish()
     except D.BackendError as e:
         raise CompileError(str(e)) from None
     return obj
 def _frontend(pp, filename, target=None, **kw):
     from .frontend import compile as cproc_compile
     from .frontend import qbe as _fq
-    _fq.paraminfo = {}
     kw.setdefault('volatile', True)
     kw.setdefault('vlafree', True)
     kw.setdefault('bitops', True)
     kw.setdefault('bigcopy', 256)
     kw.setdefault('vastruct', 'slots' if (target or TARGET) in ('arm64_apple', 'arm64_win')
                   else 'aapcs')
-    try:
-        ssa = cproc_compile(pp, filename, target=_FRONTEND[target or TARGET], **kw)
-        return ssa, _fq.paraminfo
-    finally:
-        _fq.paraminfo = None
+    with _compile_lock:
+        _fq.paraminfo = {}
+        try:
+            ssa = cproc_compile(pp, filename, target=_FRONTEND[target or TARGET], **kw)
+            return ssa, _fq.paraminfo
+        finally:
+            _fq.paraminfo = None
 _HOSTED = frozenset(\'''FILE stdin stdout stderr errno fopen freopen fclose fflush fread fwrite
     fgets fputs fgetc fputc getc putc ungetc getchar gets fprintf vfprintf fscanf vfscanf scanf
     vscanf sscanf vsscanf fseek ftell rewind fgetpos fsetpos feof ferror clearerr remove rename
@@ -12167,13 +12595,17 @@ def _preprocess(src, filename='<string>', include_dirs=(), host_headers=False, d
 def _ir(pp, filename='<string>', host_headers=False):
     from .frontend import FrontendError
     try:
-        return _frontend(pp, filename, fma=FMA, builtins=True, diagnostics=True, prune=True)
+        return _frontend(pp, filename, fma=_contract(), builtins=True,
+                         diagnostics=True, prune=True)
     except FrontendError as e:
         raise CompileError(_hint(str(e), host_headers)) from None
+def _contract():
+    v = _fma.get()
+    return FMA if v is None else v
 def _key(pp):
     return hashlib.sha256(
         _VERSION + _link.compiler_key().encode() + _link._key(TARGET).encode() + TARGET.encode()
-        + (b'm' if MIDDLE else b'') + (b'f' if FMA else b'')
+        + (b'm' if MIDDLE else b'') + (b'f' if _contract() else b'') + b'i%d' % INLINE
         + pp.encode('utf-8', 'surrogateescape')).hexdigest()[:24]
 def _build(src, filename='<string>', include_dirs=(), host_headers=False, defines=()):
     _check_machine()
@@ -12186,14 +12618,15 @@ def _build(src, filename='<string>', include_dirs=(), host_headers=False, define
     _cache_put(key, text, sigs)
     return text, sigs
 def _compile(pp, filename, host_headers):
-    ssa, params = _ir(pp, filename, host_headers)
-    text = _qbe(ssa, params, stkchk=_exe.stack_checked(ssa))
-    sigs = _sigs(ssa)
-    if _WINDOWS:
-        from .frontend.diag import longexterns
-        names = longexterns()
-        if names:
-            sigs += ('\\n' if sigs else '') + '#long ' + ' '.join(names)
+    with _compile_lock:
+        ssa, params = _ir(pp, filename, host_headers)
+        text = _qbe(ssa, params, stkchk=_exe.stack_checked(ssa))
+        sigs = _sigs(ssa)
+        if _WINDOWS:
+            from .frontend.diag import longexterns
+            names = longexterns()
+            if names:
+                sigs += ('\\n' if sigs else '') + '#long ' + ' '.join(names)
     return text, sigs
 def _sigs(ssa):
     return '\\n'.join('%s %s %s' % (m.group(2), m.group(1) or '-',
@@ -12323,17 +12756,22 @@ class Module:
             return next(iter(self._kernels.values()))(*args)
         raise TypeError('module has no main(); call one of: %s' % ', '.join(self._kernels))
 def compile(src: str, include_dirs: Iterable[PathArg] = (), link: Union[str, Iterable[str]] = (),
-            host_headers: bool = False, defines: Defines = (), cache: bool = True) -> Module:
-    return _module(src, '<string>', include_dirs, link, host_headers, defines, cache)
+            host_headers: bool = False, defines: Defines = (), cache: bool = True,
+            fma: Optional[bool] = None) -> Module:
+    return _module(src, '<string>', include_dirs, link, host_headers, defines, cache, fma)
 def load(path: PathArg, include_dirs: Iterable[PathArg] = (), link: Union[str, Iterable[str]] = (),
-         host_headers: bool = False, defines: Defines = (), cache: bool = True) -> Module:
+         host_headers: bool = False, defines: Defines = (), cache: bool = True,
+         fma: Optional[bool] = None) -> Module:
     from .resources import read_text
-    return _module(read_text(path), path, include_dirs, link, host_headers, defines, cache)
-def _module(src, filename, include_dirs, link, host_headers, defines, cache=True):
+    path = os.fspath(path)
+    return _module(read_text(path), path, include_dirs, link, host_headers, defines, cache, fma)
+def _module(src, filename, include_dirs, link, host_headers, defines, cache=True, fma=None):
     token = _link.cache_writes.set(bool(cache))
+    ftoken = _fma.set(None if fma is None else bool(fma))
     try:
         return _module1(src, filename, include_dirs, link, host_headers, defines)
     finally:
+        _fma.reset(ftoken)
         _link.cache_writes.reset(token)
 def _module1(src, filename, include_dirs, link, host_headers, defines):
     if isinstance(link, str):
@@ -17239,6 +17677,7 @@ vastruct = None
 IBCLZ, IBCTZ, IBPOPCNT, IBSWAP, IBSWAP16 = range(116, 121)
 bitops = False
 bigcopy = None
+IFRINT, IFNEARBYINT = 121, 122
 _BITBUILTINS = {}
 for _n, _i in (('clz', IBCLZ), ('ctz', IBCTZ), ('popcount', IBPOPCNT)):
     _BITBUILTINS['__builtin_' + _n] = (_i, 'w')
@@ -17253,13 +17692,14 @@ instname += [None] * (IFSQRT - len(instname)) + list(_MATHINST)
 instname += ['v' + instname[_o] for _o in range(ISTORED, ILOADUB + 1)]
 instname += ['getsp', 'setsp']
 instname += ['bclz', 'bctz', 'bpopcnt', 'bswap', 'bswap16']
+instname += ['frint', 'fnearbyint']
 def _vol(op, tq):
     return IVOL + op - ISTORED if volatile and tq & QUALVOLATILE else op
 builtins = False
 _BUILTINS = {}
 for _i, _n in ((IFSQRT, 'sqrt'), (IFABS, 'fabs'), (IFMIN, 'fmin'), (IFMAX, 'fmax'),
                (IFFLOOR, 'floor'), (IFCEIL, 'ceil'), (IFTRUNC, 'trunc'), (IFROUND, 'round'),
-               (IFMA, 'fma')):
+               (IFRINT, 'rint'), (IFNEARBYINT, 'nearbyint'), (IFMA, 'fma')):
     _nargs = 3 if _i == IFMA else 2 if _i in (IFMIN, IFMAX) else 1
     _BUILTINS[_n] = (_i, _nargs, 8)
     _BUILTINS[_n + 'f'] = (_i, _nargs, 4)
@@ -22942,7 +23382,7 @@ def _init_ops():
     s = set()
     for name in ('add sub neg mul and or xor sar shr shl extsb extub extsh extuh extsw extuw '
                  'exts truncd stosi stoui dtosi dtoui swtof uwtof sltof ultof cast copy '
-                 'fsqrt fabs fmin fmax ffloor fceil ftrunc fround').split():
+                 'fsqrt fabs fmin fmax ffloor fceil ftrunc fround frint fnearbyint').split():
         s.add(getattr(D, 'O' + name))
     for o in range(D.Ocmpw, D.Ocmpd1 + 1):
         s.add(o)
@@ -23615,10 +24055,10 @@ def optimize(fn):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "456bcf16d52fb3d9bc52",
-"runtime-arm64": "f2c9ce5ac503e6931dcd",
-"runtime-arm64_apple": "34f936fffffe1118fde2",
-"runtime-arm64_win": "2730e9e9e1c28faeb47c"
+"compiler": "7869424e783fa0fd1b0b",
+"runtime-arm64": "738b34720fbf9b476440",
+"runtime-arm64_apple": "29ffe4b818c8665e4de7",
+"runtime-arm64_win": "5892977d0f97d2953441"
 }
 ''',
 'onefile.py': '''\

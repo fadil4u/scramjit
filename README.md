@@ -101,7 +101,7 @@ plain loops. Later calls with the same types go straight to the compiled code.
 | `range`, `enumerate`, `zip`, list comprehensions | numpy array expressions: `a * 2`, `a.sum()` |
 | `sum(gen, 0.0)`, `min`, `max`, `abs`, tuple unpacking | Calls to other Python functions |
 | Numbers and n-D numpy arrays, including dtypes like `uint8` | Dicts, strings, objects, `**`, `map`, `filter` |
-| `math` (in Pyodide, only functions with no C library code) | Lists that grow with `append` |
+| `math`, natively and in Pyodide | Lists that grow with `append` |
 
 A function that can't be compiled runs as Python, with a `FallbackWarning` giving the reason:
 
@@ -156,7 +156,7 @@ Pre-release.
   are cimo targets, but scramjit's tests don't run on them in CI yet.
 - Not built yet: the `scramjit preflight` report and the on-disk compile cache, so each process
   compiles on its first call.
-- Next: the rest of `math` in Pyodide, slices and views. See [`TODO.md`](TODO.md).
+- Next: see [`TODO.md`](TODO.md).
 
 ## Development
 

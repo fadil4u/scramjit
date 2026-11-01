@@ -4,13 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="light">
-<title>scramjit · a pure-Python JIT for Python's hot loops</title>
+<title>scramjit · a Python JIT written in pure Python</title>
 <meta name="description" content="scramjit compiles the loops the Python interpreter is slowest at to native code at runtime, through cimo, and runs them without the GIL: no LLVM, no C compiler, no binary wheels. Runs wherever Python runs, including Pyodide.">
 <meta name="theme-color" content="#080a12">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%232563eb'/%3E%3Cstop offset='.6' stop-color='%23f97316'/%3E%3Cstop offset='1' stop-color='%23dc2626'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M5.5 9.5L13 14h6l7.5-4.5M5.5 22.5L13 18h6l7.5 4.5' fill='none' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='16' r='1.7' fill='%23fff'/%3E%3C/svg%3E">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="scramjit">
-<meta property="og:title" content="scramjit · decorate a Python function, get native speed">
+<meta property="og:title" content="scramjit · a Python JIT written in pure Python">
 <meta property="og:description" content="A pure-Python JIT for loops that don't vectorize, built on cimo. No LLVM, no C compiler, no binary wheels, no GIL; runs in CPython and Pyodide.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -222,8 +222,8 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
   <div class="wrap banner-in">
     <div class="banner-copy">
       <span class="badge"><i></i>In design · MIT</span>
-      <h1>Decorate a Python function, get <em>native speed</em>.</h1>
-      <p class="lede">scramjit is a JIT written in pure Python, for the loops the interpreter is slowest at. It turns your hot loop into C, compiles it with <a href="https://www.cimo.dev" style="color:#9fbcff">cimo</a> in your process and runs it without the GIL: no LLVM, no C compiler, no binary wheels. It runs wherever Python runs, including the browser.</p>
+      <h1>A Python JIT written in <em>pure Python</em>.</h1>
+      <p class="lede">scramjit is for the loops the interpreter is slowest at. It turns your hot loop into C, compiles it with <a href="https://www.cimo.dev" style="color:#9fbcff">cimo</a> in your process and runs it without the GIL: no LLVM, no C compiler, no binary wheels. It runs wherever Python runs, including the browser.</p>
       <div class="hero-cta">
         <div class="pip"><span>pip install scramjit</span><button type="button" data-copy="pip install scramjit" aria-label="Copy" title="Copy"><svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg><svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button></div>
         <a class="btn btn-d" href="docs/">Read the docs</a>

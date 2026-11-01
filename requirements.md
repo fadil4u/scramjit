@@ -1,6 +1,6 @@
 # scramjit: requirements
 
-**Decorate a Python function, get native speed.** A pure-Python JIT for Python's hot loops, built on
+**A Python JIT written in pure Python,** for the loops the interpreter is slowest at. Built on
 [cimo](https://github.com/farizrahman4u/cimo). PyPI name `scramjit` is reserved (placeholder
 0.0.1, published 2026-11-01).
 

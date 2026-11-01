@@ -167,6 +167,52 @@ static double sj_frexp(double x, int64_t *ex) {
     return u.f;
 }
 """),
+    'floatpow': ((), """
+/* float ** float (float_pow in floatobject.c), for an exponent or base that can't give a complex
+ * result. Returns 0, 1 for 0.0 ** negative, 2 on overflow. */
+static int sj_float_pow(sj_f2 f, double v, double w, double *out) {
+    int negate = 0, odd;
+    *out = 1.0;
+    if (w == 0.0) return 0;
+    if (v != v) { *out = v; return 0; }
+    if (w != w) { *out = v == 1.0 ? 1.0 : w; return 0; }
+    if (isinf(w)) {
+        v = fabs(v);
+        if (v == 1.0) *out = 1.0;
+        else if ((w > 0.0) == (v > 1.0)) *out = fabs(w);
+        else *out = 0.0;
+        return 0;
+    }
+    odd = fmod(fabs(w), 2.0) == 1.0;
+    if (isinf(v)) {
+        if (w > 0.0) *out = odd ? v : fabs(v);
+        else *out = odd ? copysign(0.0, v) : 0.0;
+        return 0;
+    }
+    if (v == 0.0) {
+        if (w < 0.0) return 1;
+        *out = odd ? v : 0.0;
+        return 0;
+    }
+    if (v < 0.0) { v = -v; negate = odd; }
+    if (v == 1.0) { *out = negate ? -1.0 : 1.0; return 0; }
+    double r = f(v, w);
+    if (isinf(r)) return 2;
+    *out = negate ? -r : r;
+    return 0;
+}
+"""),
+    'ipow': ((), """
+/* int ** a nonnegative int, wrapping at 64 bits */
+static int64_t sj_ipow(int64_t a, int64_t b) {
+    uint64_t base = (uint64_t)a, acc = 1;
+    for (uint64_t e = (uint64_t)b; e; e >>= 1) {
+        if (e & 1) acc *= base;
+        base *= base;
+    }
+    return (int64_t)acc;
+}
+"""),
     'gcd': ((), """
 static int64_t sj_gcd2(int64_t a, int64_t b) {
     uint64_t x = a < 0 ? 0 - (uint64_t)a : (uint64_t)a, y = b < 0 ? 0 - (uint64_t)b : (uint64_t)b;

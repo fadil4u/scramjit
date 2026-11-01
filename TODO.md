@@ -23,8 +23,7 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 
 ## Next
 
-1. **Rest of M2:** value-range narrowing; nested tuples; `for ... else`; `**` (a type that depends on
-   the exponent's sign). Then the M2 acceptance check.
+1. **Rest of M2:** value-range narrowing; nested tuples; `for ... else`. Then the M2 acceptance check.
 2. **Rest of M3:** run the M0 kernels in Pyodide as a test, not only through the site; preflight's
    per-loop report once cimo exposes one (cimo's `TODO.md`), and a `disk` label in the compile column,
    which needs cimo to say whether a compile hit its cache.

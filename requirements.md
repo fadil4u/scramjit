@@ -434,6 +434,13 @@ and in Pyodide, a second process reuses the disk cache, and every out-of-subset 
 reported at its Python line (fallback warning, preflight, and `CompileError` under
 `fallback=False`). Whole-function fallback lands in M1; it is the original function.
 
+**`**`.** Python's result type depends on the values in two cases: an int to a negative power is a
+float, and a negative float to a fractional power is a complex. Those compile only when the code rules
+them out (a constant exponent, an integer-valued one, a nonnegative constant base); otherwise the
+function falls back, with a hint. numpy's rules have one type whatever the values, so `a[i] ** 0.5`
+always compiles. `parity=False` gives C's `pow`, and `x * x` for small powers. `x ** 2` calls libm's
+`pow` as CPython does, which is why `v ** 2` over an array gains about 18x where `v * v` gains far more.
+
 **M3 progress.** The disk cache is cimo's: scramjit's C is deterministic, so a second process finds
 it (Gray-Scott first call 0.53 s, then 0.06 s, mostly preprocessing the prelude); no second cache
 needed. Preflight is built (`scramjit/_preflight.py`): static analysis sets each failing statement

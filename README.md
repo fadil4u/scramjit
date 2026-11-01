@@ -104,9 +104,13 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 |:---|:---|
 | `for`, `while`, `break`, `continue`, `if`, conditional expressions | Slices and views: `a[1:]` |
 | `range`, `enumerate`, `zip`, `map`, `filter`, comprehensions | numpy array expressions: `a * 2`, `a.sum()` |
-| `sum(gen, 0.0)`, `min`, `max`, `abs`, tuple unpacking | Calls to other Python functions |
-| Numbers and n-D numpy arrays, including dtypes like `uint8` | Dicts, strings, objects, `**` |
+| `sum(gen, 0.0)`, `min`, `max`, `abs`, tuple unpacking, `**` where the result type is known | Calls to other Python functions |
+| Numbers and n-D numpy arrays, including dtypes like `uint8` | Dicts, strings, objects |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | Lists that grow with `append` |
+
+`x ** 2` and `a[i] ** 0.5` compile. A Python float to a fractional power (`x ** 0.5`) and an int to a
+variable power (`n ** k`) run as Python, because in Python their result type depends on the values:
+complex for a negative base, float for a negative exponent.
 
 A function that can't be compiled runs as Python, with a `FallbackWarning` giving the reason:
 
@@ -155,7 +159,8 @@ src/sim.py
 2 compiled, 1 runs as Python
 ```
 
-`scramjit preflight --run app.py` (or `--run -m pytest`) reports what happened with the real types:
+It also lists undecorated functions with a loop that would compile if decorated, assuming their
+arguments are numbers or arrays. `scramjit preflight --run app.py` (or `--run -m pytest`) reports what happened with the real types:
 calls, compile time, and time in native code and in Python. Both exit non-zero if a function isn't
 compiled, so they work as a CI check, and `--json` gives the report to tools. `scramjit preflight
 FILE:FUNCTION` or `f.preflight()` annotates one function line by line, including which bounds checks

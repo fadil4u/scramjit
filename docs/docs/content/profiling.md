@@ -39,6 +39,16 @@ src/sim.py
 
 A line that only fails because an earlier one did isn't listed. `-q` shows only what doesn't compile, and `--json` prints the report for tools.
 
+Undecorated functions with a loop that would compile are listed too, as suggestions that don't affect the exit status:
+
+```text
+src/stats.py
+  → smooth      would compile with @scram (line 10)
+  → count_hits  would compile with @scram (line 21)
+```
+
+Static analysis assumes their arguments are numbers or arrays, so check with `--run` once decorated. Methods, nested functions, tests and functions with other decorators aren't suggested. `--no-suggest` turns this off.
+
 Annotations are used. Unannotated arguments are assumed to be numbers or arrays, so a fallback caused by the types of an actual call (a `str`, say) needs `--run`.
 
 ## Preflight while it runs

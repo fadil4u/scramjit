@@ -156,6 +156,96 @@ def test_a_syntax_error_is_reported_not_skipped(tmp_path):
     assert r.returncode == 1 and 'bad.py:1' in r.stdout
 
 
+CANDIDATES = """
+import math
+
+
+def smooth(a, out):
+    for i in range(1, len(a)):
+        out[i] = 0.5 * (a[i] + a[i - 1])
+
+
+def count_hits(a, limit: float):
+    return sum(1 for v in a if v > limit)
+
+
+def add(x: float, y: float):
+    return x + y                                # no loop: nothing to gain
+
+
+def uses_dict(a):
+    seen = {}
+    for v in a:
+        seen[v] = 1
+    return seen
+
+
+def fetch(path: str):
+    for line in open(path):
+        print(line)
+
+
+def no_arguments():
+    for i in range(3):
+        pass
+
+
+def test_something(a):
+    for v in a:
+        pass
+
+
+class Thing:
+    def method(self, a):
+        s = 0.0
+        for v in a:
+            s += v
+        return s
+
+
+def outer(a):
+    def inner(b):
+        return sum(v for v in b)
+    return inner(a)
+
+
+@staticmethod
+def wrapped(a):
+    for v in a:
+        pass
+
+
+def uses_global(a):
+    return len(a) + UNKNOWN
+"""
+
+
+def test_suggestions(tmp_path):
+    (tmp_path / 'lib.py').write_text(CANDIDATES)
+    r = run(['-m', 'scramjit', 'preflight', 'lib.py'], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr       # advice, not a failure
+    assert 'smooth' in r.stdout and 'count_hits' in r.stdout and 'would compile' in r.stdout
+    for name in ('add', 'uses_dict', 'fetch', 'no_arguments', 'test_something', 'method', 'inner', 'outer', 'wrapped', 'uses_global'):
+        assert name not in r.stdout, name
+    assert '2 more would compile' in r.stdout and 'numbers or arrays' in r.stdout
+
+
+def test_suggestions_can_be_turned_off(tmp_path):
+    (tmp_path / 'lib.py').write_text(CANDIDATES)
+    assert 'smooth' not in run(['-m', 'scramjit', 'preflight', '--no-suggest', 'lib.py'], tmp_path).stdout
+    assert 'smooth' not in run(['-m', 'scramjit', 'preflight', '-q', 'lib.py'], tmp_path).stdout
+    d = json.loads(run(['-m', 'scramjit', 'preflight', '--json', 'lib.py'], tmp_path).stdout)
+    assert d['would_compile'] == 2 and d['files'][0]['would_compile'][0]['name'] == 'smooth'
+
+
+def test_a_suggestion_really_compiles(tmp_path):
+    """Decorate what preflight suggests, and it compiles and matches."""
+    (tmp_path / 'lib.py').write_text('from scramjit import scram\n' + CANDIDATES.replace('def smooth', '@scram(fallback=False)\ndef smooth'))
+    (tmp_path / 'a.py').write_text('import numpy as np\nimport lib\na = np.arange(4.0); o = np.zeros(4)\nlib.smooth(a, o)\nprint(o.tolist())\n')
+    r = run(['a.py'], tmp_path)
+    assert r.stdout.strip() == '[0.0, 0.5, 1.5, 2.5]', r.stderr
+
+
 def test_quiet(proj):
     out = run(['-m', 'scramjit', 'preflight', '-q', 'sim.py'], proj).stdout
     assert '✗ summarize' in out and '✓' not in out

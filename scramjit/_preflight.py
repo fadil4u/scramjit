@@ -23,7 +23,8 @@ HINTS = [
     (r'^dict', 'if the keys are small integers, use an array indexed by key; otherwise do this outside the compiled function'),
     (r'^sets|^set comp', 'if the values are small integers, use a boolean array indexed by value'),
     (r'^f-strings|calls (str|print|repr|format)\(\)', 'keep text and printing out of the function: return numbers and format them after the call'),
-    (r'\*\* operator', 'write x * x, or math.pow(x, y) for floats'),
+    (r'fractional exponent', 'use `math.pow(x, y)`, which raises instead of giving a complex, `math.sqrt(x)` for a square root, or `@scram(parity=False)` for NaN'),
+    (r'variable exponent', 'write `1 << n` for powers of two, use a float base, or a constant exponent'),
     (r'slices|views', 'loop over the indices you want: for i in range(lo, hi): a[i]'),
     (r'^calls [\w.]*\.\w+\(\)', 'write it as a loop; methods and numpy calls aren\'t compiled'),
     (r'^calls \w+\(\)', 'put its body here, or decorate and call it from Python; a compiled function can\'t call Python functions'),
@@ -163,7 +164,7 @@ def _bound_names(stmt):
     return {n.id for n in ast.walk(stmt) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
 
 
-def analyze(fdef, sig, globals_, filename, offset, opts):
+def analyze(fdef, sig, globals_, filename, offset, opts, first_only=False):
     """Compile as far as possible. A failing statement is set aside and compiling retried, so every
     line that keeps the function in Python is found, not only the first. A failure that only reads a
     name a set-aside statement would have bound follows from that one, so it isn't reported."""
@@ -183,7 +184,7 @@ def analyze(fdef, sig, globals_, filename, offset, opts):
                 same = getattr(node, 'end_lineno', None) == line
                 width = (node.end_col_offset - col) if col is not None and same else 1
                 problems.append(Problem((line or 1) + offset, col, width, u.reason))
-            where = _innermost_stmt(tree, line) if line and line > tree.lineno else None
+            where = _innermost_stmt(tree, line) if line and line > tree.lineno and not first_only else None
             if where is None:
                 if not problems:
                     problems.append(Problem((line or 1) + offset, None, 1, u.reason))
@@ -194,7 +195,7 @@ def analyze(fdef, sig, globals_, filename, offset, opts):
     return Analysis(sig, None, problems)
 
 
-def best_analysis(fdef, globals_, filename, offset, opts):
+def best_analysis(fdef, globals_, filename, offset, opts, first_only=False):
     """Analyze under the assumed signature. An unannotated array whose values are used as indices
     isn't float64, so before calling a function uncompilable, try its arrays as int64 too."""
     sig = assumed_signature(fdef)
@@ -205,7 +206,7 @@ def best_analysis(fdef, globals_, filename, offset, opts):
         for bit, i in enumerate(arrays[:4]):
             if mask >> bit & 1:
                 trial[i] = T.array(T.NP_INT64, True, sig[i].ndim)
-        a = analyze(fdef, trial, globals_, filename, offset, opts)
+        a = analyze(fdef, trial, globals_, filename, offset, opts, first_only)
         if a.compiler is not None:
             return a
         first = first or a
@@ -213,10 +214,23 @@ def best_analysis(fdef, globals_, filename, offset, opts):
 
 
 class FileReport:
-    __slots__ = ('path', 'source', 'functions', 'error')
+    __slots__ = ('path', 'source', 'functions', 'error', 'candidates')
 
-    def __init__(self, path, source, functions, error=None):
+    def __init__(self, path, source, functions, error=None, candidates=()):
         self.path, self.source, self.functions, self.error = path, source, functions, error
+        self.candidates = candidates
+
+
+def _is_candidate(fdef, path):
+    """Worth suggesting @scram for: an undecorated module-level function with a loop to speed up, and
+    not a test."""
+    base = os.path.basename(path)
+    if fdef.decorator_list or fdef.name.startswith('test_') or base.startswith('test_') or base == 'conftest.py':
+        return False
+    a = fdef.args
+    if not (a.posonlyargs or a.args):
+        return False                                    # nothing comes in, so nothing to specialize on
+    return any(isinstance(n, (ast.For, ast.While, ast.comprehension)) for n in ast.walk(fdef))
 
 
 def read_file(path):
@@ -224,18 +238,26 @@ def read_file(path):
         return f.read()
 
 
-def scan_file(path):
-    """A FileReport for every @scram function in a file, without importing it; None if it has none."""
+def scan_file(path, suggest=True):
+    """A FileReport for every @scram function in a file, and the undecorated functions that would
+    compile, without importing it; None if it has neither."""
     source = read_file(path)
     try:
         tree = ast.parse(source, path)
     except SyntaxError as e:
         return FileReport(path, source, [], e)
     funcs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and any(is_scram(d) for d in n.decorator_list)]
-    if not funcs:
-        return None
     g = module_globals(tree)
-    return FileReport(path, source, [(f, best_analysis(f, g, path, 0, options(f))) for f in funcs])
+    candidates = []
+    if suggest:
+        for f in tree.body:
+            if isinstance(f, ast.FunctionDef) and _is_candidate(f, path):
+                a = best_analysis(f, g, path, 0, options(f), first_only=True)
+                if a.compiler is not None:
+                    candidates.append((f, a))
+    if not funcs and not candidates:
+        return None
+    return FileReport(path, source, [(f, best_analysis(f, g, path, 0, options(f))) for f in funcs], candidates=candidates)
 
 
 def python_files(path):

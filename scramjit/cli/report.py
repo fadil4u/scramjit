@@ -50,11 +50,12 @@ def static(t, reports, quiet=False):
         failing = [f for f in r.functions if f[1].compiler is None]
         good += len(r.functions) - len(failing)
         bad += len(failing)
-        if quiet and not failing:
+        shown = [] if quiet else r.candidates
+        if not failing and not shown and quiet:
             continue
         t.write(t.style(r.path, 'path'))
         lines = r.source.splitlines()
-        width = max(len(f.name) for f, _ in r.functions)
+        width = max([len(f.name) for f, _ in r.functions] + [len(f.name) for f, _ in shown])
         for f, a in r.functions:
             if a.compiler is not None:
                 if not quiet:
@@ -63,16 +64,24 @@ def static(t, reports, quiet=False):
             t.write(f'  {_mark(t, False)} {t.style(f"{f.name:<{width}}", "bold")}  runs as Python')
             for p in a.problems:
                 _excerpt(t, lines, p, 6)
+        for f, _ in shown:
+            arrow = t.style(t.symbol('arrow'), 'cyan')
+            t.write(f'  {arrow} {f.name:<{width}}  {t.style("would compile with", "muted")} {t.style("@scram", "code")} '
+                    f'{t.style(f"(line {f.lineno})", "muted")}')
     return good, bad, broken
 
 
-def summary(t, good, bad, broken=0):
+def summary(t, good, bad, broken=0, candidates=0):
     parts = [t.style(f'{good} compiled', 'ok') if good else '0 compiled']
     if bad:
         parts.append(t.style(f'{bad} {"runs" if bad == 1 else "run"} as Python', 'error'))
     if broken:
         parts.append(t.style(f'{broken} {"file" if broken == 1 else "files"} not readable', 'error'))
-    t.write(f', '.join(parts))
+    if candidates:
+        parts.append(t.style(f'{candidates} more would compile', 'cyan'))
+    t.write(', '.join(parts))
+    if candidates:
+        t.write(t.style('Suggestions assume the arguments are numbers or arrays; check with --run once decorated.', 'muted'))
 
 
 def static_json(stream, reports):
@@ -88,8 +97,11 @@ def static_json(stream, reports):
             bad += a.compiler is None
             fs.append({'name': f.name, 'line': f.lineno, 'state': a.state, 'signature': [x.name for x in a.signature],
                        'problems': [p.as_dict() for p in a.problems]})
-        files.append({'path': r.path, 'functions': fs})
-    json.dump({'files': files, 'compiled': good, 'python': bad}, stream, indent=2)
+        files.append({'path': r.path, 'functions': fs,
+                      'would_compile': [{'name': f.name, 'line': f.lineno, 'signature': [x.name for x in a.signature]}
+                                        for f, a in r.candidates]})
+    json.dump({'files': files, 'compiled': good, 'python': bad,
+               'would_compile': sum(len(r.candidates) for r in reports)}, stream, indent=2)
     stream.write('\n')
 
 

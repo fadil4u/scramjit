@@ -31,7 +31,7 @@ BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'round', 'sum',
 MATH_CONSTANTS = {'pi': math.pi, 'e': math.e, 'tau': math.tau, 'inf': math.inf, 'nan': math.nan}
 INT64_MIN, INT64_MAX = -(1 << 63), (1 << 63) - 1
 ARITH = {ast.Add: 'Add', ast.Sub: 'Sub', ast.Mult: 'Mult', ast.Div: 'Div', ast.FloorDiv: 'FloorDiv',
-         ast.Mod: 'Mod', ast.BitAnd: 'BitAnd', ast.BitOr: 'BitOr', ast.BitXor: 'BitXor'}
+         ast.Mod: 'Mod', ast.BitAnd: 'BitAnd', ast.BitOr: 'BitOr', ast.BitXor: 'BitXor', ast.Pow: 'Pow'}
 CMP = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=', ast.Eq: '==', ast.NotEq: '!='}
 SWAP = {'<': '>', '<=': '>=', '>': '<', '>=': '<=', '==': '==', '!=': '!='}
 
@@ -71,6 +71,17 @@ def c_int(x):
     return f'{x}LL'
 
 
+def const_number(node):
+    """The value of a number literal, signed or not, else None."""
+    sign = 1
+    while isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        sign = -sign if isinstance(node.op, ast.USub) else sign
+        node = node.operand
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return sign * node.value
+    return None
+
+
 def flag_of(t):
     """The static flag of a type, or None if it is only known at run time."""
     return '1' if t.np is True else '0' if t.np is False else None
@@ -92,7 +103,7 @@ UNSUPPORTED_EXPRESSIONS = {'Dict': "dicts aren't compiled", 'DictComp': "dict co
                            'Slice': "slices aren't compiled", 'Starred': "argument unpacking isn't compiled",
                            'Await': "await isn't compiled", 'Yield': "yield isn't compiled", 'YieldFrom': "yield from isn't compiled",
                            'NamedExpr': "the walrus operator isn't compiled"}
-OPERATOR_NAMES = {'Pow': "the ** operator isn't compiled yet", 'MatMult': "the @ operator isn't compiled"}
+OPERATOR_NAMES = {'MatMult': "the @ operator isn't compiled"}
 
 
 class Lazy(ast.NodeTransformer):
@@ -157,6 +168,8 @@ class Lazy(ast.NodeTransformer):
 
     def visit_Call(self, e):
         self.generic_visit(e)
+        if self.builtin(e, 'pow') and len(e.args) == 2:     # pow(a, b) is a ** b
+            return ast.copy_location(ast.BinOp(e.args[0], ast.Pow(), e.args[1]), e)
         p = self.parts(e)
         if p is None:
             return e
@@ -492,6 +505,8 @@ class Compiler:
     def binop_type(self, a, b, op, node):
         if not (a.is_number and b.is_number):
             self.fail(node, f'{op} on {a.name} and {b.name}')
+        if op == 'Pow':
+            return self.pow_type(a, b, node)
         if op in ('BitAnd', 'BitOr', 'BitXor'):
             if a.kind == 'float' or b.kind == 'float':
                 self.fail(node, 'a bitwise operator on a float')
@@ -500,6 +515,32 @@ class Compiler:
         r = T.arith_result(a, b, op)
         if r is None:
             self.fail(node, 'arithmetic on numpy bools')
+        return r
+
+    def pow_type(self, a, b, node):
+        """a ** b. numpy's rules give one type whatever the values; Python's give a float for an int
+        to a negative power, and a complex for a negative float to a fractional power, so those compile
+        only when the code rules them out."""
+        r = T.arith_result(a, b, 'Pow')
+        if r is None:
+            self.fail(node, 'arithmetic on numpy bools')
+        if r.np is True:
+            return r
+        exp = const_number(node.right if isinstance(node, ast.BinOp) else node.value)
+        if r.kind == 'int':
+            if exp is None:
+                self.fail(node, 'int ** int with a variable exponent: a negative one gives a float, so the '
+                          'type depends on the data')
+            if exp >= 0:
+                return r
+            if r.np:
+                self.fail(node, 'int ** a negative int on a value that may be a numpy int')
+            return T.FLOAT
+        base = const_number(node.left) if isinstance(node, ast.BinOp) else None
+        integral = b.kind != 'float' or (exp is not None and (exp != exp or abs(exp) == math.inf or exp == math.floor(exp)))
+        if self.exact and not integral and not (base is not None and base >= 0):
+            self.fail(node, 'float ** a fractional exponent: a negative base gives a complex, so the type '
+                      'depends on the data')
         return r
 
     def join_all(self, node, ts, what):
@@ -1698,6 +1739,52 @@ class Compiler:
             return self.call(e)
         raise AssertionError(e)
 
+    def power(self, a, b, fa, fb, rt, npf, line, right):
+        """The value of a ** b. npf: 1 when numpy's rules apply."""
+        out = self.temp()
+        self.emit(f'{rt.ctype} {out} = 0;')
+        self.uses_libm = self.uses_libm or self.exact
+        table = f'SJ_LIBM2({LIBM.index("pow")})'
+
+        def numpy():
+            if rt.kind == 'int':
+                self.helpers.add('ipow')
+                self.emit(f'if ((int64_t){b} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 15, 0);')
+                self.emit(f'{out} = sj_ipow((int64_t){a}, (int64_t){b});')
+            elif self.exact:
+                self.emit(f'{out} = {table}({fa}, {fb});')
+            else:
+                fast()
+
+        def fast():                                    # parity=False: x * x for small powers, else C's pow
+            exp = const_number(right)
+            self.emit(f'{out} = ' + (f'{fa} * {fa};' if exp == 2 else f'{fa} * {fa} * {fa};' if exp == 3 else f'pow({fa}, {fb});'))
+
+        def python():
+            if rt.kind == 'int':
+                self.helpers.add('ipow')
+                self.emit(f'{out} = sj_ipow((int64_t){a}, (int64_t){b});')
+            elif not self.exact:
+                fast()
+            else:
+                self.helpers.add('floatpow')
+                err = self.temp()
+                self.emit(f'int {err} = sj_float_pow({table}, {fa}, {fb}, &{out});')
+                self.emit(f'if ({err} == 1) SJ_FAIL({ZERO_DIVISION}, {line}, 6, 0);')
+                self.emit(f'if ({err} == 2) SJ_FAIL({OVERFLOW_ERROR}, {line}, 4, 0);')
+        if npf == '1':
+            numpy()
+        elif npf == '0':
+            python()
+        else:
+            self.open(f'if ({npf})')
+            numpy()
+            self.close('} else {')
+            self.depth += 1
+            python()
+            self.close()
+        return out
+
     def arith(self, op, left, at, right, node):
         """left <op> right, where left (already emitted, of type at) is the left operand."""
         bt = self.typeof(right)
@@ -1712,6 +1799,8 @@ class Compiler:
             return f'((int64_t){a} {sym} (int64_t){b})', npf
         isfloat = rt.kind == 'float'
         fa, fb = self.coerce(a, at, T.FLOAT), self.coerce(b, bt, T.FLOAT)
+        if op == 'Pow':
+            return self.power(a, b, fa, fb, rt, npf, line, right), npf
         if op in ('Add', 'Sub', 'Mult'):
             if op == 'Mult' and self.exact and at.kind == 'float' and bt.kind == 'int' and npf != '1':
                 # CPython computes float * int(-1) as a negation, so a NaN's sign bit flips

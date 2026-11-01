@@ -6,6 +6,9 @@ at least 5 slots: [0] the return value's bits, [1] the Python line of a raised e
 Tuples return through slots 4 onward.
 """
 
+import errno
+import os
+
 INDEX_ERROR, ZERO_DIVISION, VALUE_ERROR, OVERFLOW_ERROR, LIST_INDEX_ERROR, MEMORY_ERROR, INT_BOUNDS_ERROR = \
     1, 2, 3, 4, 5, 6, 7
 NARROW_INT_DTYPES = ['int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
@@ -19,6 +22,7 @@ ZERO_DIVISION_MESSAGES = [
     'integer modulo by zero',                 # int % int
     'float floor division by zero',           # // with a float
     'float modulo by zero',                   # % with a float
+    None,                                     # 0.0 ** negative: this Python's own wording, below
 ]
 VALUE_ERROR_MESSAGES = [
     'cannot convert float NaN to integer',
@@ -36,12 +40,14 @@ VALUE_ERROR_MESSAGES = [
     'steps must be a non-negative integer',
     'invalid operation in fma',
     '-inf + inf in fsum',
+    'Integers to negative integer powers are not allowed.',     # numpy
 ]
 OVERFLOW_ERROR_MESSAGES = [
     'cannot convert float infinity to integer',
     'math range error',
     'overflow in fma',
     'intermediate overflow in fsum',
+    None,                                     # float ** overflowing: OverflowError(errno.ERANGE, ...)
 ]
 
 # Math functions CPython takes from the platform's C library. Compiled code calls the same
@@ -50,6 +56,12 @@ OVERFLOW_ERROR_MESSAGES = [
 LIBM = ['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'asinh', 'acosh', 'atanh', 'sinh', 'cosh',
         'tanh', 'exp', 'exp2', 'expm1', 'log', 'log2', 'log10', 'log1p', 'cbrt', 'erf', 'erfc',
         'atan2', 'pow', 'ldexp', 'nextafter']
+
+
+try:
+    0.0 ** -1.0
+except ZeroDivisionError as _e:
+    ZERO_DIVISION_MESSAGES[6] = str(_e)
 
 
 def exception(status, io):
@@ -61,6 +73,8 @@ def exception(status, io):
     if status == VALUE_ERROR:
         return ValueError(VALUE_ERROR_MESSAGES[io[2]])
     if status == OVERFLOW_ERROR:
+        if OVERFLOW_ERROR_MESSAGES[io[2]] is None:      # float_pow: the C library's errno, as CPython raises it
+            return OverflowError(errno.ERANGE, os.strerror(errno.ERANGE))
         return OverflowError(OVERFLOW_ERROR_MESSAGES[io[2]])
     if status == LIST_INDEX_ERROR:
         return IndexError(LIST_INDEX_MESSAGES[io[2]])

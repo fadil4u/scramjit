@@ -31,7 +31,9 @@ def build_tree():
     p = root.command(
         'preflight', 'Show what compiles, and which lines stop the rest', func=cmd_preflight, aliases=('check',),
         description='Reads every `@scram` function under the paths without importing or running anything. '
-                    'Annotations are used; unannotated arguments are assumed to be numbers or arrays.\n\n'
+                    'Annotations are used; unannotated arguments are assumed to be numbers or arrays. Also lists '
+                    'undecorated functions with a loop that would compile if decorated; these don\'t affect the '
+                    'exit status.\n\n'
                     'With `--run`, runs a program and reports what happened with the real argument types: '
                     'the fallbacks static analysis can\'t see, and where the time went.\n\n'
                     'Exits with 1 if any function runs as Python, so it works as a CI check.')
@@ -40,6 +42,7 @@ def build_tree():
     p.opt('--run', metavar='program', help='Run this script, or `-m module`, with the arguments after it. '
                                            'The report goes to stderr; the program keeps stdout')
     p.opt('-q', '--quiet', flag=True, help='Show only what doesn\'t compile')
+    p.opt('--no-suggest', flag=True, help='Don\'t list undecorated functions that would compile')
     p.opt('--json', flag=True, help='Print the report as JSON')
     p.opt('--allow-partial', flag=True, help='Accept partly compiled functions (none exist until loop lifting)')
     p.example('scramjit preflight src/')
@@ -180,7 +183,7 @@ def cmd_preflight(ctx):
         for k, f in enumerate(files):
             if sp and sp.live:
                 sp.update(f'Reading {f} ({k + 1}/{len(files)})')
-            r = P.scan_file(f)
+            r = P.scan_file(f, suggest=not v.get('no_suggest'))
             if r is not None:
                 reports.append(r)
     if v.get('json'):
@@ -194,7 +197,7 @@ def cmd_preflight(ctx):
     good, bad, broken = report.static(out, reports, v.get('quiet'))
     if not (v.get('quiet') and not bad and not broken):
         out.write('')
-    report.summary(out, good, bad, broken)
+    report.summary(out, good, bad, broken, 0 if v.get('quiet') else sum(len(r.candidates) for r in reports))
     return max(status, 1 if bad or broken else 0)
 
 

@@ -18,6 +18,8 @@ ZERO_DIVISION_MESSAGES = [
 VALUE_ERROR_MESSAGES = [
     'cannot convert float NaN to integer',
     'range() arg 3 must not be zero',
+    'min() iterable argument is empty',
+    'max() iterable argument is empty',
 ]
 OVERFLOW_ERROR_MESSAGES = [
     'cannot convert float infinity to integer',

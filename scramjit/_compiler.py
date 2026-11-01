@@ -22,7 +22,7 @@ from . import _types as T
 from ._errors import Unsupported
 from ._runtime import INDEX_ERROR, OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION
 
-BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float')
+BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'sum', 'any', 'all')
 MATH_CONSTANTS = {'pi': math.pi, 'e': math.e, 'tau': math.tau, 'inf': math.inf, 'nan': math.nan}
 INT64_MIN, INT64_MAX = -(1 << 63), (1 << 63) - 1
 ARITH = {ast.Add: 'Add', ast.Sub: 'Sub', ast.Mult: 'Mult', ast.Div: 'Div', ast.FloorDiv: 'FloorDiv',
@@ -79,6 +79,7 @@ class Compiler:
         self.lines = []
         self.depth = 1
         self.ntemp = 0
+        self.cnames = {}       # comprehension variable -> (C name, flag), shadowing the function's
         self.facts = {}        # loop variable -> (lowest value, array whose len() bounds it, slack)
 
     # ---- helpers
@@ -347,14 +348,24 @@ class Compiler:
             return at.elem
         if isinstance(e, ast.Call):
             return self.call_type(e)
+        if isinstance(e, (ast.GeneratorExp, ast.ListComp)):
+            self.fail(e, 'a generator or list comprehension outside sum(), min(), max(), any() or all()')
         self.fail(e, f'the {type(e).__name__} expression')
 
+    def is_reduction(self, e):
+        name = e.func.id
+        return name in ('sum', 'any', 'all') or (name in ('min', 'max') and len(e.args) == 1)
+
     def call_type(self, e):
-        if not isinstance(e.func, ast.Name) or e.keywords:
+        if not isinstance(e.func, ast.Name):
             self.fail(e, 'this call')
         name = e.func.id
         if name == 'range' or not any(self.is_builtin(name, b) for b in BUILTINS):
             self.fail(e, f'calls {name}()')
+        if self.is_reduction(e):
+            return self.reduction_type(e)
+        if e.keywords:
+            self.fail(e, f'{name}() with keyword arguments')
         args = [self.typeof(a) for a in e.args]
         if name == 'len':
             if len(args) != 1 or args[0].kind != 'array' or not isinstance(e.args[0], ast.Name):
@@ -373,6 +384,86 @@ class Compiler:
         if len(args) != 1:
             self.fail(e, f'{name}() with {len(args)} arguments')
         return T.INT if name == 'int' else T.FLOAT
+
+    # ---- reductions: sum, min, max, any, all over an iterable or a comprehension, fused into
+    # one loop; each follows CPython's own algorithm (bltinmodule.c)
+    def reduction_type(self, e):
+        name = e.func.id
+        kws = {k.arg: k.value for k in e.keywords}
+        allowed = {'sum': {'start'}, 'min': {'default'}, 'max': {'default'}}.get(name, set())
+        npos = len(e.args)
+        if set(kws) - allowed or not (1 <= npos <= (2 if name == 'sum' else 1)) \
+                or (npos == 2 and 'start' in kws):
+            self.fail(e, f'{name}() with these arguments')
+        el = self.source_elem_type(e.args[0])
+        if name in ('any', 'all'):
+            return T.BOOL
+        if name in ('min', 'max'):
+            if 'default' in kws:
+                return self.join_all(e, [el, self.typeof(kws['default'])], f'{name}() with a default')
+            return el
+        start = e.args[1] if npos == 2 else kws.get('start')
+        st = self.typeof(start) if start is not None else T.INT
+        if not st.is_number or st.kind == 'bool' or st.np == 'dyn':
+            self.fail(e, 'sum() with this start')
+        if el.np and el.kind == 'bool':
+            self.fail(e, 'sum() of numpy bools')
+        if st.np is True:
+            return T.arith_result(st, el, 'Add')
+        if st.kind == 'int':
+            if el.kind == 'float':
+                self.fail(e, 'sum() of floats returns the int 0 when empty, so its type depends on the '
+                          'data; write sum(..., 0.0)')
+            return T.INT if el.np is False else T.INT_DYN
+        return T.FLOAT if el.np is False else T.FLOAT_DYN
+
+    def source_elem_type(self, src):
+        if isinstance(src, (ast.GeneratorExp, ast.ListComp)):
+            return self.comp_types(src)
+        t = self.elem_struct(self.iterable(src))
+        if isinstance(t, list):
+            self.fail(src, 'a reduction over tuples')
+        return t
+
+    def comp_types(self, e):
+        saved = {}
+        try:
+            for g in e.generators:
+                if g.is_async:
+                    self.fail(e, 'async comprehensions')
+                self.comp_bind_types(g.target, self.elem_struct(self.iterable(g.iter)), saved, e)
+                for c in g.ifs:
+                    self.check_test(c)
+            t = self.typeof(e.elt)
+            if not t.is_number:
+                self.fail(e.elt, f'elements of type {t.name}')
+            return t
+        finally:
+            self.restore(saved)
+
+    def comp_bind_types(self, target, struct, saved, e):
+        if isinstance(target, ast.Name) and not isinstance(struct, list):
+            if target.id not in saved:
+                saved[target.id] = self.env.get(target.id)
+            self.env[target.id] = struct
+        elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(struct, list) \
+                and len(target.elts) == len(struct):
+            for t, x in zip(target.elts, struct):
+                self.comp_bind_types(t, x, saved, e)
+        else:
+            self.fail(e, 'a comprehension target that does not match what the loop yields')
+
+    def restore(self, saved, saved_c=None):
+        for k, v in saved.items():
+            if v is None:
+                self.env.pop(k, None)
+            else:
+                self.env[k] = v
+        for k, v in (saved_c or {}).items():
+            if v is None:
+                self.cnames.pop(k, None)
+            else:
+                self.cnames[k] = v
 
     # ---- C emission
     def emit(self, text):
@@ -753,6 +844,8 @@ class Compiler:
                 return ('1' if v else '0'), '0'
             return (c_int(v) if isinstance(v, int) else c_float(v)), '0'
         if isinstance(e, ast.Name):
+            if e.id in self.cnames:
+                return self.cnames[e.id]
             t = self.env[e.id]
             return f'v_{e.id}', (f'v_{e.id}__np' if t.np == 'dyn' else flag_of(t))
         if isinstance(e, ast.Attribute):
@@ -904,6 +997,8 @@ class Compiler:
     def call(self, e):
         name = e.func.id
         line = self.line(e)
+        if self.is_reduction(e):
+            return self.reduction(e)
         if name == 'len':
             return f'v_{e.args[0].id}__n', '0'
         ts = [self.typeof(a) for a in e.args]
@@ -933,6 +1028,136 @@ class Compiler:
         return f'sj_float_to_int({v})', '0'
 
 
+    def source_loops(self, src, after_first, item):
+        """Emit the loops over a reduction's iterable. after_first() runs once the first iterable is
+        evaluated (Python evaluates a reduction's other arguments then); item((c, flag), type) per
+        element."""
+        if not isinstance(src, (ast.GeneratorExp, ast.ListComp)):
+            n, elem = self.iter_prep(self.iterable(src))
+            after_first()
+            k = self.temp()
+            self.open(f'for (uint64_t {k} = 0; {k} < {n}; {k}++)')
+            c, t, f = elem(k)
+            item((self.hold(c, t), f), t)
+            self.close()
+            return
+        saved, saved_c, opened = {}, {}, 0
+        try:
+            for i, g in enumerate(src.generators):
+                n, elem = self.iter_prep(self.iterable(g.iter))
+                if i == 0:
+                    after_first()
+                k = self.temp()
+                self.open(f'for (uint64_t {k} = 0; {k} < {n}; {k}++)')
+                opened += 1
+                self.comp_bind_values(g.target, elem(k), saved, saved_c)
+                for c in g.ifs:
+                    self.emit(f'if (!({self.truth(self.expr(c)[0], self.typeof(c))})) continue;')
+            item(self.expr(src.elt), self.typeof(src.elt))
+        finally:
+            for _ in range(opened):
+                self.close()
+            self.restore(saved, saved_c)
+
+    def comp_bind_values(self, target, v, saved, saved_c):
+        if isinstance(target, ast.Name):
+            c, t, f = v
+            cn = self.temp()
+            self.emit(f'{t.ctype} {cn} = {c};')
+            if target.id not in saved:
+                saved[target.id] = self.env.get(target.id)
+                saved_c[target.id] = self.cnames.get(target.id)
+            self.env[target.id] = t
+            self.cnames[target.id] = (cn, f)
+        else:
+            for t, x in zip(target.elts, v):
+                self.comp_bind_values(t, x, saved, saved_c)
+
+    def reduction(self, e):
+        name = e.func.id
+        line = self.line(e)
+        rt = self.typeof(e)
+        kws = {k.arg: k.value for k in e.keywords}
+        src = e.args[0]
+        el = self.source_elem_type(src)
+        if name in ('any', 'all'):
+            r = self.temp()
+            self.emit(f'int {r} = {0 if name == "any" else 1};')
+            short = not isinstance(src, ast.ListComp)   # a list is built in full first
+            label = f'{r}_done'
+
+            def item(v, t):
+                test = self.truth(v[0], t)
+                hit, val = (test, 1) if name == 'any' else (f'!({test})', 0)
+                self.emit(f'if ({hit}) {{ {r} = {val};{f" goto {label};" if short else ""} }}')
+            self.source_loops(src, lambda: None, item)
+            if short:
+                self.lines.append(f'{label}:;')
+            return r, '0'
+        if name in ('min', 'max'):
+            r, rf, got = self.temp(), self.temp(), self.temp()
+            self.emit(f'{rt.ctype} {r} = 0; int {rf} = 0, {got} = 0;')
+            default = {}
+
+            def after_first():
+                if 'default' in kws:
+                    c, f = self.expr(kws['default'])
+                    default['v'] = (self.hold(self.coerce(c, self.typeof(kws['default']), rt), rt), self.hold_flag(f))
+
+            def item(v, t):
+                x = self.hold(self.coerce(v[0], t, rt), rt)
+                self.emit(f'if (!{got} || {x} {"<" if name == "min" else ">"} {r}) {{ {r} = {x}; {rf} = {v[1]}; {got} = 1; }}')
+            self.source_loops(src, after_first, item)
+            if 'v' in default:
+                dv, df = default['v']
+                self.emit(f'if (!{got}) {{ {r} = {dv}; {rf} = {df}; }}')
+            else:
+                self.emit(f'if (!{got}) SJ_FAIL({VALUE_ERROR}, {line}, {2 if name == "min" else 3}, 0);')
+            return r, rf
+        # sum
+        start = e.args[1] if len(e.args) == 2 else kws.get('start')
+        st = self.typeof(start) if start is not None else T.INT
+        if rt.kind == 'int':
+            acc, rf = self.temp(), self.temp()
+            self.emit(f'int64_t {acc} = 0; int {rf} = 0;')
+
+            def after_first():
+                if start is not None:
+                    c, f = self.expr(start)
+                    self.emit(f'{acc} = (int64_t)({c}); {rf} = {f};')
+
+            def item(v, t):
+                self.emit(f'{acc} = sj_add({acc}, (int64_t){v[0]}); {rf} |= {v[1]};')
+            self.source_loops(src, after_first, item)
+            return acc, rf
+        f_, c_, gen = self.temp(), self.temp(), self.temp()
+        self.emit(f'double {f_} = 0.0, {c_} = 0.0; int {gen} = 0;')
+        generic = st.np is True                       # a numpy start: plain additions throughout
+
+        def after_first():
+            c, _ = self.expr(start)
+            self.emit(f'{f_} = (double)({c});{f" {gen} = 1;" if generic else ""}')
+
+        def item(v, t):
+            x = self.hold(self.coerce(v[0], t, T.FLOAT), T.FLOAT)
+            plain = f'{f_} = {f_} + {x};'
+            if t.kind == 'float':                     # CPython's Neumaier compensated summation
+                fast = (f'{{ double tt = {f_} + {x}; if (fabs({f_}) >= fabs({x})) {c_} += ({f_} - tt) + {x}; '
+                        f'else {c_} += ({x} - tt) + {f_}; {f_} = tt; }}')
+            else:                                     # a Python int: added, not compensated
+                fast = f'{f_} += {x};'
+            settle = f'if ({c_} != 0.0 && isfinite({c_})) {f_} += {c_};'
+            if v[1] == '0':
+                self.emit(f'if (!{gen}) {fast} else {plain}')
+            elif v[1] == '1':
+                self.emit(f'if (!{gen}) {{ {settle} {gen} = 1; }} {plain}')
+            else:
+                self.emit(f'if (!{gen}) {{ if (!{v[1]}) {fast} else {{ {settle} {plain} {gen} = 1; }} }} else {plain}')
+        self.source_loops(src, after_first, item)
+        self.emit(f'if (!{gen} && {c_} != 0.0 && isfinite({c_})) {f_} += {c_};')
+        return f_, ('1' if generic else gen if rt.np == 'dyn' else '0')
+
+
 def ends_with_return(stmts):
     if not stmts:
         return False
@@ -952,7 +1177,11 @@ ALL = None   # "every name": the set after a statement that never completes (ret
 
 
 def da_reads(c, node, assigned):
+    local = {n.id for comp in ast.walk(node) if isinstance(comp, (ast.GeneratorExp, ast.ListComp))
+             for g in comp.generators for n in ast.walk(g.target) if isinstance(n, ast.Name)}
     for n in ast.walk(node):
+        if isinstance(n, ast.Name) and n.id in local:
+            continue
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in c.env \
                 and assigned is not ALL and n.id not in assigned:
             c.fail(n, f'{n.id} may be read before it is assigned')

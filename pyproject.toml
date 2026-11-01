@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scramjit"
+version = "0.1.0.dev0"
+description = "Python at native speed: a JIT written in pure Python, compiling through cimo."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Fariz Rahman" }]
+requires-python = ">=3.9"
+dependencies = ["cimo"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Compilers",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "numpy"]
+
+[project.urls]
+Homepage = "https://farizrahman4u.github.io/scramjit/"
+Source = "https://github.com/farizrahman4u/scramjit"
+
+[tool.setuptools.packages.find]
+include = ["scramjit*"]

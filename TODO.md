@@ -27,18 +27,15 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 2. **Rest of M3:** run the M0 kernels in Pyodide as a test, not only through the site; preflight's
    per-loop report once cimo exposes one (cimo's `TODO.md`), and a `disk` label in the compile column,
    which needs cimo to say whether a compile hit its cache.
-3. **Ctrl-C during a compiled call:** it waits until the call returns (10.7 s after the signal in one
-   test), and a compiled infinite loop can only be killed. Check a flag at loop back edges, if that can
-   be made cheap. Measure first.
-4. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x` raise today** (see Gotchas). Rerunning
+3. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x` raise today** (see Gotchas). Rerunning
    in Python, for functions that write nothing, or resuming in Python alongside loop lifting would remove
    the difference.
-5. **SSA for variables that change type** (`x = 1` then `x = 0.5`): today they fall back.
-6. **Bounds-check hoisting beyond unit-step loops** over one variable (versioning covers
+4. **SSA for variables that change type** (`x = 1` then `x = 0.5`): today they fall back.
+5. **Bounds-check hoisting beyond unit-step loops** over one variable (versioning covers
    `for i in range(a, len(x))` with `arr[i + c]` today).
-7. **Store-to-load forwarding:** `y[i]` written then `y[i - 1]` read next iteration; keeping it in
+6. **Store-to-load forwarding:** `y[i]` written then `y[i - 1]` read next iteration; keeping it in
    a register gives `ema` 2.39 ns against 3.07 (cimo doesn't do it).
-8. **Call boundary cost:** about 1.4 µs with numbers (was 3.2) and 2.4 µs with an array (was 6.6), through
+7. **Call boundary cost:** about 1.4 µs with numbers (was 3.2) and 2.4 µs with an array (was 6.6), through
    a function generated per signature (`_make_plan`). For numbers: ctypes about 450 ns (the floor), cimo's
    `Kernel.__call__` about 450 (see cimo's `TODO.md`), scramjit about 500. In Pyodide about 13 µs, not yet
    broken down. Break-even is 30 to 50 loop iterations per call. Rejected: caching an array's address (saves

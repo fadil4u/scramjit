@@ -11,6 +11,7 @@ import os
 
 INDEX_ERROR, ZERO_DIVISION, VALUE_ERROR, OVERFLOW_ERROR, LIST_INDEX_ERROR, MEMORY_ERROR, INT_BOUNDS_ERROR = \
     1, 2, 3, 4, 5, 6, 7
+INTERRUPTED = 8      # the kernel saw Ctrl-C (see _interrupt.py)
 NARROW_INT_DTYPES = ['int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
 
 LIST_INDEX_MESSAGES = ['list index out of range', 'list assignment index out of range']
@@ -70,6 +71,10 @@ except ZeroDivisionError as _e:
 
 def exception(status, io):
     """The Python exception for a nonzero status and the sj_io slots."""
+    if status == INTERRUPTED:           # Python's handler has a signal pending: it raises at a loop back edge
+        for _ in range(1000):
+            pass
+        return KeyboardInterrupt()
     if status == INDEX_ERROR:
         return IndexError(f'index {io[2]} is out of bounds for axis {io[4]} with size {io[3]}')
     if status == ZERO_DIVISION:

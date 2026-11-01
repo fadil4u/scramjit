@@ -176,8 +176,8 @@ generated expressions. This covers floor division and modulo on negatives, `Zero
 `IndexError`, `math` domain errors and numpy's scalar rules.
 
 There are three exceptions: integers are 64-bit and wrap, and the two `**` cases above raise
-`ValueError`. Compiled calls also don't respond to Ctrl-C until they return, skip numpy's
-warnings and `errstate`, and are invisible to debuggers and coverage. See
+`ValueError`. Compiled calls also skip numpy's warnings and `errstate`, are invisible to debuggers and
+coverage, and cost about 1.4 µs each, so decorate the function with the loop, not a small helper. See
 [Gotchas](https://www.scramjit.dev/docs/?p=gotchas).
 
 | Option | Default | Effect |

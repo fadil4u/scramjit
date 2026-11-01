@@ -60,6 +60,7 @@ def scramjit_gcc(fn, args, tag):
     io = bytearray(64)
     iobuf = (ctypes.c_char * len(io)).from_buffer(io)
     libm = entry.libm
+    stop = ctypes.c_int(0)
 
     def conv(a, t):
         if t.kind == 'array':
@@ -72,6 +73,8 @@ def scramjit_gcc(fn, args, tag):
         cargs = [c for a, t in zip(args, entry.types) for c in conv(a, t)]
         if libm is not None:
             cargs.append(ctypes.c_char_p(libm))
+        if entry.stop:
+            cargs.append(ctypes.byref(stop))
         cargs.append(iobuf)
         return k(*cargs)
     return call

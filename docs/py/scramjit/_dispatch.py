@@ -17,6 +17,7 @@ import weakref
 from . import _types as T
 from ._compiler import Compiler
 from ._errors import CompileError, FallbackWarning, Unsupported
+from . import _interrupt
 from ._runtime import LIBM, PRELUDE, exception
 
 _cimo = None
@@ -130,10 +131,10 @@ PYTHON = _Python()
 
 
 class Compiled:
-    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas')
+    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop')
 
-    def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None):
-        self.checks, self.hoisted, self.gotchas = checks or {}, hoisted, gotchas or {}
+    def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None, stop=False):
+        self.checks, self.hoisted, self.gotchas, self.stop = checks or {}, hoisted, gotchas or {}, stop
         self.locals = locals_ or {}           # variable -> inferred type name
         self.kernel = kernel
         self.ret = ret
@@ -181,6 +182,9 @@ def _make_plan(f, entry, args):
         env['libm_keep'] = (entry.libm, pointer)        # alive as long as the plan
         env['libm'] = ctypes.cast(pointer, ctypes.c_void_p).value
         cargs.append('libm')
+    if entry.stop:
+        env.update(get_ident=threading.get_ident, FLAG=_interrupt.FLAG, NEVER=_interrupt.NEVER, interrupt=_interrupt)
+        cargs.append('(FLAG if get_ident() == interrupt._main else NEVER)')
     # an array's checks go one at a time, each read after the last passed, then its address and shape
     arrays = [i for i, t in enumerate(entry.types) if t.kind == 'array']
     src_guards = []
@@ -381,11 +385,13 @@ class Function:
             kernel = cimo.compile(PRELUDE + source, cache=self._use_disk, fma=not self._parity).sj_kernel   # Python never contracts
         except cimo.CompileError as e:
             raise Unsupported(None, f'internal error: cimo rejected the generated C ({e}); please report it')
+        if c.uses_stop:
+            _interrupt.ensure()
         if any(t.np for t in key) or c.ret.np:
             import numpy
             self._np = numpy
         return Compiled(kernel, c.ret, key, source, _libm_table() if c.uses_libm else None,
-                        {k: t.name for k, t in c.env.items()}, c.checks, c.hoisted_lines, c.gotchas)
+                        {k: t.name for k, t in c.env.items()}, c.checks, c.hoisted_lines, c.gotchas, c.uses_stop)
 
     def _run(self, entry, args):
         cargs = []
@@ -401,6 +407,8 @@ class Function:
                 cargs.append(x)
         if entry.libm is not None:
             cargs.append(entry.libm)
+        if entry.stop:
+            cargs.append(_interrupt.address())
         io = bytearray(40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0))
         status = entry.kernel(*cargs, io)
         if status:

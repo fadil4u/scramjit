@@ -18026,10 +18026,11 @@ VALUE_EXTERN = 1 << 4
 VALUE_THREAD = 1 << 5
 VALUE_QUOTE = 1 << 6
 class Value(object):
-    __slots__ = ('kind', 'id', 'name', 'i', 'f')
+    __slots__ = ('kind', 'id', 'name', 'i', 'f', 'qalign')
     def __init__(self, kind=VALUE_NONE):
         self.kind = kind
         self.id = 0
+        self.qalign = 1
         self.name = None
         self.i = 0
         self.f = 0.0
@@ -19227,6 +19228,7 @@ def emittype(t):
     emitname(t.value)
     if t is TG.targ.typevalist:
         w(" = align %d { %d }\\n" % (t.align, t.size))
+        t.value.qalign = t.align
         return
     out = []
     m = t.members
@@ -19252,16 +19254,21 @@ def emittype(t):
         sub = m.type
         while sub.kind == TYPEARRAY:
             sub = sub.base
-        qalign = max(qalign, sub.align)
-        if t.kind == TYPESTRUCT:
-            if m.offset > ((qoff + sub.align - 1) & -sub.align):
-                out.append("b %d, " % (m.offset - qoff))
+        al = sub.value.qalign if sub.value and sub.value.kind == VALUE_TYPE else sub.align
+        if t.kind == TYPESTRUCT and m.offset & (al - 1):
+            out.append("b %d" % (off - qoff))
             qoff = off
         else:
-            usize = max(usize, m.type.size)
-        out.append(_classstr(qbetype(sub).data, sub.value))
-        if m.type.size > sub.size:
-            out.append(" %d" % (m.type.size // sub.size))
+            qalign = max(qalign, al)
+            if t.kind == TYPESTRUCT:
+                if m.offset > ((qoff + al - 1) & -al):
+                    out.append("b %d, " % (m.offset - qoff))
+                qoff = off
+            else:
+                usize = max(usize, m.type.size)
+            out.append(_classstr(qbetype(sub).data, sub.value))
+            if m.type.size > sub.size:
+                out.append(" %d" % (m.type.size // sub.size))
         if t.kind == TYPESTRUCT:
             out.append(", ")
             while True:
@@ -19277,6 +19284,7 @@ def emittype(t):
     if t.size > ((end + qalign - 1) & -qalign):
         out.append("b %d, " % (t.size - end) if t.kind == TYPESTRUCT
                    else "{ b %d } " % t.size)
+    t.value.qalign = max(qalign, t.align)
     w(" = align %d { " % t.align if t.align > qalign else " = { ")
     w("".join(out))
     w("}\\n")
@@ -24563,10 +24571,10 @@ def optimize(fn):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "0deb0ee24997311f441e",
-"runtime-arm64": "e551bfe86a5e1c685f0e",
-"runtime-arm64_apple": "b5576692c099462224ee",
-"runtime-arm64_win": "d56068d5b2234ba79422"
+"compiler": "e077254c4fb8b07c5493",
+"runtime-arm64": "799488fbfb36617a1c2a",
+"runtime-arm64_apple": "40d3bdeb18a708eed941",
+"runtime-arm64_win": "c63f486d832f0e636875"
 }
 ''',
 'onefile.py': '''\

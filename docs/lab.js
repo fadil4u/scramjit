@@ -40,7 +40,7 @@
   function boot() {
     root.classList.add('loading');
     status('Starting…');
-    worker = new Worker('lab/worker.js?v=6');
+    worker = new Worker('lab/worker.js?v=7');
     worker.onmessage = e => {
       const m = e.data;
       if (m.type === 'status') status(m.msg);

@@ -24,7 +24,7 @@ from ._errors import Unsupported
 import sys
 
 from ._mathlib import snippets
-from ._runtime import (INDEX_ERROR, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
+from ._runtime import (INDEX_ERROR, INTERRUPTED, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
                        OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION)
 
 BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'round', 'sum', 'any', 'all')
@@ -249,6 +249,12 @@ class Compiler:
         self.gotchas = {}      # Python line -> a way this line can differ from Python
         self.hoisted_lines = set()   # Python lines whose checks live only in a versioned loop's slow copy
         self.slow_copy = 0     # inside that slow copy
+        self.polls = sys.platform != 'emscripten'       # no signals to wait for in Pyodide
+        self.uses_stop = False  # the kernel takes sj_stop, the Ctrl-C flag it checks (see open_counted)
+        self.counted = {}      # depth of an open counted loop -> what closing it must emit
+        self.loops = []        # for each open loop, the label its break jumps to, or None for a plain C break
+        self.labels = 0
+        self.short_range = False    # the next counted loop is a range with constant bounds, and short
         self.aliases = {}
         self.hoisted = {}      # ast.dump of a wraparound index -> its temporary, per loop iteration
         self.owned = []        # temporaries holding a list being built (freed on every exit)
@@ -946,8 +952,11 @@ class Compiler:
         self.emit('return sj_st;')
         if self.uses_libm:
             params.append('const uint64_t *sj_m')
+        if self.uses_stop:
+            params.append('volatile int *sj_stop')
         params.append('int64_t *sj_io')
-        return snippets(self.helpers) + '\n'.join(self.lines[:head] + [f'int sj_kernel({", ".join(params)}) {{']
+        start = ['    *sj_stop = 0;'] if self.uses_stop else []
+        return snippets(self.helpers) + '\n'.join(self.lines[:head] + [f'int sj_kernel({", ".join(params)}) {{'] + start
                          + self.lines[head:] + ['}', ''])
 
     def block(self, stmts):
@@ -960,9 +969,47 @@ class Compiler:
         self.emit(text + ' {')
         self.depth += 1
 
+    def poll(self):
+        self.uses_stop = True
+        return f'if (*sj_stop) SJ_FAIL({INTERRUPTED}, 0, 0, 0);'
+
+    def open_counted(self, ctype, var, start, stop):
+        """for (var = start; var < stop; var++) {. So that Ctrl-C can stop it, it runs in chunks with a
+        check between them: a check inside the hot loop costs far more (ema 3.08 to 5.16 ns), and a loop
+        that ends within its first chunk never reads the flag. A range known to be short needs neither,
+        and its setup would cost per entry (3x3 stencil loops: 28%)."""
+        short, self.short_range = self.short_range, False
+        if not self.polls or short:
+            self.open(f'for ({ctype} {var} = {start}; {var} < {stop}; {var}++)')
+            self.loops.append(None)
+            self.counted[self.depth] = None
+            return
+        end, lim = self.temp(), self.temp()
+        self.labels += 1
+        label = f'sj_end{self.labels}'
+        self.emit(f'{ctype} {var} = {start}, {end} = {stop};')
+        self.open('for (;;)')
+        self.emit(f'{ctype} {lim} = {end} > {var} && (uint64_t){end} - (uint64_t){var} > 65536 ? {var} + 65536 : {end};')
+        self.open(f'for (; {var} < {lim}; {var}++)')
+        self.loops.append([label, False])
+        self.counted[self.depth] = (var, end)
+
     def close(self, text='}'):
+        info = self.counted.pop(self.depth, 0)
         self.depth -= 1
         self.emit(text)
+        if info == 0:
+            return
+        loop = self.loops.pop()
+        if info is None:
+            return
+        var, end = info
+        self.emit(f'if ({var} >= {end}) break;')
+        self.emit(self.poll())
+        self.depth -= 1
+        self.emit('}')
+        if loop[1]:
+            self.lines.append(f'{loop[0]}:;')
 
     def assign(self, name, v, vt):
         t = self.env[name]
@@ -1023,9 +1070,13 @@ class Compiler:
             self.close()
         elif isinstance(s, ast.While):
             self.open('for (;;)')
+            self.loops.append(None)
+            if self.polls:
+                self.emit(self.poll())
             self.emit(f'if (!({self.truth(self.expr(s.test)[0], self.typeof(s.test))})) break;')
             for b in s.body:
                 self.stmt(b)
+            self.loops.pop()
             self.close()
         elif isinstance(s, ast.For):
             d = self.iterable(s.iter)
@@ -1057,7 +1108,12 @@ class Compiler:
                     self.emit(f'sj_io[2] = {v[1]};')
             self.emit('goto sj_done;')
         elif isinstance(s, ast.Break):
-            self.emit('break;')
+            loop = self.loops[-1]
+            if loop is None:
+                self.emit('break;')
+            else:                                       # out of the chunks as well
+                loop[1] = True
+                self.emit(f'goto {loop[0]};')
         elif isinstance(s, ast.Continue):
             self.emit('continue;')
 
@@ -1069,6 +1125,9 @@ class Compiler:
         ts, te = self.temp(), self.temp()
         self.emit(f'int64_t {ts} = {start}, {te} = {stop};')
         unit = step is None or (isinstance(s.iter.args[2], ast.Constant) and s.iter.args[2].value == 1)
+        bounds = [const_number(a) for a in s.iter.args]
+        short = None not in bounds and (bounds[1] - bounds[0] if len(bounds) > 1 else bounds[0]) <= 65536 \
+            and (len(bounds) < 3 or bounds[2] > 0)
         fact = self.range_fact(s) if unit else None
         if unit and fact and self.boundscheck:
             # loop versioning: if no access var + c can leave its array during this loop, run a
@@ -1079,23 +1138,24 @@ class Compiler:
                     f'{self.extent(*key[3])} <= {self.extent(key[0], key[1])}' if len(key) > 2 else
                     f'{te} <= {self.extent(key[0], key[1])} - ({c})' for key, c in sorted(extra.items(), key=str))
                 self.open(f'if ({te} > {ts} && {cond})')
-                self.unit_loop(s, var, ts, te, fact + (extra,))
+                self.unit_loop(s, var, ts, te, fact + (extra,), short)
                 self.close('} else {')
                 self.depth += 1
                 self.slow_copy += 1
-                self.unit_loop(s, var, ts, te, fact)
+                self.unit_loop(s, var, ts, te, fact, short)
                 self.slow_copy -= 1
                 self.close()
                 return
         if unit:
-            self.unit_loop(s, var, ts, te, fact)
+            self.unit_loop(s, var, ts, te, fact, short)
             return
         tp, tn, tk = self.temp(), self.temp(), self.temp()
         self.emit(f'int64_t {tp} = {step};')
         self.emit(f'if ({tp} == 0) SJ_FAIL({VALUE_ERROR}, {self.line(s)}, 1, 0);')
         self.emit(f'uint64_t {tn} = {tp} > 0 ? ({ts} < {te} ? ((uint64_t){te} - (uint64_t){ts} - 1) / (uint64_t){tp} + 1 : 0)'
                   f' : ({ts} > {te} ? ((uint64_t){ts} - (uint64_t){te} - 1) / (0 - (uint64_t){tp}) + 1 : 0);')
-        self.open(f'for (uint64_t {tk} = 0; {tk} < {tn}; {tk}++)')
+        self.short_range = short
+        self.open_counted('uint64_t', tk, '0', tn)
         self.emit(f'v_{var} = (int64_t)((uint64_t){ts} + {tk} * (uint64_t){tp});')
         self.loop_body(s, var, None)
 
@@ -1150,7 +1210,7 @@ class Compiler:
     def for_iter(self, s, d):
         n, elem = self.iter_prep(d)
         k = self.temp()
-        self.open(f'for (uint64_t {k} = 0; {k} < {n}; {k}++)')
+        self.open_counted('uint64_t', k, '0', n)
         self.bind_values(s.target, elem(k))
         fact_var, fact = self.iter_fact(s, d)
         saved = self.facts.get(fact_var) if fact_var else None
@@ -1182,9 +1242,10 @@ class Compiler:
         hi = (inner[1], 0) if inner[0] == 'array' and lo == 0 else None
         return var, (lo, hi, 0)
 
-    def unit_loop(self, s, var, ts, te, fact):
+    def unit_loop(self, s, var, ts, te, fact, short=False):
         ti = self.temp()
-        self.open(f'for (int64_t {ti} = {ts}; {ti} < {te}; {ti}++)')
+        self.short_range = short
+        self.open_counted('int64_t', ti, ts, te)
         self.emit(f'v_{var} = {ti};')
         self.loop_body(s, var, fact)
 
@@ -1532,7 +1593,7 @@ class Compiler:
                 for g in v.generators:
                     cnt, elem = self.iter_prep(self.iterable(g.iter))
                     k = self.temp()
-                    self.open(f'for (uint64_t {k} = 0; {k} < {cnt}; {k}++)')
+                    self.open_counted('uint64_t', k, '0', cnt)
                     opened += 1
                     self.comp_bind_values(g.target, elem(k), saved, saved_c)
                     for c in g.ifs:
@@ -1554,7 +1615,7 @@ class Compiler:
             cnt, elem = self.iter_prep(d)
             alloc(cnt)
             k = self.temp()
-            self.open(f'for (uint64_t {k} = 0; {k} < {cnt}; {k}++)')
+            self.open_counted('uint64_t', k, '0', cnt)
             try:
                 self.comp_bind_values(v.generators[0].target, elem(k), saved, saved_c)
                 for c in v.generators[0].ifs:
@@ -1584,7 +1645,7 @@ class Compiler:
                 reps = self.hold(f'({kc} > 0 ? {kc} : 0)', T.INT)
                 alloc(f'{reps} * {len(vals)}')
                 r = self.temp()
-                self.open(f'for (int64_t {r} = 0; {r} < {reps}; {r}++)')
+                self.open_counted('int64_t', r, '0', reps)
                 for c, f, t in vals:
                     push(c, f, t)
                 self.close()
@@ -1949,7 +2010,7 @@ class Compiler:
             n, elem = self.iter_prep(self.iterable(src))
             after_first()
             k = self.temp()
-            self.open(f'for (uint64_t {k} = 0; {k} < {n}; {k}++)')
+            self.open_counted('uint64_t', k, '0', n)
             c, t, f = elem(k)
             item((self.hold(c, t), f), t)
             self.close()
@@ -1961,7 +2022,7 @@ class Compiler:
                 if i == 0:
                     after_first()
                 k = self.temp()
-                self.open(f'for (uint64_t {k} = 0; {k} < {n}; {k}++)')
+                self.open_counted('uint64_t', k, '0', n)
                 opened += 1
                 self.comp_bind_values(g.target, elem(k), saved, saved_c)
                 for c in g.ifs:

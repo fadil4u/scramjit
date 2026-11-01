@@ -75,9 +75,17 @@ Crossing from Python into compiled code costs about 1.5 µs per call for numbers
 
 So decorate the function that holds the loop, not a helper called from one. In Pyodide the crossing is about 13 µs, so the break-even is higher. `scramjit preflight` adds a note to decorated functions with no loop, and only suggests decorating functions that have one.
 
-### Ctrl-C waits for the call to finish
+### Ctrl-C can take a moment, and has limits
 
-Python handles signals between bytecodes, and compiled code has none, so `KeyboardInterrupt` arrives when the compiled call returns. In one test, a signal sent 0.2 s into a long call interrupted it after 10.7 s. A compiled infinite loop can't be stopped with Ctrl-C; you have to kill the process. While developing a long-running function, keep the amount of work per call small, or test it undecorated first.
+Ctrl-C stops a compiled call: loops check for it every 65,536 iterations, and `KeyboardInterrupt` is raised as usual. Arrays keep what was written so far, just as if Python had been interrupted partway. A `while` loop checks every iteration, and a `for` loop over a short constant range, like `range(-1, 2)`, doesn't check at all, so the enclosing loop does. A long stretch of work between checks delays it.
+
+Sometimes the call still runs to the end first, and `KeyboardInterrupt` arrives when it returns:
+
+- **With your own SIGINT handler** (`signal.signal(signal.SIGINT, ...)`). Your handler might not raise, and a stopped call can't resume.
+- **When something else uses `signal.set_wakeup_fd`**, such as asyncio's `add_signal_handler`.
+- **On a thread other than the main one**, where Python doesn't raise `KeyboardInterrupt` either, so that call keeps running.
+- **If the first compile happens off the main thread**, until one happens on it.
+- **In Pyodide**, where there's no Ctrl-C to catch.
 
 ### numpy's warnings and `errstate` don't apply
 

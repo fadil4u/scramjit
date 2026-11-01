@@ -456,6 +456,16 @@ thread-locals, because a signal handler can re-enter between the kernel returnin
 read. Calling `Kernel.address` directly would skip cimo's wrapper, but its trampoline is what lets `malloc`
 and the stack guard find their per-thread context, so that isn't safe; the rest needs a cimo fast path.
 
+**Ctrl-C.** Python runs signal handlers between bytecodes, so a kernel used to run to its end. A thread now
+waits on `signal.set_wakeup_fd` and sets a flag kernels check, and a kernel that sees it returns a status
+that raises `KeyboardInterrupt` (`scramjit/_interrupt.py`). A check on every iteration is too dear: `ema`
+3.08 to 5.16 ns, `edit_distance` 2.24 to 3.74, likely the volatile read stopping optimizations; a counter
+was worse. Counted loops run in chunks of 65,536 instead, checking between them, which cost nothing
+measurable on the benchmarks. Short constant ranges skip chunks (their setup cost 3x3 stencils 28%); a very
+short variable range still pays about 20%. `while` loops check every iteration, which was cheap. It stops a
+kernel only on the main thread and under Python's default handler, since a stopped kernel can't resume and
+another handler might not raise.
+
 **M3 progress.** The disk cache is cimo's: scramjit's C is deterministic, so a second process finds
 it (Gray-Scott first call 0.53 s, then 0.06 s, mostly preprocessing the prelude); no second cache
 needed. Preflight is built (`scramjit/_preflight.py`): static analysis sets each failing statement

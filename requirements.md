@@ -1,6 +1,6 @@
 # scramjit: requirements
 
-**Decorate a Python function, get native speed.** A pure-Python JIT for numeric Python, built on
+**Decorate a Python function, get native speed.** A pure-Python JIT for Python's hot loops, built on
 [cimo](https://github.com/farizrahman4u/cimo). PyPI name `scramjit` is reserved (placeholder
 0.0.1, published 2026-11-01).
 
@@ -27,6 +27,13 @@ This is the living spec: what to build, why, what has been measured, and in what
 Python runs, including the browser. The decorated code is plain Python: without scramjit it still
 runs, slowly, in CPython, and stays debuggable and testable as Python.
 
+**Where it shines:** code that doesn't vectorize and is held back by the interpreter and the GIL:
+recurrences, data-dependent branches, flood fills, dynamic programming, simulations, scans over
+byte buffers. Every iteration pays the interpreter in CPython, and threads queue on the GIL;
+compiled, the loop runs as C with the GIL released. **Also a fit:** vectorizable code that must run
+where only pure Python is allowed or available. The supported subset is numeric (scalars, arrays,
+tuples, fixed lists), but the target is any loop-heavy code, not only "numeric Python".
+
 ## Users
 
 In priority order:
@@ -40,8 +47,9 @@ In priority order:
 4. **Library authors** who want fast hot paths in a pure-Python package, with no wheel matrix.
    The largest group if first-call latency and caching are good enough.
 
-Not for: code that is already vectorized numpy or pandas; ML (PyTorch/JAX); users happy with an
-existing JIT on a standard desktop or server.
+Not for: ML (PyTorch/JAX); code that is already vectorized numpy or pandas in an environment
+where numpy runs (it is already native loops); users happy with an existing JIT on a standard
+desktop or server.
 
 ## Competition
 
@@ -132,6 +140,9 @@ Each decision is explicit and tested against CPython:
 On each call the decorator reads the argument types (Python type, dtype, number of dimensions,
 layout), generates C specialized to them, compiles it with cimo, and caches the result by
 signature, in memory and on disk.
+
+Compiled code releases the GIL while it runs (as cimo kernels do), so Python threads calling a
+compiled function run in parallel.
 
 ## Architecture
 

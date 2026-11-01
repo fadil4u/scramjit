@@ -6,6 +6,8 @@ Biggest first. `requirements.md` is the spec; this is the work queue.
 
 Each has a matching entry in cimo's `TODO.md`, which asks for a note here when it lands.
 
+- **Float `math.sumprod` falls back:** Python returns the int 0 when it's empty, so its type depends on
+  the data. Same for float `math.prod` without `start=1.0`, where the fix is in the user's hands.
 - **Math functions call the host libm through a table of addresses** (`_dispatch._libm_table`,
   `SJ_LIBM1` in the prelude), passed to each kernel that uses them, because cimo resolves `sin`
   etc. to its bundled libm. When cimo can link the host libm for math calls: call them directly.
@@ -21,9 +23,11 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 
 ## Next
 
-1. **Rest of M2:** value-range narrowing; nested tuples; `for ... else`. Then the M2 acceptance check.
-2. **M3:** the disk cache, and out-of-subset reporting (`preflight`, `f.signatures`, `f.c()`,
-   `SCRAMJIT_LOG`). The site and docs already describe these.
+1. **Rest of M2:** value-range narrowing; nested tuples; `for ... else`; `**` (a type that depends on
+   the exponent's sign). Then the M2 acceptance check.
+2. **Rest of M3:** run the M0 kernels in Pyodide as a test, not only through the site; preflight's
+   per-loop report once cimo exposes one (cimo's `TODO.md`), and a `disk` label in the compile column,
+   which needs cimo to say whether a compile hit its cache.
 3. **SSA for variables that change type** (`x = 1` then `x = 0.5`): today they fall back.
 4. **Bounds-check hoisting beyond unit-step loops** over one variable (versioning covers
    `for i in range(a, len(x))` with `arr[i + c]` today).

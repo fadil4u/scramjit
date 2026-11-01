@@ -20,7 +20,7 @@ def scram(fn=None, *, boundscheck=True, cache=True, fallback=True, parity=True):
     """Compile fn on its first call for each combination of argument types.
 
     boundscheck: check every index and raise IndexError, as Python does (default True).
-    cache: keep compiled code on disk for other processes (accepted; the disk cache is not built yet).
+    cache: keep compiled code on disk, so other processes reuse it (default True; False writes nothing).
     fallback: run what can't be compiled as Python, with a FallbackWarning (default True); with
         False, raise CompileError instead.
     parity: give results identical to CPython, bit for bit (default True). False trades that

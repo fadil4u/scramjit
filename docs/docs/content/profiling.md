@@ -10,6 +10,8 @@ Every function is in one of three states, shown with the same colors everywhere:
 | 🟡 | **partly compiled** | some loops run native, the rest as Python |
 | 🔴 | **Python** | nothing compiled |
 
+Partly compiled needs loop lifting, which isn't built yet. For now a function is compiled or Python, and the partly compiled examples on this page show what it will look like.
+
 `scramjit` is a command installed with the package; `python -m scramjit` works the same.
 
 ## Preflight, before you run
@@ -60,7 +62,7 @@ failed: step is partly compiled
 ```
 
 - **native** and **python** are the time each function spent in compiled code and in code that fell back. The native share at the top is native time over the whole run; the rest is your own Python and fallbacks.
-- **compile** is the time spent compiling, or `disk` when the code came from the [disk cache](caching.md). **×2** means two signatures.
+- **compile** is the time spent compiling; it's much shorter when the code came from the [disk cache](caching.md). **×2** means two signatures.
 - Functions that weren't called don't appear; run the static mode for those.
 
 Arguments after the script or module are passed to it.
@@ -97,8 +99,7 @@ It reports:
 - **state per line:** native or Python, and for Python lines, the construct that kept them there;
 - **types:** what each variable was inferred as, and where a type was narrowed;
 - **bounds checks:** proven unnecessary, hoisted out of the loop, or kept, and what would let a kept one go;
-- **loops:** which ones cimo's optimizer unrolled or otherwise improved, and why the others weren't;
-- **the call boundary:** arrays passed in place, lists copied, strided arrays.
+- **loops and the call boundary:** planned; what cimo's optimizer did to each loop isn't available yet, and arrays are always passed in place (a strided one runs as Python).
 
 Pass a signature to report on only that one: `f.preflight(f.signatures[0])`.
 
@@ -130,10 +131,10 @@ It prints the same report as `step.preflight()`. Without `--run`, argument types
 $ SCRAMJIT_LOG=1 python simulate.py
 scramjit: compiled flood(uint8[:, :], int64[:, :], int, int) in 0.14 s
 scramjit: compiled ema(float64[:], float64[:], float) in 0.04 s
-scramjit: step(float64[:], float64[:], list) from disk cache, partly compiled: line 11 grows a list
+scramjit: summarize(float64[:]) runs as Python: line 18: the Dict expression
 ```
 
-One line per compile, cache hit or fallback. A function that keeps compiling new signatures is being called with arguments of changing types; annotate them, or convert once before the loop.
+One line per compile or fallback. A function that keeps compiling new signatures is being called with arguments of changing types; annotate them, or convert once before the loop.
 
 ## Acting on hints
 

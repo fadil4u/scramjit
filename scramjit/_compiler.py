@@ -223,6 +223,9 @@ class Compiler:
         self.ntemp = 0
         self.uses_libm = False
         self.helpers = set()      # helpers from _mathlib this kernel uses
+        self.checks = {}       # Python line -> bounds checks that run each time (for preflight)
+        self.hoisted_lines = set()   # Python lines whose checks live only in a versioned loop's slow copy
+        self.slow_copy = 0     # inside that slow copy
         self.aliases = {}
         self.hoisted = {}      # ast.dump of a wraparound index -> its temporary, per loop iteration
         self.owned = []        # temporaries holding a list being built (freed on every exit)
@@ -1023,7 +1026,9 @@ class Compiler:
                 self.unit_loop(s, var, ts, te, fact + (extra,))
                 self.close('} else {')
                 self.depth += 1
+                self.slow_copy += 1
                 self.unit_loop(s, var, ts, te, fact)
+                self.slow_copy -= 1
                 self.close()
                 return
         if unit:
@@ -1403,6 +1408,10 @@ class Compiler:
             if is_list and not inbounds:    # Python's lists always check
                 self.emit(f'if ((uint64_t){t} >= (uint64_t){n}) SJ_FAIL({LIST_INDEX_ERROR}, {self.line(sub)}, {1 if store else 0}, 0);')
             elif not is_list and self.boundscheck and not inbounds:
+                if self.slow_copy:
+                    self.hoisted_lines.add(self.line(sub))
+                else:
+                    self.checks[self.line(sub)] = self.checks.get(self.line(sub), 0) + 1
                 self.emit(f'if ((uint64_t){t} >= (uint64_t){n}) {{ sj_io[4] = {axis}; SJ_FAIL({INDEX_ERROR}, {self.line(sub)}, {raw}, {n}); }}')
             lin = t if lin is None else f'({lin} * {n} + {t})'
         if len(idxs) > 1:

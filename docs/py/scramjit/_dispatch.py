@@ -6,9 +6,12 @@ import inspect
 import struct
 import sys
 import textwrap
+import os
 import threading
+import time
 import types
 import warnings
+import weakref
 
 from . import _types as T
 from ._compiler import Compiler
@@ -126,15 +129,30 @@ PYTHON = _Python()
 
 
 class Compiled:
-    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals')
+    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted')
 
-    def __init__(self, kernel, ret, types_, source, libm, locals_=None):
+    def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=()):
+        self.checks, self.hoisted = checks or {}, hoisted
         self.locals = locals_ or {}           # variable -> inferred type name
         self.kernel = kernel
         self.ret = ret
         self.types = types_
         self.source = source
         self.libm = libm
+
+
+_functions = weakref.WeakSet()    # every decorated function, for preflight
+_profile = False                  # preflight --run: time each call
+_log = bool(os.environ.get('SCRAMJIT_LOG'))
+
+
+def enable_profile():
+    global _profile
+    _profile = True
+
+
+def functions():
+    return list(_functions)
 
 
 class Function:
@@ -145,7 +163,12 @@ class Function:
         self._fallback = fallback
         self._parity = parity
         self._cache = {}
+        self._use_disk = cache
+        self._compile_s = {}      # signature -> seconds spent compiling it
+        self._why = {}            # signature -> (line, reason) it runs as Python
+        self._stats = {}          # signature -> [calls, native seconds, Python seconds], under preflight --run
         self._lock = threading.Lock()
+        _functions.add(self)
         code = fn.__code__
         self._filename = code.co_filename
         self._first = code.co_firstlineno
@@ -202,9 +225,25 @@ class Function:
         entry = self._cache.get(key)
         if entry is None:
             entry = self._specialize(key, args)
+        if _profile:
+            return self._timed(key, entry, args)
         if entry is PYTHON:
             return self._fn(*args)
         return self._run(entry, args)
+
+    def _timed(self, key, entry, args):
+        s = self._stats.setdefault(key, [0, 0.0, 0.0])
+        s[0] += 1
+        t = time.perf_counter()
+        try:
+            return self._fn(*args) if entry is PYTHON else self._run(entry, args)
+        finally:
+            s[2 if entry is PYTHON else 1] += time.perf_counter() - t
+
+    def preflight(self, signature=None):
+        """Print this function line by line: native or Python and why, types, bounds checks."""
+        from ._preflight import function_report
+        function_report(self, signature, sys.stdout)
 
     def _specialize(self, key, args):
         with self._lock:
@@ -212,10 +251,17 @@ class Function:
             if entry is not None:
                 return entry
             sig = ', '.join(_describe(x, t) for x, t in zip(args, key))
+            t0 = time.perf_counter()
             try:
                 entry = self._compile(key, args)
+                self._compile_s[key] = time.perf_counter() - t0
+                if _log:
+                    print(f'scramjit: compiled {self.__name__}({sig}) in {self._compile_s[key]:.2f} s', file=sys.stderr)
             except Unsupported as u:
                 line = (u.lineno + self._first - 1) if u.lineno else self._first
+                self._why[key] = (line, u.reason)
+                if _log:
+                    print(f'scramjit: {self.__name__}({sig}) runs as Python: line {line}: {u.reason}', file=sys.stderr)
                 if not self._fallback:
                     raise CompileError(f'{self._filename}:{line}: {self.__name__}({sig}) is not compiled: '
                                        f'{u.reason}') from None
@@ -236,14 +282,14 @@ class Function:
         source = c.generate()
         cimo = _get_cimo()
         try:
-            kernel = cimo.compile(PRELUDE + source, fma=not self._parity).sj_kernel   # Python never contracts
+            kernel = cimo.compile(PRELUDE + source, cache=self._use_disk, fma=not self._parity).sj_kernel   # Python never contracts
         except cimo.CompileError as e:
             raise Unsupported(None, f'internal error: cimo rejected the generated C ({e}); please report it')
         if any(t.np for t in key) or c.ret.np:
             import numpy
             self._np = numpy
         return Compiled(kernel, c.ret, key, source, _libm_table() if c.uses_libm else None,
-                        {k: t.name for k, t in c.env.items()})
+                        {k: t.name for k, t in c.env.items()}, c.checks, c.hoisted_lines)
 
     def _run(self, entry, args):
         cargs = []

@@ -17,6 +17,9 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
 ]
 
+[project.scripts]
+scramjit = "scramjit._preflight:main"
+
 [project.optional-dependencies]
 dev = ["pytest", "numpy"]
 

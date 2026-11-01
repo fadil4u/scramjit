@@ -16,6 +16,7 @@ where Python raises) and the type a value is returned as.
 """
 
 import ast
+import copy
 import math
 
 from . import _types as T
@@ -85,9 +86,125 @@ def flag_or(a, b):
     return f'({a} | {b})'
 
 
+class Lazy(ast.NodeTransformer):
+    """map() and filter() as what they are: a comprehension, or, in a for statement, a plain loop.
+    Only the builtins themselves (not names rebound in the function or its module), with a
+    lambda, a builtin or math function, or (filter) None."""
+
+    def __init__(self, names, global_names):
+        self.bound = names | global_names
+        self.n = 0
+
+    def fresh(self):
+        self.n += 1
+        return f'_sj_{self.n}'
+
+    def builtin(self, e, which):
+        return isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == which \
+            and which not in self.bound and not e.keywords
+
+    def apply(self, f, args, at):
+        """f(*args) as an expression; args are Name nodes. A lambda is inlined."""
+        if isinstance(f, ast.Lambda):
+            a = f.args
+            names = [p.arg for p in a.posonlyargs + a.args]
+            if a.vararg or a.kwarg or a.kwonlyargs or a.defaults or len(names) != len(args):
+                return None
+            inner = {n: x.id for n, x in zip(names, args)}
+
+            class Rename(ast.NodeTransformer):
+                def visit_Name(self, n):
+                    if n.id in inner:
+                        return ast.copy_location(ast.Name(inner[n.id], n.ctx), n)
+                    return n
+            return Rename().visit(copy.deepcopy(f.body))
+        if isinstance(f, (ast.Name, ast.Attribute)):
+            return ast.copy_location(ast.Call(copy.deepcopy(f), list(args), []), at)
+        return None
+
+    def parts(self, e):
+        """(comprehension target, iterable, value expression, condition) for a map or filter call."""
+        if self.builtin(e, 'map') and len(e.args) >= 2:
+            vs = [self.fresh() for _ in e.args[1:]]
+            load = [ast.copy_location(ast.Name(v, ast.Load()), e) for v in vs]
+            value = self.apply(e.args[0], load, e)
+            if value is None:
+                return None
+            if len(vs) == 1:
+                target, it = ast.copy_location(ast.Name(vs[0], ast.Store()), e), e.args[1]
+            else:                                       # map(f, a, b) stops at the shortest, as zip does
+                target = ast.copy_location(ast.Tuple([ast.copy_location(ast.Name(v, ast.Store()), e) for v in vs], ast.Store()), e)
+                it = ast.copy_location(ast.Call(ast.copy_location(ast.Name('zip', ast.Load()), e), list(e.args[1:]), []), e)
+            return target, it, value, None
+        if self.builtin(e, 'filter') and len(e.args) == 2:
+            v = self.fresh()
+            load = ast.copy_location(ast.Name(v, ast.Load()), e)
+            none = isinstance(e.args[0], ast.Constant) and e.args[0].value is None
+            cond = load if none else self.apply(e.args[0], [load], e)
+            if cond is None:
+                return None
+            return ast.copy_location(ast.Name(v, ast.Store()), e), e.args[1], load, cond
+        return None
+
+    def visit_Call(self, e):
+        self.generic_visit(e)
+        p = self.parts(e)
+        if p is None:
+            return e
+        target, it, value, cond = p
+        return self.comp(ast.copy_location(ast.GeneratorExp(value, [ast.comprehension(target, it, [cond] if cond is not None else [], 0)]), e))
+
+    def comp(self, e):
+        """A comprehension over map() or filter(): one flat loop. The inner value replaces the loop
+        variable, where that evaluates it just as often (once, or it is only a name)."""
+        self.generic_visit(e)
+        out = []
+        elts = [e.elt]
+        for g in e.generators:
+            inner = g.iter
+            if not (isinstance(inner, ast.GeneratorExp) and len(inner.generators) == 1 and isinstance(g.target, ast.Name)):
+                out.append(g)
+                continue
+            value, name = inner.elt, g.target.id
+            uses = sum(isinstance(n, ast.Name) and n.id == name for x in elts + g.ifs for n in ast.walk(x))
+            if uses != 1 and not isinstance(value, ast.Name):
+                out.append(g)                           # (not flattened: it won't compile, and falls back)
+                continue
+
+            class Put(ast.NodeTransformer):
+                def visit_Name(self, n):
+                    return copy.deepcopy(value) if n.id == name else n
+            i = inner.generators[0]
+            elts = [Put().visit(x) for x in elts]
+            out.append(ast.comprehension(i.target, i.iter, i.ifs + [Put().visit(x) for x in g.ifs], 0))
+        e.elt, e.generators = elts[0], out
+        return e
+
+    def visit_GeneratorExp(self, e):
+        return self.comp(e)
+
+    def visit_ListComp(self, e):
+        return self.comp(e)
+
+    def visit_For(self, s):
+        self.generic_visit(s)
+        g = s.iter
+        if not isinstance(g, ast.GeneratorExp) or len(g.generators) != 1:
+            return s
+        c = g.generators[0]                             # the call above turned it into a comprehension
+        head = []
+        for x in c.ifs:
+            stop = ast.copy_location(ast.If(ast.copy_location(ast.UnaryOp(ast.Not(), x), s), [ast.copy_location(ast.Continue(), s)], []), s)
+            head.append(stop)
+        head.append(ast.copy_location(ast.Assign([s.target], g.elt), s))
+        return ast.copy_location(ast.For(c.target, c.iter, head + s.body, s.orelse), s)
+
+
 class Compiler:
     def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, parity=True):
-        self.f = fdef
+        local = {p.arg for p in fdef.args.posonlyargs + fdef.args.args}
+        local |= {n.id for n in ast.walk(fdef) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        self.f = Lazy(local, set(globals_)).visit(copy.deepcopy(fdef))
         self.exact = parity    # False: C's float semantics where CPython parity costs speed
         self.globals = globals_
         self.filename = filename
@@ -106,6 +223,9 @@ class Compiler:
         self.ntemp = 0
         self.uses_libm = False
         self.helpers = set()      # helpers from _mathlib this kernel uses
+        self.checks = {}       # Python line -> bounds checks that run each time (for preflight)
+        self.hoisted_lines = set()   # Python lines whose checks live only in a versioned loop's slow copy
+        self.slow_copy = 0     # inside that slow copy
         self.aliases = {}
         self.hoisted = {}      # ast.dump of a wraparound index -> its temporary, per loop iteration
         self.owned = []        # temporaries holding a list being built (freed on every exit)
@@ -147,8 +267,6 @@ class Compiler:
 
     def list_type(self, v):
         if isinstance(v, ast.ListComp):
-            if len(v.generators) != 1:
-                self.fail(v, 'a list comprehension with several for clauses')
             return T.list_of(self.comp_types(v))
         lit, k = (v, None) if isinstance(v, ast.List) else \
             ((v.left, v.right) if isinstance(v.left, ast.List) else (v.right, v.left))
@@ -908,7 +1026,9 @@ class Compiler:
                 self.unit_loop(s, var, ts, te, fact + (extra,))
                 self.close('} else {')
                 self.depth += 1
+                self.slow_copy += 1
                 self.unit_loop(s, var, ts, te, fact)
+                self.slow_copy -= 1
                 self.close()
                 return
         if unit:
@@ -1288,6 +1408,10 @@ class Compiler:
             if is_list and not inbounds:    # Python's lists always check
                 self.emit(f'if ((uint64_t){t} >= (uint64_t){n}) SJ_FAIL({LIST_INDEX_ERROR}, {self.line(sub)}, {1 if store else 0}, 0);')
             elif not is_list and self.boundscheck and not inbounds:
+                if self.slow_copy:
+                    self.hoisted_lines.add(self.line(sub))
+                else:
+                    self.checks[self.line(sub)] = self.checks.get(self.line(sub), 0) + 1
                 self.emit(f'if ((uint64_t){t} >= (uint64_t){n}) {{ sj_io[4] = {axis}; SJ_FAIL({INDEX_ERROR}, {self.line(sub)}, {raw}, {n}); }}')
             lin = t if lin is None else f'({lin} * {n} + {t})'
         if len(idxs) > 1:
@@ -1343,7 +1467,32 @@ class Compiler:
 
         def push(c, f, t):
             self.emit(f'{p}[{n}] = {self.coerce(c, t, et)};' + (f' {pf}[{n}] = {f};' if dyn else '') + f' {n}++;')
-        if isinstance(v, ast.ListComp):              # its single iterable gives the capacity
+        if isinstance(v, ast.ListComp) and len(v.generators) > 1:    # the size isn't known up front
+            cap = self.temp()
+            self.emit(f'int64_t {cap} = 16;')
+            alloc('16')
+            saved, saved_c, opened = {}, {}, 0
+            try:
+                for g in v.generators:
+                    cnt, elem = self.iter_prep(self.iterable(g.iter))
+                    k = self.temp()
+                    self.open(f'for (uint64_t {k} = 0; {k} < {cnt}; {k}++)')
+                    opened += 1
+                    self.comp_bind_values(g.target, elem(k), saved, saved_c)
+                    for c in g.ifs:
+                        self.emit(f'if (!({self.truth(self.expr(c)[0], self.typeof(c))})) continue;')
+                c, f = self.expr(v.elt)
+                c = self.hold(c, self.typeof(v.elt))
+                grow = f'{cap} *= 2; {{ {et.ctype} *g_ = realloc({p}, sizeof({et.ctype}) * (size_t){cap}); if (!g_) SJ_FAIL({MEMORY_ERROR}, {line}, 0, 0); {p} = g_; }}'
+                if dyn:
+                    grow += f' {{ int *h_ = realloc({pf}, sizeof(int) * (size_t){cap}); if (!h_) SJ_FAIL({MEMORY_ERROR}, {line}, 0, 0); {pf} = h_; }}'
+                self.emit(f'if ({n} == {cap}) {{ {grow} }}')
+                push(c, f, self.typeof(v.elt))
+            finally:
+                for _ in range(opened):
+                    self.close()
+                self.restore(saved, saved_c)
+        elif isinstance(v, ast.ListComp):            # its single iterable gives the capacity
             d = self.iterable(v.generators[0].iter)
             saved, saved_c = {}, {}
             cnt, elem = self.iter_prep(d)

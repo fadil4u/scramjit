@@ -90,17 +90,17 @@ function ──▶ syntax tree ──▶ type inference ──▶ C ──▶ ci
 ```
 
 The generated C implements Python's semantics, including floor division, negative indices and bounds
-checks that raise `IndexError`. `range`, `zip`, `enumerate` and list comprehensions are lowered to
-plain loops. Later calls with the same types go straight to the compiled code.
+checks that raise `IndexError`. `range`, `zip`, `enumerate`, `map`, `filter` and comprehensions are
+lowered to plain loops. Later calls with the same types go straight to the compiled code.
 
 ## What compiles
 
 | Compiled | Runs as Python |
 |:---|:---|
 | `for`, `while`, `break`, `continue`, `if`, conditional expressions | Slices and views: `a[1:]` |
-| `range`, `enumerate`, `zip`, list comprehensions | numpy array expressions: `a * 2`, `a.sum()` |
+| `range`, `enumerate`, `zip`, `map`, `filter`, comprehensions | numpy array expressions: `a * 2`, `a.sum()` |
 | `sum(gen, 0.0)`, `min`, `max`, `abs`, tuple unpacking | Calls to other Python functions |
-| Numbers and n-D numpy arrays, including dtypes like `uint8` | Dicts, strings, objects, `**`, `map`, `filter` |
+| Numbers and n-D numpy arrays, including dtypes like `uint8` | Dicts, strings, objects, `**` |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | Lists that grow with `append` |
 
 A function that can't be compiled runs as Python, with a `FallbackWarning` giving the reason:
@@ -132,6 +132,31 @@ except CompileError as e:
     print(e)
 ```
 
+## Preflight
+
+`scramjit preflight` shows what compiles and which lines stop it, without importing your code:
+
+```
+$ scramjit preflight src/
+src/sim.py
+  🟢 ema        compiled
+  🟢 grid       compiled
+  🔴 summarize  Python
+        22  the Dict expression
+        24  calls str()
+
+2 compiled · 1 Python
+```
+
+`scramjit preflight --run app.py` (or `--run -m pytest`) reports what happened with the real types:
+calls, compile time, and time in native code and in Python. Both exit non-zero if a function isn't
+compiled, so they work as a CI check. `f.preflight()` annotates one function line by line, including
+which bounds checks were proven, hoisted out of the loop or kept. `SCRAMJIT_LOG=1` logs each compile
+and fallback.
+
+Compiled code is cached on disk: compiling took 0.53 s in the first process and 0.06 s in later
+ones on a Gray-Scott kernel. `@scram(cache=False)` writes nothing.
+
 ## CPython parity
 
 Compiled functions are tested against the same functions running undecorated, including on randomly
@@ -152,10 +177,9 @@ is no sandbox.
 
 Pre-release.
 
-- 55 tests pass. Developed and benchmarked on arm64 Linux and in Pyodide. x86-64, macOS and Windows
+- 93 tests pass. Developed and benchmarked on arm64 Linux and in Pyodide. x86-64, macOS and Windows
   are cimo targets, but scramjit's tests don't run on them in CI yet.
-- Not built yet: the `scramjit preflight` report and the on-disk compile cache, so each process
-  compiles on its first call.
+- Not built yet: loop lifting, so a function compiles whole or runs as Python.
 - Next: see [`TODO.md`](TODO.md).
 
 ## Development

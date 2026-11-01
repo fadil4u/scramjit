@@ -4367,46 +4367,28 @@ def domcse(fn):
                 seen[(i.op, i.cls, i.arg[0], i.arg[1])].append((b, i.to))
     return changed
 def divrem(fn):
-    divs = {}
-    found = False
+    divs = set()
+    rems = False
     for b in fn.rpo[:fn.nblk]:
         for i in b.ins[:b.nins]:
-            if i.op in _DIV and KBASE(i.cls) == 0:
-                k = (_DIV[i.op], i.cls, i.arg[0], i.arg[1])
-                if i.op in (D.Odiv, D.Oudiv):
-                    divs.setdefault(k, []).append(b)
-                else:
-                    found = True
-    if not found or not divs:
+            if i.op in (D.Odiv, D.Oudiv) and KBASE(i.cls) == 0:
+                divs.add((i.op, i.cls, i.arg[0], i.arg[1]))
+            elif i.op in (D.Orem, D.Ourem) and KBASE(i.cls) == 0:
+                rems = True
+    if not (divs and rems):
         return False
-    done = {}
     changed = False
     for b in fn.rpo[:fn.nblk]:
         out = []
         for i in b.ins[:b.nins]:
-            if not (i.op in _DIV and KBASE(i.cls) == 0):
+            op = D.Odiv if i.op == D.Orem else D.Oudiv if i.op == D.Ourem else None
+            if op is None or (op, i.cls, i.arg[0], i.arg[1]) not in divs:
                 out.append(i)
                 continue
-            op = _DIV[i.op]
-            k = (op, i.cls, i.arg[0], i.arg[1])
-            have = next((r for bb, r in done.get(k, ()) if dom(bb, b)), None)
-            if i.op == op:
-                if have is None:
-                    done.setdefault(k, []).append((b, i.to))
-                    out.append(i)
-                else:
-                    replaceuses(fn, i.to, have)
-                    changed = True
-                continue
-            if have is None:
-                if not any(dom(b, x) for x in divs.get(k, ())):
-                    out.append(i)
-                    continue
-                have = newtmp('div', i.cls, fn)
-                out.append(D.Ins(op, i.cls, have, i.arg[0], i.arg[1]))
-                done.setdefault(k, []).append((b, have))
+            d = newtmp('div', i.cls, fn)
             t = newtmp('mul', i.cls, fn)
-            out.append(D.Ins(D.Omul, i.cls, t, have, i.arg[1]))
+            out.append(D.Ins(op, i.cls, d, i.arg[0], i.arg[1]))
+            out.append(D.Ins(D.Omul, i.cls, t, d, i.arg[1]))
             out.append(D.Ins(D.Osub, i.cls, i.to, i.arg[0], t))
             changed = True
         b.ins = out
@@ -5555,9 +5537,12 @@ from .defs import (R, RTmp, KBASE, U32, NIns, Ins, UXXX, UPhi, UIns, UJmp, Odiv,
                    Oshl, Onop, isload, isstore, isalloc, optab, rtype, rval)
 from .util import die, iscmp, igroup, addins, newtmp, emiti
 from .cfg import dom, lca, filldepth, fillloop
+from . import ext as _ext
 NOBID = U32
 def isdivwl(i):
     if i.op in (Odiv, Orem, Oudiv, Ourem):
+        if _ext.cse and D.T.name.startswith('arm64'):
+            return 0
         return int(KBASE(i.cls) == 0)
     return 0
 def pinned(i):
@@ -7196,6 +7181,8 @@ class _Driver:
             loads = cse.nload(fn)
             cfg.filldom(fn)
             merged = cse.domcse(fn)
+            if T.name.startswith('arm64') and cse.divrem(fn):
+                merged = True
             ssa.filluse(fn)
             alias.fillalias(fn)
             load.loadopt(fn)
@@ -7209,11 +7196,6 @@ class _Driver:
             cfg.filldom(fn)
             if middle.run(fn):
                 self._cleanup(fn, cfg, ssa, gvn, gcm)
-        if ext.cse and T.name.startswith('arm64'):
-            cfg.filldom(fn)
-            if cse.divrem(fn):
-                ssa.filluse(fn)
-                ssa.ssacheck(fn)
         if T.name == 'wasm':
             D.unvolatile(fn)
             T.emitfn(fn, self.outf)
@@ -24134,10 +24116,10 @@ def optimize(fn):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "bf673e9d167cb665e39f",
-"runtime-arm64": "c2cda6f9afc21e5dc000",
-"runtime-arm64_apple": "0e4eee12b683cb73bf8e",
-"runtime-arm64_win": "2bd8050fc1bade476ac1"
+"compiler": "29f3c48e20e129716699",
+"runtime-arm64": "3cfc5b3f6857d7a68ce6",
+"runtime-arm64_apple": "e8e5da6d8d70f985663b",
+"runtime-arm64_win": "e679623d6906690b7ae1"
 }
 ''',
 'onefile.py': '''\

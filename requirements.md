@@ -434,6 +434,13 @@ and in Pyodide, a second process reuses the disk cache, and every out-of-subset 
 reported at its Python line (fallback warning, preflight, and `CompileError` under
 `fallback=False`). Whole-function fallback lands in M1; it is the original function.
 
+**M3 progress.** The disk cache is cimo's: scramjit's C is deterministic, so a second process finds
+it (Gray-Scott first call 0.53 s, then 0.06 s, mostly preprocessing the prelude); no second cache
+needed. Preflight is built (`scramjit/_preflight.py`): static analysis sets each failing statement
+aside and retries, so it reports every line, not only the first, though a line can fail only because
+one it depends on did. Bounds notes come from the compiler, not from scanning the C, since a versioned
+loop's slow copy always holds checks that don't run in the fast one.
+
 **M4: loop lifting.** Compile the loops that fit inside functions that don't. Done when a function
 mixing Python-only setup (dicts, strings) with a numeric loop is partly compiled, matches CPython,
 and preflight (static, `--run` and `f.preflight()`) shows the state per line.

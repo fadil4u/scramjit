@@ -152,7 +152,12 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   when small, constant-sized and not returned; heap otherwise.
 - **Lists passed in from Python:** homogeneous numeric lists are copied into an array at the call
   boundary and copied back if mutated. That's O(n) per call, so large data should be numpy arrays.
-- **Later:** growable lists, dicts, sets and strings as typed C containers. Not in the first version: each needs allocation and a runtime.
+- **Python data structures, nested, as much as possible** (decided 2026-11-01): dicts, lists, tuples, classes
+  and enums compile when they are **statically sized** (nothing resizes them at runtime) and **statically
+  typed** (the element types they start with don't change). Enums and module-level constants are their
+  values. Classes and fixed-key dicts become structs. Open: what a runtime value that breaks the rule does,
+  aliasing, and the cost of checking and copying at the call. Not built yet; see `TODO.md`.
+- **Later:** growable lists, dicts, sets and strings as typed C containers: each needs allocation and a runtime.
 
 ## Semantics
 
@@ -491,5 +496,5 @@ and preflight (static, `--run` and `f.preflight()`) shows the state per line.
   the "it's still Python" promise. Differential testing is the guard.
 - **Silent slowness** from fallback: a decorated function that quietly runs as Python. The warning,
   preflight (static and `--run`) and `fallback=False` are the guard.
-- **Scope creep** into growable lists, dicts and classes pulls in a runtime. Hold the line until
-  the numeric subset is solid.
+- **Scope creep** into anything that resizes pulls in a runtime. Fixed-size, fixed-type structures don't, which
+  is where the line now is (see "Containers").

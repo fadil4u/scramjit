@@ -417,3 +417,11 @@ def test_list_aliasing_falls_back():
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', FallbackWarning)
         same(scram(aliases_a_list), 9)
+
+
+def test_parity_false_math_is_ieee_and_close():
+    f = compiled_math('math.sqrt(x) + math.log(x) + math.hypot(x, 2.0)', 1, 'relaxed')
+    g = scram(f.__wrapped__, parity=False, fallback=False)
+    assert math.isnan(g(-1.0)) and g(0.0) == -math.inf          # parity=True raises ValueError here
+    for x in (0.5, 2.0, 1e10, 3.7):
+        assert abs(g(x) - f(x)) <= 1e-12 * abs(f(x))

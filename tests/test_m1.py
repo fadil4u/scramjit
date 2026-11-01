@@ -435,16 +435,16 @@ def test_random_expressions():
     assert checked > 150
 
 
-# ---- exact=False trades parity for speed
+# ---- parity=False trades parity for speed
 
 def test_exact_false_gives_ieee_results():
-    fast_div = scram(div.__wrapped__, exact=False, fallback=False)
+    fast_div = scram(div.__wrapped__, parity=False, fallback=False)
     assert fast_div(1.0, 0.0) == math.inf and math.isnan(fast_div(0.0, 0.0))
     assert fast_div(1, 0) == math.inf
-    fast_lt = scram(lt.__wrapped__, exact=False, fallback=False)
+    fast_lt = scram(lt.__wrapped__, parity=False, fallback=False)
     assert fast_lt(1, 2.5) is True
     with pytest.raises(ZeroDivisionError):             # an int // 0 still raises (C would trap)
-        scram(floordiv.__wrapped__, exact=False, fallback=False)(1, 0)
+        scram(floordiv.__wrapped__, parity=False, fallback=False)(1, 0)
 
 
 @strict

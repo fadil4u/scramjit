@@ -74,7 +74,7 @@ def saxpy(a: float, x, y):
         y[i] += a * x[i]
 ```
 
-The decorator is the whole user-facing API. Options (`boundscheck`, `cache`, `fallback`, `exact`)
+The decorator is the whole user-facing API. Options (`boundscheck`, `cache`, `fallback`, `parity`)
 are keyword arguments to it. It is named `scram` (to scram: to go, fast) and imported as
 `from scramjit import scram`; a callable module (`@scramjit`) was rejected because mypy and Pyright
 report "module not callable" for every variant of the trick. The undecorated
@@ -176,9 +176,10 @@ Each decision is explicit and tested against CPython:
 
   Differential tests compare every supported function against CPython on every platform, with
   zero differing results as the bar.
-- **Parity can be traded for speed** with `@scram(exact=False)`, where matching CPython costs
-  speed: float `/`, `//`, `%` by zero give IEEE inf and nan instead of raising, and `int / int`
-  and int-float comparisons use plain double arithmetic. Integer `//` and `%` by zero still
+- **Parity can be traded for speed** with `@scram(parity=False)`, where matching CPython costs
+  speed: float `/`, `//`, `%` by zero and `math` functions give IEEE inf and nan instead of
+  raising (as numpy's functions do), `math` functions are cimo's C library and `hypot` is C's,
+  and `int / int` and int-float comparisons use plain double arithmetic. Integer `//` and `%` by zero still
   raise (in C they trap). Later: FMA contraction, faster math functions, reassociation for
   vectorization. Parity stays the default; the code generator's job is to make it cost nothing.
 - **numpy scalars are numpy's, not Python's.** A value read from an array is a numpy scalar:
@@ -378,9 +379,10 @@ compare. `bench/kernels.py`, arm64:
 | flood_fill 512x512 | 244 ms | 4.7 ms | 2.5 ms | 52x | 1.9x |
 | viewshed 96x96 | 119 ms | 13.2 ms | 6.7 ms | 9x | 2.0x |
 
-viewshed's gap is CPython-exact `math.hypot` (vector_norm through the host table) against the
-hand C's plain `hypot`; gray_scott's is the wraparound compare repeated per access where the
-hand C computes it once per row.
+viewshed's gap is parity: CPython-exact `math.hypot` (vector_norm through the host table) and
+math error checks; with `parity=False` it runs in 7.9 ms (15x CPython, 1.2x hand C). gray_scott
+and flood_fill are the same speed either way: their gaps are code generation (gray_scott's
+wraparound compare repeated per access where the hand C computes it once per row).
 
 **M2: builtins, lists, narrowing.** Lowering rules for `enumerate`, `zip`, `map`, `filter`,
 comprehensions and the reductions; fixed-size lists as arrays; narrow types from annotations,

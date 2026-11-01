@@ -1,4 +1,4 @@
-"""The M0 kernels: CPython, scramjit, and the hand-written C of kernels/c/ (all through cimo).
+"""The M0 kernels: CPython, scramjit (with and without parity), and the hand-written C of kernels/c/.
 Run from the repository root:  python3 bench/kernels.py
 """
 
@@ -44,9 +44,11 @@ def main():
     u2, v2 = np.zeros_like(u), np.zeros_like(v)
     p = (0.16, 0.08, 0.035, 0.065, 1.0)
     g, h = scram(gs.gray_scott, fallback=False), hand('gray_scott')
+    gr = scram(gs.gray_scott, fallback=False, parity=False)
     g(u, v, u2, v2, *p)
+    gr(u, v, u2, v2, *p)
     rows.append(('gray_scott 256x256', best(lambda: gs.gray_scott(u, v, u2, v2, *p), 1),
-                 best(lambda: g(u, v, u2, v2, *p)),
+                 best(lambda: g(u, v, u2, v2, *p)), best(lambda: gr(u, v, u2, v2, *p)),
                  best(lambda: h(u, *u.shape, v, *v.shape, u2, *u2.shape, v2, *v2.shape, *p, line))))
 
     n = 512
@@ -54,10 +56,12 @@ def main():
     y0, x0 = divmod(int(np.argmax(grid)), n)
     stack = np.zeros(n * n, np.int64)
     f, h = scram(ff.flood_fill, fallback=False), hand('flood_fill')
+    fr = scram(ff.flood_fill, fallback=False, parity=False)
     ret = np.zeros(1, np.int64)
     f(grid.copy(), stack, y0, x0, 7)
+    fr(grid.copy(), stack, y0, x0, 7)
     rows.append(('flood_fill 512x512', best(lambda: ff.flood_fill(grid.copy(), stack, y0, x0, 7), 1),
-                 best(lambda: f(grid.copy(), stack, y0, x0, 7)),
+                 best(lambda: f(grid.copy(), stack, y0, x0, 7)), best(lambda: fr(grid.copy(), stack, y0, x0, 7)),
                  best(lambda: h(grid.copy(), n, n, stack, n * n, y0, x0, 7, ret, line))))
 
     n = 96
@@ -65,14 +69,17 @@ def main():
     dem = np.sin(6 * xx) * np.cos(5 * yy) * 40 + rng.random((n, n)) * 3
     vis = np.zeros((n, n), np.uint8)
     w, h = scram(vs.viewshed, fallback=False), hand('viewshed')
+    wr = scram(vs.viewshed, fallback=False, parity=False)
     w(dem, vis, n // 3, n // 2, 2.0)
+    wr(dem, vis, n // 3, n // 2, 2.0)
     rows.append(('viewshed 96x96', best(lambda: vs.viewshed(dem, vis, n // 3, n // 2, 2.0), 1),
-                 best(lambda: w(dem, vis, n // 3, n // 2, 2.0)),
+                 best(lambda: w(dem, vis, n // 3, n // 2, 2.0)), best(lambda: wr(dem, vis, n // 3, n // 2, 2.0)),
                  best(lambda: h(dem, n, n, vis, n, n, n // 3, n // 2, 2.0, line))))
 
-    print(f'{"kernel":20s} {"CPython":>10s} {"scramjit":>10s} {"hand C":>10s} {"vs CPython":>11s} {"vs hand C":>10s}')
-    for name, t_py, t_sj, t_c in rows:
-        print(f'{name:20s} {t_py * 1e3:8.1f}ms {t_sj * 1e3:8.2f}ms {t_c * 1e3:8.2f}ms {t_py / t_sj:10.0f}x {t_sj / t_c:9.2f}x')
+    print(f'{"kernel":20s} {"CPython":>10s} {"scramjit":>10s} {"parity off":>11s} {"hand C":>10s}')
+    for name, t_py, t_sj, t_r, t_c in rows:
+        print(f'{name:20s} {t_py * 1e3:8.1f}ms {t_sj * 1e3:8.2f}ms {t_r * 1e3:9.2f}ms {t_c * 1e3:8.2f}ms'
+              f'   ({t_py / t_sj:.0f}x / {t_py / t_r:.0f}x CPython)')
 
 
 if __name__ == '__main__':

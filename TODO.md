@@ -11,7 +11,7 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
   `ema`). When cimo inlines small functions: turn them back into functions.
 - **`CIMO_FMA=0` set before importing cimo** (`scramjit/_dispatch.py`, `tests/conftest.py`), plus
   a warning when it is on, because contraction is process-wide. When cimo takes `fma=` per
-  compile: pass it, drop the environment variable and the warning; `exact=False` can then turn
+  compile: pass it, drop the environment variable and the warning; `parity=False` can then turn
   contraction on.
 - **Math functions call the host libm through a table of addresses** (`_dispatch._libm_table`,
   `SJ_LIBM1` in the prelude), passed to each kernel that uses them, because cimo resolves `sin`

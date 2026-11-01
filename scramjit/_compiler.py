@@ -81,9 +81,9 @@ def flag_or(a, b):
 
 
 class Compiler:
-    def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, exact=True):
+    def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, parity=True):
         self.f = fdef
-        self.exact = exact     # False: C's float semantics where CPython parity costs speed
+        self.exact = parity    # False: C's float semantics where CPython parity costs speed
         self.globals = globals_
         self.filename = filename
         self.offset = line_offset
@@ -1602,6 +1602,11 @@ class Compiler:
         def libm(n):
             self.uses_libm = True
             return LIBM.index(n)
+        if not self.exact and (kind in ('f1', '1a', 'log', 'atan2', 'pow', 'fmod') or (kind == 'hypot' and len(xs) == 2)):
+            # parity=False: cimo's C library, IEEE results (nan, inf) instead of exceptions
+            if kind == 'log' and len(xs) == 2:
+                return f'(log({xs[0]}) / log({xs[1]}))', '0'
+            return f'{name}({", ".join(xs)})', '0'
         if kind in ('f1', '1a'):
             x = self.hold(xs[0], T.FLOAT)
             if name == 'sqrt':

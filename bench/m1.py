@@ -112,8 +112,8 @@ def main():
          lambda f, n: f(s[:n], t[:n], np.zeros(n + 1, np.int64)), 1500, 150),
         ('collatz', collatz_total, lambda f, n: f(n), 30_000, 3_000),
     ]
-    modes = [('exact', {}), ('exact=False', {'exact': False}), ('no bounds', {'boundscheck': False}),
-             ('both off', {'exact': False, 'boundscheck': False})]
+    modes = [('parity', {}), ('parity=False', {'parity': False}), ('no bounds', {'boundscheck': False}),
+             ('both off', {'parity': False, 'boundscheck': False})]
     work = {'edit_distance': lambda n: n * n, 'collatz': lambda n: n * 100}
     print(f'{"kernel":14s} {"CPython":>9s}' + ''.join(f'{m:>13s}' for m, _ in modes) + '   speedup')
     for name, fn, run, n, npy in cases:

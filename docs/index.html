@@ -253,7 +253,7 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
     <li class="hide-sm"><a href="#usage">Usage</a></li>
     <li class="hide-sm"><a href="#why">Motivation</a></li>
     <li class="hide-sm"><a href="#how">How it works</a></li>
-    <li class="hide-sm"><a href="#visibility">Visibility</a></li>
+    <li class="hide-sm"><a href="#visibility">Preflight</a></li>
     <li class="hide-sm"><a href="#semantics">Semantics</a></li>
     <li class="hide-sm"><a href="#platforms">Platforms</a></li>
     <li><a href="docs/">Docs</a></li>
@@ -482,9 +482,9 @@ for (int64_t i = 0; i &lt; a_len; i++)
 </div></section>
 
 <section class="s" id="visibility"><div class="wrap">
-  <span class="k">Visibility</span>
-  <h2>See what was compiled</h2>
-  <p class="lede">Code scramjit can't compile runs as plain Python, so nothing breaks. Every decorated function is in one of three states, and preflight shows which, down to the line.</p>
+  <span class="k">Preflight</span>
+  <h2>Preflight shows what didn't compile, and why</h2>
+  <p class="lede">Code scramjit can't compile runs as plain Python, so nothing breaks. Every decorated function is in one of three states, shown down to the line.</p>
   <div class="legend"><span><i class="st g"></i><b>compiled</b> everything native</span><span><i class="st a"></i><b>partly compiled</b> some loops native</span><span><i class="st r"></i><b>Python</b> nothing compiled</span></div>
 
   <div class="wf">

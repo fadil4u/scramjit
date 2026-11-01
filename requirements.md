@@ -185,11 +185,68 @@ optimizes best (canonical counted loops, affine indexing, `restrict` where no al
 
 ## Prior art
 
-Study existing Python compilers and JITs for their strategies: type inference and typing of
-builtins, lowering of loops, iterators and comprehensions, array analysis and loop fusion, the
-compiler pipeline, dispatch and the on-disk cache, and error reporting. Record here what we
-adopt, change or reject and why. "Better" means measurable: faster code, faster compiles,
-clearer errors or fewer surprises.
+Study existing Python compilers and JITs for their strategies. Record here what we adopt, change
+or reject and why. "Better" means measurable: faster code, faster compiles, clearer errors or
+fewer surprises.
+
+Findings from an LLVM-based JIT (studied for M0):
+
+- **Dispatch:** adopt interned type codes, fast paths for scalars and arrays, and a cache from
+  argument fingerprint to signature. Reject a "best compatible signature" search: exact-key
+  lookup, compile on a miss. Memoize failed compiles; one global compile lock.
+- **Inference:** adopt SSA plus a widen-only type lattice with an explicit Python-numeric join;
+  report errors only after a fixed point. Use a worklist (they re-run every constraint per round).
+- **Builtins:** they keep `range`, `enumerate` and `zip` as iterator structs and rely on LLVM to
+  remove them. cimo can't, so rewrite them into counted loops in our IR. Write builtins as direct
+  lowering rules, not source-level overloads compiled through the pipeline (a compile-latency
+  cost there).
+- **Comprehensions:** they fuse only `np.array([... for ...])` and don't support generator
+  expressions. A producer node inlined into its consumer (sum, any, list build, for) is ours.
+- **Arrays:** adopt pointer + shape + strides with the layout (C, F, any) in the signature.
+  Their bounds checks are off by default, per access and never hoisted; ours stay on and are
+  removed by range analysis and hoisting. Never emit arithmetic that is undefined on overflow.
+- **Errors:** adopt their convention: an int status, results and exception info through out
+  parameters, a static table of (exception, message, Python line) per raise site.
+- **Loop lifting:** adopt their candidate rules (one entry; all exits to one block; no `return`
+  or `yield` inside) and live-in/live-out computation. Change: the rest runs in the real
+  interpreter (theirs compiles it to PyObject C-API calls, "little to no speedup"); lifted loops
+  stay cacheable (theirs can't be cached). They removed fallback after users mistook slow paths
+  for compiled code; our warning, preflight and `fallback=False` exist for exactly that.
+- **Caching:** adopt atomic writes and the target in the key. Also key on transitive callees,
+  captured globals and the scramjit and cimo builds; no pickle.
+- **Diagnostics:** adopt per-line annotation and errors that list why each option failed. Name
+  the user's variables, never IR temporaries; one primary reason per line.
+- **Avoid their deviations from Python** where cheap: missing `UnboundLocalError`, frozen
+  globals, copying nested containers in and out (keep copy-in/out to flat numeric lists, and
+  check every element, not the first).
+
+## Kernels and measurements (M0)
+
+`kernels/`: Gray-Scott reaction-diffusion, flood fill and viewshed as plain Python, the C
+scramjit should generate for each in `kernels/c/`, and `kernels/check.py`, which requires the C
+(compiled by cimo) to give bit-identical results and the same exceptions at the same lines, after
+the same writes, as CPython.
+
+- **Subset fit:** Gray-Scott and viewshed fit as written. Flood fill fits once its stack is a
+  preallocated array; the usual version (a list with `append`/`pop`) is partly compiled. Growable
+  lists will be the commonest fallback; keep them out until the numeric subset is solid.
+- **Speed** (arm64 Linux, best of 5 against one CPython run): Gray-Scott 96×96 about 480×, flood
+  fill 256×256 about 75×, viewshed 64×64 about 20× (math calls and kept bounds checks in its
+  inner loop). Cold compile 0.07 to 0.15 s per kernel.
+- **FMA:** cimo contracts multiply-adds by default, and that changes Gray-Scott's results. With
+  contraction off, all three match bit for bit. scramjit must compile with contraction off.
+- **Semantics the C must reproduce:** Python's `round` is round-half-even (C `rint`, not C
+  `round`); storing an int into a narrower array raises `OverflowError` in numpy, so it is range
+  checked (once, if loop-invariant); a hoisted bounds check needs loop versioning, so the
+  `IndexError` comes after the same writes as in Python; when branches merge, each statement
+  keeps its own line; `//` and `%` on values read from arrays need the sign fix-up, while `%` on
+  a loop index lowers to a compare.
+- **Math functions:** cimo's C library differs from CPython's in the last bit for many inputs:
+  `atan2` 18%, `hypot` 14% (CPython implements `hypot` itself), `sin` and `cos` 3%, `exp` and
+  `pow` under 0.1%, `sqrt` and `log` never (100,000 random inputs). Open: how "never change
+  results" applies to math functions.
+- **Calls between compiled functions** aren't in the subset yet; kernels with a helper per ray or
+  cell need them.
 
 ## Visibility and profiling
 
@@ -227,6 +284,8 @@ Planned cimo features; scramjit is their first consumer:
 - `#line` directives honored in diagnostics and debug info.
 - A defined calling convention for numpy buffers and scalars.
 - Low compile latency and a cache key scramjit can use.
+- Fused multiply-add contraction controlled per compile (today only the process-wide `CIMO_FMA`
+  environment variable); scramjit needs it off, other users of cimo may want it on.
 - The per-loop optimization report (`cimo report`: optimized or not, and why) as data, mapped to
   `#line`, for the per-line preflight report.
 - Symbols for profilers (perf map, jitdump) so `perf` names compiled functions.
@@ -239,7 +298,8 @@ Planned cimo features; scramjit is their first consumer:
 **M0: subset check and prior-art study.** Write the planned cimo demo kernels (reaction-diffusion,
 flood fill, viewshed) as plain Python, and hand-write the C scramjit should generate for each.
 Study existing compilers' typing and lowering (see "Prior art"). Done when every kernel fits the subset or the
-subset is amended here with the reason, and the findings are recorded here.
+subset is amended here with the reason, and the findings are recorded here. **Done 2026-11-01**: see "Kernels and
+measurements (M0)" and "Prior art"; one decision is open there (math functions).
 
 **M1: scalars, 1-D arrays, `range`.** `ast` → C for scalar arithmetic, `range` loops, `if`,
 `while`, and 1-D numpy arrays; annotations as contracts; `int64`/`float64` only; in-memory cache.

@@ -62,6 +62,11 @@ compile server, and targets WebAssembly. The code is editable and recompiles as 
 | Sand | Cellular automaton, updated in place | ~90x |
 | Fractal | Mandelbrot, one escape loop per pixel | ~45x |
 
+## Examples
+
+[`examples/`](examples/) has runnable scripts: n-body gravity, edit distance, union-find, Karplus-Strong
+audio, a Mandelbrot renderer, Monte Carlo option pricing, threads, and what falling back looks like.
+
 ## Benchmarks
 
 Arm64 Linux, from [`bench/kernels.py`](bench/kernels.py) and [`bench/m1.py`](bench/m1.py). The

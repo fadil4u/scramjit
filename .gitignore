@@ -221,3 +221,6 @@ __marimo__/
 
 # Local agent instructions
 AGENTS.md
+
+# what examples/karplus_strong.py writes
+*.wav

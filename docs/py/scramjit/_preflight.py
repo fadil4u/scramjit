@@ -99,6 +99,25 @@ def assumed_signature(fdef):
     return sig
 
 
+def best_analysis(fdef, globals_, filename, offset, opts):
+    """Analyze under the assumed signature. An unannotated array whose values are used as indices
+    isn't float64, so before calling a function uncompilable, try its arrays as int64 too. Returns
+    (signature, compiler or None, problems)."""
+    sig = assumed_signature(fdef)
+    first = None
+    arrays = [i for i, t in enumerate(sig) if t.kind == 'array']
+    for mask in range(1 << min(len(arrays), 4)):
+        trial = list(sig)
+        for bit, i in enumerate(arrays[:4]):
+            if mask >> bit & 1:
+                trial[i] = T.array(T.NP_INT64, True, sig[i].ndim)
+        c, problems = analyze(fdef, trial, globals_, filename, offset, opts)
+        if c is not None:
+            return trial, c, problems
+        first = first or (trial, c, problems)
+    return first
+
+
 def _innermost_stmt(fdef, line):
     """The list holding the innermost statement on this line, and its index."""
     found = None
@@ -170,7 +189,7 @@ def static_report(paths, out):
             print(path, file=out)
             width = max(len(f.name) for f, _ in funcs)
             for fdef, g in funcs:
-                c, problems = analyze(fdef, assumed_signature(fdef), g, path, 0, _options(fdef))
+                _, c, problems = best_analysis(fdef, g, path, 0, _options(fdef))
                 if c is not None:
                     good += 1
                     print(f'  {GREEN} {fdef.name:<{width}}  compiled', file=out)
@@ -203,7 +222,10 @@ def line_report(lines, first, fdef, offset, title, status, bounds, problems, typ
     bad = {}
     for line, why in problems:
         bad.setdefault(line, why)
-    body_start = fdef.body[0].lineno + offset
+    body = fdef.body
+    if len(body) > 1 and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]                                 # a docstring isn't code
+    body_start = body[0].lineno + offset
     width = max(len(s) for s in lines) if lines else 0
     hints = list(hints)
     for i, text in enumerate(lines):
@@ -248,9 +270,9 @@ def function_report(f, signature, out):
         print(f'{f.__name__}\nPython · {where}\n{f._why_not}', file=out)
         return
     if not keys:
-        c, problems = analyze(fdef, assumed_signature(fdef), f._fn.__globals__, f._filename, offset,
-                              {'boundscheck': f._boundscheck, 'parity': f._parity})
-        sig = ', '.join(t.name for t in assumed_signature(fdef))
+        trial, c, problems = best_analysis(fdef, f._fn.__globals__, f._filename, offset,
+                                           {'boundscheck': f._boundscheck, 'parity': f._parity})
+        sig = ', '.join(t.name for t in trial)
         state = 'compiled' if c is not None else 'Python'
         line_report(lines, f._first, fdef, offset, f'{f.__name__}({sig})', f'{state} · {where} · assumed signature, not called yet',
                     (c.checks, c.hoisted_lines, f._boundscheck) if c else None, problems,
@@ -284,8 +306,7 @@ def target_report(target, out):
     g = module_globals(tree)
     for n in ast.walk(tree):
         if isinstance(n, ast.FunctionDef) and n.name == name:
-            sig = assumed_signature(n)
-            c, problems = analyze(n, sig, g, path, 0, _options(n))
+            sig, c, problems = best_analysis(n, g, path, 0, _options(n))
             start = n.decorator_list[0].lineno if n.decorator_list else n.lineno
             text = src.splitlines()[start - 1:n.end_lineno]
             state = 'compiled' if c is not None else 'Python'

@@ -22306,7 +22306,13 @@ def _shape(ifb):
     if j1 is not None and j1 is j2:
         return s1, s2, j1
     return None
+def _can_be_one_block(lp):
+    if len(lp.exits()) > 1:
+        return False
+    return not any(i.op == D.Ocall for b in lp.blocks for i in ir.ins(b))
 def convert_loop(fn, lp):
+    if not _can_be_one_block(lp):
+        return False
     for ifb in list(lp.blocks):
         g = _shape(ifb)
         if not g:
@@ -24116,10 +24122,10 @@ def optimize(fn):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "29f3c48e20e129716699",
-"runtime-arm64": "3cfc5b3f6857d7a68ce6",
-"runtime-arm64_apple": "e8e5da6d8d70f985663b",
-"runtime-arm64_win": "e679623d6906690b7ae1"
+"compiler": "7d6e930ad14bfcffed72",
+"runtime-arm64": "606499e0c60d676087b4",
+"runtime-arm64_apple": "fbf38e93625cd1c3101a",
+"runtime-arm64_win": "32aa33488e0377f26efc"
 }
 ''',
 'onefile.py': '''\

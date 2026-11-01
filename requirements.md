@@ -196,11 +196,13 @@ be easy to see. Tools, all pure Python, behind one `scramjit` command (also `pyt
 
 - **`scramjit preflight PATH`:** static, before running. Every `@scram` function under the path
   with its state (compiled, partly compiled, Python), and line by line what stays in Python and why.
-  Annotations are used; unannotated arguments are assumed numeric or arrays, so type-driven
-  fallbacks show only at runtime. Exits non-zero on anything but compiled, for CI.
-- **`scramjit profile script.py`:** runs the script like `cProfile`, then reports per function and
-  signature: state, calls, compile time or cache hit, time in native code, and the native share of
-  the whole run (the coverage number). Ends with hints.
+  Annotations are used; unannotated arguments are assumed numeric or arrays.
+- **`scramjit preflight --run SCRIPT`** (or `--run -m MODULE`, such as `-m pytest`): runs it and
+  reports what actually happened, with the real argument types: per function and signature, state,
+  calls, compile time or cache hit, time in native code and in Python, and the native share of the
+  whole run (the coverage number). Ends with hints. Catches the type-driven fallbacks the static
+  mode can't see; running the test suite under it is the CI check.
+- Both modes exit non-zero on anything but compiled (`--allow-partial` accepts partly compiled).
 - **`f.explain()`:** the Python source annotated per line: state (native or Python, and why),
   inferred and narrowed types, bounds checks proven, hoisted or kept, loops cimo optimized or not,
   copies at the call boundary. Ends with hints.
@@ -250,7 +252,7 @@ reported at its Python line (fallback warning, preflight, and `CompileError` und
 
 **M4: loop lifting.** Compile the loops that fit inside functions that don't. Done when a function
 mixing Python-only setup (dicts, strings) with a numeric loop is partly compiled, matches CPython,
-and preflight, profile and `explain()` show the state per line.
+and preflight (both modes) and `explain()` show the state per line.
 
 ## Risks
 
@@ -261,6 +263,6 @@ and preflight, profile and `explain()` show the state per line.
 - **Semantic drift** from CPython in edge cases (overflow, division, indexing, narrowing) breaks
   the "it's still Python" promise. Differential testing is the guard.
 - **Silent slowness** from fallback: a decorated function that quietly runs as Python. The warning,
-  preflight, profile and `fallback=False` are the guard.
+  preflight (static and `--run`) and `fallback=False` are the guard.
 - **Scope creep** into growable lists, dicts and classes pulls in a runtime. Hold the line until
   the numeric subset is solid.

@@ -28,7 +28,7 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
    `for i in range(a, len(x))` with `arr[i + c]` today).
 3. **Store-to-load forwarding:** `y[i]` written then `y[i - 1]` read next iteration; keeping it in
    a register gives `ema` 2.39 ns against 3.07 (cimo doesn't do it).
-4. **Native arm64 is 2.4x slower than Pyodide on an LLM forward pass.** A llama2.c forward pass written as one
+4. **Native arm64 is 2.4x slower than Pyodide on an LLM forward pass.** `bench/llm.py`, a llama2.c forward pass as one
     function of plain loops over float64 arrays (stories15M, single thread): 27 tok/s native, 64.5 in Pyodide
     with `boundscheck=False, parity=False`. Native gets 27.3 with the default options too, where Pyodide drops
     to 13.5, so check that those options take effect natively. The C version through cimo doesn't show the gap

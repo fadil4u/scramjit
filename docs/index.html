@@ -116,28 +116,32 @@ section.s{padding:76px 0 8px}
 .t-kw{color:#ff7b72}.t-ty{color:#79c0ff}.t-fn{color:#d2a8ff}.t-str{color:#a5d6ff}.t-num{color:#79c0ff}.t-cm{color:#6e7681}.t-pp{color:#ff7b72}.t-dec{color:#ffa94d}.t-err{color:#fda4af}
 .code .fname{position:relative;flex:1;min-width:0;height:1.4em;overflow:hidden}
 .code .fname span{position:absolute;inset:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:opacity .4s,transform .4s}
-.code .fname .n-c,.frame.done .fname .n-py{opacity:0;transform:translateY(6px)}
-.frame.done .fname .n-c{opacity:1;transform:none}
-.chip{position:relative;flex:none;display:grid;font:500 11.5px var(--mono);border-radius:6px;overflow:hidden}
-.chip b{grid-area:1/1;font-weight:500;padding:3px 9px;border-radius:6px;transition:opacity .4s;white-space:nowrap;text-align:center}
-.chip .s-py{background:#16213d;color:#9fbcff}
-.chip .s-c{background:linear-gradient(90deg,#9a3412,#b91c1c);color:#fff;opacity:0}
-.frame.done .chip .s-c{opacity:1}
-/* one pane: Python and its C stacked; a raster line sweeps down and turns each line it passes from Python into C */
-.code .panes{position:relative;display:grid}
+.code .fname .n-c,.frame.c .fname .n-py{opacity:0;transform:translateY(6px)}
+.frame.c .fname .n-c{opacity:1;transform:none}
+/* the toggle drives the raster: generated C sweeps down into C, Python sweeps back up */
+.tabs{display:flex;flex:none;gap:2px;background:#0b0f1a;border:1px solid #232838;border-radius:7px;padding:2px}
+.tabs button{white-space:nowrap;border:0;background:none;color:#8e94a3;font:500 11.5px var(--mono);padding:4px 10px;border-radius:5px;cursor:pointer;transition:background .3s,color .3s}
+.tabs button:hover{color:#c9d1e2}
+.tabs .t-py[aria-pressed=true]{color:#cfe0ff;background:#16213d}
+.tabs .t-c[aria-pressed=true]{color:#fff;background:linear-gradient(90deg,#9a3412,#b91c1c)}
+/* one pane: Python and its C stacked; a raster line sweeps through and turns each line it passes into the other */
+.code .panes{position:relative;display:grid;cursor:pointer}
 .code .panes>pre{grid-area:1/1}
+.frame{--sw:2.4s}.frame.quick{--sw:1.3s}
 .panes pre.c{clip-path:inset(0 0 100% 0)}
-.frame.sweep pre.py{animation:sw-py 2.4s cubic-bezier(.45,.05,.55,.95) both}
-.frame.sweep pre.c{animation:sw-c 2.4s cubic-bezier(.45,.05,.55,.95) both}
 .frame.done pre.py{clip-path:inset(100% 0 0 0)}
 .frame.done pre.c{clip-path:inset(0 0 0 0)}
+.frame.sweep pre.py,.frame.unsweep pre.py{animation:sw-py var(--sw) cubic-bezier(.45,.05,.55,.95) both}
+.frame.sweep pre.c,.frame.unsweep pre.c{animation:sw-c var(--sw) cubic-bezier(.45,.05,.55,.95) both}
+.frame.sweep .scan,.frame.unsweep .scan{animation:sw-scan var(--sw) cubic-bezier(.45,.05,.55,.95) both}
+.frame.unsweep pre.py,.frame.unsweep pre.c,.frame.unsweep .scan{animation-direction:reverse}
 .scan{position:absolute;left:0;right:0;top:0;height:2px;pointer-events:none;opacity:0;background:linear-gradient(90deg,rgba(37,99,235,0),#3b82f6 12%,#f97316 58%,#ef4444 88%,rgba(239,68,68,0));box-shadow:0 0 16px 3px rgba(249,115,22,.45)}
 .scan::after{content:"";position:absolute;left:0;right:0;bottom:2px;height:26px;background:linear-gradient(0deg,rgba(249,115,22,.12),rgba(249,115,22,0))}
-.frame.sweep .scan{animation:sw-scan 2.4s cubic-bezier(.45,.05,.55,.95) both}
+.frame.unsweep .scan::after{bottom:auto;top:2px;background:linear-gradient(180deg,rgba(59,130,246,.12),rgba(59,130,246,0))}
 @keyframes sw-py{from{clip-path:inset(0 0 0 0)}to{clip-path:inset(100% 0 0 0)}}
 @keyframes sw-c{from{clip-path:inset(0 0 100% 0)}to{clip-path:inset(0 0 0 0)}}
 @keyframes sw-scan{0%{top:0;opacity:0}5%{opacity:1}94%{opacity:1}100%{top:100%;opacity:0}}
-@media (prefers-reduced-motion:reduce){.frame.sweep pre.py,.frame.sweep pre.c,.frame.sweep .scan{animation:none}.chip b,.code .fname span{transition:none}}
+@media (prefers-reduced-motion:reduce){.frame.sweep pre.py,.frame.sweep pre.c,.frame.sweep .scan,.frame.unsweep pre.py,.frame.unsweep pre.c,.frame.unsweep .scan{animation:none}.tabs button,.code .fname span{transition:none}}
 .code .cfoot{display:flex;align-items:center;gap:8px;padding:8px 14px;border-top:1px solid #232838;font:500 11.5px var(--mono);color:#6f7891}
 .code .cfoot i{width:7px;height:7px;border-radius:50%;background:var(--hot)}
 /* usage carousel: auto-advances while in view, pauses on hover or focus; arrows, buttons, keys and swipe move it */
@@ -276,7 +280,7 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
     <div class="carousel" tabindex="0" role="group" aria-roledescription="carousel" aria-label="Examples; use the left and right arrow keys to move between them">
       <div class="car-clip"><div class="car">
       <div class="frame on" data-title="Recurrence · each step depends on the one before"><div class="code xf">
-        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="fname"><span class="n-py">ema.py</span><span class="n-c">ema · float64[:], float64[:], float</span></span><span class="chip"><b class="s-py">Python</b><b class="s-c">generated C</b></span></div>
+        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="fname"><span class="n-py">ema.py</span><span class="n-c">ema · float64[:], float64[:], float</span></span><span class="tabs" role="group" aria-label="Show the Python or the generated C"><button type="button" class="t-py" aria-pressed="true">Python</button><button type="button" class="t-c" aria-pressed="false">generated C</button></span></div>
         <div class="panes">
 <pre data-lang="py" class="py">import numpy as np
 import scramjit
@@ -300,10 +304,10 @@ void ema(const double *x, int64_t x_len,
 }</pre>
 <i class="scan" aria-hidden="true"></i>
         </div>
-        <div class="cfoot"><i></i>Bounds checks are left out of the C shown, for clarity. Click the code to replay.</div>
+        <div class="cfoot"><i></i>Bounds checks are left out of the C shown, for clarity.</div>
       </div></div>
       <div class="frame" data-title="Dynamic programming · edit distance over bytes" aria-hidden="true"><div class="code xf">
-        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="fname"><span class="n-py">distance.py</span><span class="n-c">edit_distance · uint8[:], uint8[:], int64[:]</span></span><span class="chip"><b class="s-py">Python</b><b class="s-c">generated C</b></span></div>
+        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="fname"><span class="n-py">distance.py</span><span class="n-c">edit_distance · uint8[:], uint8[:], int64[:]</span></span><span class="tabs" role="group" aria-label="Show the Python or the generated C"><button type="button" class="t-py" aria-pressed="true">Python</button><button type="button" class="t-c" aria-pressed="false">generated C</button></span></div>
         <div class="panes">
 <pre data-lang="py" class="py">import numpy as np
 import scramjit
@@ -349,10 +353,10 @@ int64_t edit_distance(const uint8_t *a, int64_t a_len,
 }</pre>
 <i class="scan" aria-hidden="true"></i>
         </div>
-        <div class="cfoot"><i></i>Bounds checks are left out of the C shown, for clarity. Click the code to replay.</div>
+        <div class="cfoot"><i></i>Bounds checks are left out of the C shown, for clarity.</div>
       </div></div>
       <div class="frame" data-title="Threads · the GIL is released while compiled code runs" aria-hidden="true"><div class="code xf">
-        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="fname"><span class="n-py">mandel.py</span><span class="n-c">mandel_rows · int32[:, :], int, int, int</span></span><span class="chip"><b class="s-py">Python</b><b class="s-c">generated C</b></span></div>
+        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="fname"><span class="n-py">mandel.py</span><span class="n-c">mandel_rows · int32[:, :], int, int, int</span></span><span class="tabs" role="group" aria-label="Show the Python or the generated C"><button type="button" class="t-py" aria-pressed="true">Python</button><button type="button" class="t-c" aria-pressed="false">generated C</button></span></div>
         <div class="panes">
 <pre data-lang="py" class="py">from concurrent.futures import ThreadPoolExecutor
 import numpy as np
@@ -398,7 +402,7 @@ void mandel_rows(int32_t *out, int64_t h, int64_t w,
 }</pre>
 <i class="scan" aria-hidden="true"></i>
         </div>
-        <div class="cfoot"><i></i>Bounds checks are left out of the C shown, for clarity. Click the code to replay.</div>
+        <div class="cfoot"><i></i>Bounds checks are left out of the C shown, for clarity.</div>
       </div></div>
       </div></div>
       <div class="car-bar"><span class="car-title">Recurrence · each step depends on the one before</span><span class="car-ctl"><button type="button" class="car-prev" aria-label="Previous example">‹</button><span class="car-count">01 / 03</span><button type="button" class="car-next" aria-label="Next example">›</button></span></div>
@@ -532,25 +536,39 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
     pre.innerHTML = out + esc(text.slice(last));
   });
 })();
-// Usage carousel. Each frame shows the Python; then a raster line sweeps down and turns it into the C
-// scramjit generates, line by line. Autoplay while in view and not hovered or focused; arrows,
-// buttons, keys, swipe and drag move it. Clicking the code replays the sweep.
+// Usage carousel. Each frame shows the Python, then a raster line sweeps down and turns it into the C
+// scramjit generates, line by line. The Python / generated C toggle (or a click on the code) runs the
+// raster either way by hand. Autoplay while in view and not hovered or focused; arrows, buttons, keys,
+// swipe and drag move between examples.
 (function () {
   var wrap = document.querySelector('.carousel'); if (!wrap) return;
-  var frames = [].slice.call(wrap.querySelectorAll('.frame')), N = frames.length, i = 0, tmr = null, sw = null, paused = false;
+  var frames = [].slice.call(wrap.querySelectorAll('.frame')), N = frames.length, i = 0, tmr = null, sw = null, paused = false, justDragged = false;
   var title = wrap.querySelector('.car-title'), count = wrap.querySelector('.car-count');
   var RM = matchMedia('(prefers-reduced-motion:reduce)').matches;
-  function reset(f) { f.classList.remove('sweep', 'done'); }
-  function sweep(f) {
-    reset(f); f.offsetWidth;
-    if (RM) { f.classList.add('done'); return; }
-    f.classList.add('sweep');
-    clearTimeout(sw); sw = setTimeout(function () { f.classList.remove('sweep'); f.classList.add('done'); }, 2400);
+  function mark(f, c) {
+    f.classList.toggle('c', c);
+    f.querySelector('.t-py').setAttribute('aria-pressed', !c);
+    f.querySelector('.t-c').setAttribute('aria-pressed', c);
+  }
+  function reset(f) { clearTimeout(sw); f.classList.remove('sweep', 'unsweep', 'done', 'quick'); mark(f, false); }
+  // to C (dir 1) or back to Python (dir -1); quick for a manual toggle
+  function run(f, dir, quick) {
+    var c = dir > 0;
+    if (f.classList.contains('c') === c && !f.classList.contains('sweep') && !f.classList.contains('unsweep')) return;
+    clearTimeout(sw);
+    f.classList.remove('sweep', 'unsweep'); f.classList.toggle('quick', !!quick);
+    mark(f, c);
+    if (RM) { f.classList.toggle('done', c); return; }
+    f.classList.remove('done'); f.offsetWidth;
+    f.classList.add(c ? 'sweep' : 'unsweep');
+    sw = setTimeout(function () { f.classList.remove('sweep', 'unsweep'); f.classList.toggle('done', c); }, quick ? 1300 : 2400);
   }
   // show the Python first, then sweep it into C
-  function play(f, delay) { clearTimeout(sw); reset(f); sw = setTimeout(function () { sweep(f); }, delay); }
+  function play(f, delay) { reset(f); sw = setTimeout(function () { run(f, 1); }, delay); }
   frames.forEach(function (f) {
-    f.querySelector('.panes').addEventListener('click', function () { if (!String(getSelection())) f.classList.contains('done') ? reset(f) : sweep(f); });
+    f.querySelector('.t-py').addEventListener('click', function () { run(f, -1, true); arm(); });
+    f.querySelector('.t-c').addEventListener('click', function () { run(f, 1, true); arm(); });
+    f.querySelector('.panes').addEventListener('click', function () { if (!justDragged && !String(getSelection())) { run(f, f.classList.contains('c') ? -1 : 1, true); arm(); } });
   });
   function pad(n) { return (n < 10 ? '0' : '') + n; }
   function clear(el) { el.style.transition = el.style.transform = el.style.opacity = el.style.visibility = ''; }
@@ -597,7 +615,7 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
     if (x0 === null) return;
     var dx = e.clientX - x0, v = Math.abs(dx) / Math.max(1, e.timeStamp - t0); x0 = null;
     if (dragging) {
-      dragging = false; car.classList.remove('dragging');
+      dragging = false; car.classList.remove('dragging'); justDragged = true; setTimeout(function () { justDragged = false; }, 0);
       if (N > 1 && (Math.abs(dx) / W > .18 || v > .6)) go(side, true);
       else { clear(frames[i]); if (nb && nb !== frames[i]) clear(nb); }
       nb = null;

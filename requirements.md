@@ -134,7 +134,8 @@ Each decision is explicit and tested against CPython:
 - `int` is int64 unless narrowed; overflow wraps. Open: a checked mode.
 - `//` and `%` round toward negative infinity, as in Python, not truncate as in C.
 - Negative indices count from the end, as in Python.
-- Bounds checks: open (on by default with an opt-out, or off by default).
+- Bounds checks are on by default and raise `IndexError` as Python does; opt out per function with
+  `@scramjit.jit(boundscheck=False)`.
 - Float division by zero: open (raise as Python does, or return inf as C does).
 - Float evaluation order follows Python; no reassociation, no FMA contraction unless opted in.
 

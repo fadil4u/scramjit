@@ -242,7 +242,7 @@ class Function:
 
     def preflight(self, signature=None):
         """Print this function line by line: native or Python and why, types, bounds checks."""
-        from ._preflight import function_report
+        from .cli.report import function_report
         function_report(self, signature, sys.stdout)
 
     def _specialize(self, key, args):

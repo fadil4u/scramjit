@@ -86,6 +86,15 @@ def flag_or(a, b):
     return f'({a} | {b})'
 
 
+UNSUPPORTED_EXPRESSIONS = {'Dict': "dicts aren't compiled", 'DictComp': "dict comprehensions aren't compiled",
+                           'Set': "sets aren't compiled", 'SetComp': "set comprehensions aren't compiled",
+                           'JoinedStr': "f-strings aren't compiled", 'Lambda': "a lambda outside map() or filter() isn't compiled",
+                           'Slice': "slices aren't compiled", 'Starred': "argument unpacking isn't compiled",
+                           'Await': "await isn't compiled", 'Yield': "yield isn't compiled", 'YieldFrom': "yield from isn't compiled",
+                           'NamedExpr': "the walrus operator isn't compiled"}
+OPERATOR_NAMES = {'Pow': "the ** operator isn't compiled yet", 'MatMult': "the @ operator isn't compiled"}
+
+
 class Lazy(ast.NodeTransformer):
     """map() and filter() as what they are: a comprehension, or, in a for statement, a plain loop.
     Only the builtins themselves (not names rebound in the function or its module), with a
@@ -315,7 +324,7 @@ class Compiler:
         elif isinstance(s, ast.AugAssign):
             op = ARITH.get(type(s.op))
             if op is None:
-                self.fail(s, f'the {type(s.op).__name__} operator')
+                self.fail(s, OPERATOR_NAMES.get(type(s.op).__name__, f'the {type(s.op).__name__} operator'))
             res = self.binop_type(self.typeof(s.target), self.typeof(s.value), op, s)
             self.infer_target(s.target, res, s)
         elif isinstance(s, (ast.If, ast.While)):
@@ -535,7 +544,7 @@ class Compiler:
         if isinstance(e, ast.BinOp):
             op = ARITH.get(type(e.op))
             if op is None:
-                self.fail(e, f'the {type(e.op).__name__} operator')
+                self.fail(e, OPERATOR_NAMES.get(type(e.op).__name__, f'the {type(e.op).__name__} operator'))
             return self.binop_type(self.typeof(e.left), self.typeof(e.right), op, e)
         if isinstance(e, ast.UnaryOp):
             t = self.typeof(e.operand)
@@ -587,7 +596,7 @@ class Compiler:
             return self.call_type(e)
         if isinstance(e, (ast.GeneratorExp, ast.ListComp)):
             self.fail(e, 'a generator or list comprehension outside sum(), min(), max(), any() or all()')
-        self.fail(e, f'the {type(e).__name__} expression')
+        self.fail(e, UNSUPPORTED_EXPRESSIONS.get(type(e).__name__, f'the {type(e).__name__} expression'))
 
     def is_reduction(self, e):
         name = e.func.id
@@ -714,7 +723,7 @@ class Compiler:
         if mf:
             return self.math_type(e, mf)
         if not isinstance(e.func, ast.Name):
-            self.fail(e, 'this call')
+            self.fail(e, f'calls {ast.unparse(e.func)}()')
         name = e.func.id
         if name == 'range' or not any(self.is_builtin(name, b) for b in BUILTINS):
             self.fail(e, f'calls {name}()')

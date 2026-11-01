@@ -4335,6 +4335,66 @@ def phicopyref(fn, b, p):
         return d.jmp.arg
     return R
 ''',
+'backend/cse.py': '''\
+from . import defs as D
+from .defs import KBASE
+from .cfg import dom
+from .gcm import pinned
+from .gvn import replaceuses
+from .util import newtmp
+_DIV = {D.Odiv: D.Odiv, D.Orem: D.Odiv, D.Oudiv: D.Oudiv, D.Ourem: D.Oudiv}
+def nload(fn):
+    n = 0
+    b = fn.start
+    while b:
+        n += sum(1 for i in b.ins[:b.nins] if D.isload(i.op))
+        b = b.link
+    return n
+def domcse(fn):
+    seen = {}
+    changed = False
+    for b in fn.rpo[:fn.nblk]:
+        for i in b.ins[:b.nins]:
+            if i.op == D.Onop or pinned(i) or i.to == D.R:
+                continue
+            for b1, r in seen.setdefault((i.op, i.cls, i.arg[0], i.arg[1]), []):
+                if dom(b1, b):
+                    replaceuses(fn, i.to, r)
+                    i.set(D.Ins(D.Onop))
+                    changed = True
+                    break
+            else:
+                seen[(i.op, i.cls, i.arg[0], i.arg[1])].append((b, i.to))
+    return changed
+def divrem(fn):
+    divs = set()
+    rems = False
+    for b in fn.rpo[:fn.nblk]:
+        for i in b.ins[:b.nins]:
+            if i.op in (D.Odiv, D.Oudiv) and KBASE(i.cls) == 0:
+                divs.add((i.op, i.cls, i.arg[0], i.arg[1]))
+            elif i.op in (D.Orem, D.Ourem) and KBASE(i.cls) == 0:
+                rems = True
+    if not (divs and rems):
+        return False
+    changed = False
+    for b in fn.rpo[:fn.nblk]:
+        out = []
+        for i in b.ins[:b.nins]:
+            op = D.Odiv if i.op == D.Orem else D.Oudiv if i.op == D.Ourem else None
+            if op is None or (op, i.cls, i.arg[0], i.arg[1]) not in divs:
+                out.append(i)
+                continue
+            d = newtmp('div', i.cls, fn)
+            t = newtmp('mul', i.cls, fn)
+            out.append(D.Ins(op, i.cls, d, i.arg[0], i.arg[1]))
+            out.append(D.Ins(D.Omul, i.cls, t, d, i.arg[1]))
+            out.append(D.Ins(D.Osub, i.cls, i.to, i.arg[0], t))
+            changed = True
+        b.ins = out
+        b.nins = len(out)
+    return changed
+''',
 'backend/defs.py': '''\
 import struct
 NIns = 1 << 20
@@ -5134,11 +5194,12 @@ math = False
 trap = False
 volatile = False
 vla = False
+cse = False
 bigcopy = None
 inline = 0
 stkchk = None
 disjoint = None
-ALL = {'fma': True, 'ldp': True, 'layout': True, 'math': True, 'trap': True, 'volatile': True, 'vla': True}
+ALL = {'fma': True, 'ldp': True, 'layout': True, 'math': True, 'trap': True, 'volatile': True, 'vla': True, 'cse': True}
 _NAMES = tuple(ALL) + ('stkchk', 'bigcopy', 'inline')
 def configure(**kw):
     g = globals()
@@ -5476,9 +5537,12 @@ from .defs import (R, RTmp, KBASE, U32, NIns, Ins, UXXX, UPhi, UIns, UJmp, Odiv,
                    Oshl, Onop, isload, isstore, isalloc, optab, rtype, rval)
 from .util import die, iscmp, igroup, addins, newtmp, emiti
 from .cfg import dom, lca, filldepth, fillloop
+from . import ext as _ext
 NOBID = U32
 def isdivwl(i):
     if i.op in (Odiv, Orem, Oudiv, Ourem):
+        if _ext.cse and D.T.name.startswith('arm64'):
+            return 0
         return int(KBASE(i.cls) == 0)
     return 0
 def pinned(i):
@@ -5726,7 +5790,8 @@ from .defs import (R, RTmp, CON_Z, CBits, Con, Ins, KBASE, KWIDE, U32, Kx, Kw, K
 from .util import die, getcon, newcon, isconbits, argcls, addins
 from .cfg import dom, reachesnotvia, fillcfg, fillloop
 from .fold import foldint, foldref
-from .gcm import pinned
+from .gcm import pinned, isdivwl
+from . import ext as _ext
 con01 = [R, R]
 def mix(x0, x1):
     return (x0 + 17 * x1) & U32
@@ -5746,6 +5811,9 @@ def ieq(ia, ib):
     return 0
 gvntbl = None
 gvntbln = 0
+gvndivs = {}
+gvnselects = {}
+gvnjmps = {}
 def gvndup(i, insert):
     idx = ihash(i) % gvntbln
     while True:
@@ -5876,9 +5944,21 @@ def assoccon(fn, b, i1):
 def killins(fn, i, r):
     replaceuses(fn, i.to, r)
     i.set(Ins(Onop))
+def dedupdiv(fn, b, i):
+    k = (i.op, i.cls, i.arg[0], i.arg[1])
+    seen = gvndivs.setdefault(k, [])
+    for b1, i1 in seen:
+        if dom(b1, b):
+            killins(fn, i, i1.to)
+            return
+    seen.append((b, i))
 def dedupins(fn, b, i):
     normins(fn, i)
-    if i.op == Onop or pinned(i):
+    if i.op == Onop:
+        return
+    if pinned(i):
+        if _ext.cse and isdivwl(i):
+            dedupdiv(fn, b, i)
         return
     assert i.op != Osel0
     assert i.to != R
@@ -5962,6 +6042,51 @@ def propjnz0(fn, bif, s0, snon0, r, cls):
             if branchdom(fn, bif, s0, snon0, b):
                 replaceuse(fn, u, r, CON_Z)
         k += 1
+def diamond(b, p):
+    h = b.idom
+    if p is h:
+        return None if h.s1 is h.s2 else int(h.s1 is b)
+    if p.jmp.type != Jjmp or p.npred != 1 or p.pred[0] is not h:
+        return None
+    return int(h.s1 is p)
+def dedupselect(fn, b):
+    h = b.idom
+    if h is None or h.jmp.type != Jjnz or h.s1 is h.s2:
+        return
+    prev = None
+    p = b.phi
+    while p:
+        kill = False
+        if p.narg == 2:
+            w0, w1 = diamond(b, p.blk[0]), diamond(b, p.blk[1])
+            if w0 is not None and w1 is not None and w0 != w1:
+                k = (p.cls, h.jmp.arg, p.arg[w0 ^ 1], p.arg[w0])
+                seen = gvnselects.setdefault(k, [])
+                for b1, r in seen:
+                    if dom(b1, b):
+                        replaceuses(fn, p.to, r)
+                        p.to = R
+                        kill = True
+                        break
+                else:
+                    seen.append((b, p.to))
+        if kill:
+            if prev is None:
+                b.phi = p.link
+            else:
+                prev.link = p.link
+        else:
+            prev = p
+        p = p.link
+def knownjmp(fn, b):
+    for a in gvnjmps.get(b.jmp.arg, ()):
+        if a.jmp.type != Jjnz or a.s1 is a.s2:
+            continue
+        if a.s1.npred == 1 and branchdom(fn, a, a.s1, a.s2, b):
+            return 1
+        if a.s2.npred == 1 and branchdom(fn, a, a.s2, a.s1, b):
+            return 0
+    return None
 def dedupjmp(fn, b):
     if b.jmp.type != Jjnz:
         return
@@ -5984,6 +6109,15 @@ def dedupjmp(fn, b):
         if zz is not None:
             z = zz
             hit = True
+    if not hit and _ext.cse and rtype(b.jmp.arg) == RTmp:
+        known = knownjmp(fn, b)
+        if known is not None:
+            z = int(not known)
+            hit = True
+        else:
+            seen = gvnjmps.setdefault(b.jmp.arg, [])
+            if len(seen) < 8:
+                seen.append(b)
     if hit:
         if v == 0 or z:
             b.s1 = b.s2
@@ -6005,7 +6139,7 @@ def rebuildcfg(fn):
                 if gvndup(i, 0) is i:
                     addins(s, i)
 def gvn(fn):
-    global gvntbl, gvntbln
+    global gvntbl, gvntbln, gvndivs, gvnselects, gvnjmps
     from .ssa import filluse, ssacheck
     from .parse import printfn
     con01[0] = getcon(0, fn)
@@ -6029,9 +6163,14 @@ def gvn(fn):
         b = b.link
     gvntbln = nins + nins // 2
     gvntbl = [None] * gvntbln
+    gvndivs = {}
+    gvnselects = {}
+    gvnjmps = {}
     for n in range(fn.nblk):
         b = fn.rpo[n]
         dedupphi(fn, b)
+        if _ext.cse:
+            dedupselect(fn, b)
         for i in b.ins[:b.nins]:
             dedupins(fn, b, i)
         dedupjmp(fn, b)
@@ -6991,6 +7130,17 @@ class _Driver:
         inline.expand_all(fns, ext.inline)
         for fn in fns:
             self.compile(fn)
+    @staticmethod
+    def _cleanup(fn, cfg, ssa, gvn, gcm):
+        ssa.ssacheck(fn)
+        gvn.gvn(fn)
+        cfg.fillcfg(fn)
+        cfg.simplcfg(fn)
+        ssa.filluse(fn)
+        cfg.filldom(fn)
+        gcm.gcm(fn)
+        ssa.filluse(fn)
+        ssa.ssacheck(fn)
     def compile(self, fn):
         T = D.T
         err = sys.stderr
@@ -7026,19 +7176,26 @@ class _Driver:
         gcm.gcm(fn)
         ssa.filluse(fn)
         ssa.ssacheck(fn)
+        from . import ext, cse
+        if ext.cse:
+            loads = cse.nload(fn)
+            cfg.filldom(fn)
+            merged = cse.domcse(fn)
+            if T.name.startswith('arm64') and cse.divrem(fn):
+                merged = True
+            ssa.filluse(fn)
+            alias.fillalias(fn)
+            load.loadopt(fn)
+            ssa.filluse(fn)
+            ssa.ssacheck(fn)
+            if merged or cse.nload(fn) != loads:
+                cfg.filldom(fn)
+                self._cleanup(fn, cfg, ssa, gvn, gcm)
         from .. import middle
         if middle.enabled:
             cfg.filldom(fn)
             if middle.run(fn):
-                ssa.ssacheck(fn)
-                gvn.gvn(fn)
-                cfg.fillcfg(fn)
-                cfg.simplcfg(fn)
-                ssa.filluse(fn)
-                cfg.filldom(fn)
-                gcm.gcm(fn)
-                ssa.filluse(fn)
-                ssa.ssacheck(fn)
+                self._cleanup(fn, cfg, ssa, gvn, gcm)
         if T.name == 'wasm':
             D.unvolatile(fn)
             T.emitfn(fn, self.outf)
@@ -12392,7 +12549,7 @@ def _qbe(ssa, params=None, middle=None, stkchk=None, target=None):
     try:
         with _compile_lock, _middle.options(enabled=MIDDLE if middle is None else middle,
                              params=params or {}), \\
-                _ext.options(fma=True, ldp=True, layout=True, math=True, trap=True, volatile=True, vla=True, bigcopy=256,
+                _ext.options(fma=True, ldp=True, layout=True, math=True, trap=True, volatile=True, vla=True, cse=True, bigcopy=256,
                              inline=INLINE, stkchk=stkchk), _Recursion():
             D.T = next(t for t in _targets() if t.name == (target or TARGET))
             drv = _Driver(out, 0)
@@ -12413,7 +12570,7 @@ def _qbe_wasm(ssa, params=None, middle=None):
     obj = Object()
     try:
         with _compile_lock, _middle.options(enabled=MIDDLE if middle is None else middle,
-                             params=params or {}), _ext.options(math=True, fma=True, volatile=True, vla=True,
+                             params=params or {}), _ext.options(math=True, fma=True, volatile=True, vla=True, cse=True,
                                         inline=INLINE), \\
                 _Recursion():
             D.T = T_wasm
@@ -22149,7 +22306,13 @@ def _shape(ifb):
     if j1 is not None and j1 is j2:
         return s1, s2, j1
     return None
+def _can_be_one_block(lp):
+    if len(lp.exits()) > 1:
+        return False
+    return not any(i.op == D.Ocall for b in lp.blocks for i in ir.ins(b))
 def convert_loop(fn, lp):
+    if not _can_be_one_block(lp):
+        return False
     for ifb in list(lp.blocks):
         g = _shape(ifb)
         if not g:
@@ -23959,10 +24122,10 @@ def optimize(fn):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "92ee4909c4d26d03425d",
-"runtime-arm64": "366c2fafb1ac9fc5c534",
-"runtime-arm64_apple": "945792b7887dce8b444f",
-"runtime-arm64_win": "a7fb3944f5e93b4504f5"
+"compiler": "7d6e930ad14bfcffed72",
+"runtime-arm64": "606499e0c60d676087b4",
+"runtime-arm64_apple": "fbf38e93625cd1c3101a",
+"runtime-arm64_win": "32aa33488e0377f26efc"
 }
 ''',
 'onefile.py': '''\

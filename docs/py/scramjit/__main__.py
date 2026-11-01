@@ -1,5 +1,5 @@
 import sys
 
-from ._preflight import main
+from .cli import main
 
 sys.exit(main())

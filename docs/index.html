@@ -98,7 +98,8 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--hot);outline-offset
 section.s{padding:76px 0 8px}
 @media(max-width:600px){section.s{padding:52px 0 4px}}
 .split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px;margin-top:28px;align-items:start}
-.split.usage{grid-template-columns:minmax(0,.85fr) minmax(0,1.15fr);align-items:center;margin-top:0}
+.split.usage{grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:end;gap:48px;margin-top:0}
+.usage .pts{padding-bottom:4px}
 @media(max-width:960px){.split,.split.usage{grid-template-columns:minmax(0,1fr)}}
 .pts{list-style:none;display:flex;flex-direction:column;gap:12px}
 .pts li{position:relative;padding-left:20px;font-size:15px;color:var(--ink3)}
@@ -114,28 +115,37 @@ section.s{padding:76px 0 8px}
 .code pre::-webkit-scrollbar{display:none}
 @media(max-width:600px){.code pre{font-size:11.5px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere}}
 .t-kw{color:#ff7b72}.t-ty{color:#79c0ff}.t-fn{color:#d2a8ff}.t-str{color:#a5d6ff}.t-num{color:#79c0ff}.t-cm{color:#6e7681}.t-pp{color:#ff7b72}.t-dec{color:#ffa94d}.t-err{color:#fda4af}
-.code .fname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tabs{display:flex;flex:none;gap:2px;margin-left:auto;background:#0b0f1a;border:1px solid #232838;border-radius:7px;padding:2px}
-.tabs button{white-space:nowrap;border:0;background:none;color:#8e94a3;font:500 11.5px var(--mono);padding:4px 10px;border-radius:5px;cursor:pointer}
-.tabs button[aria-selected=true]{color:#fff;background:#232838}
-.tabs button[aria-selected=true].hot{background:linear-gradient(90deg,#9a3412,#b91c1c)}
-.code .panes{display:grid}
-.code .panes>pre{grid-area:1/1;transition:opacity .35s ease}
-.code .panes>pre[hidden]{display:block;visibility:hidden;opacity:0}
-.code .cfoot{display:flex;align-items:center;gap:8px;padding:8px 14px;border-top:1px solid #232838;font:500 11.5px var(--mono);color:#6f7891}
-.code .cfoot i{width:7px;height:7px;border-radius:50%;background:var(--hot)}
 /* usage carousel: auto-advances while in view, pauses on hover or focus; arrows, buttons, keys and swipe move it */
 .carousel{min-width:0;outline:0}
 .car-clip{overflow:hidden;padding:18px;margin:-18px}
-.car{display:grid;touch-action:pan-y;cursor:grab;user-select:none;-webkit-user-select:none}
+.car{display:grid;align-items:start;touch-action:pan-y;cursor:grab;user-select:none;-webkit-user-select:none}
+.car.moved{transition:height .55s cubic-bezier(.3,.7,.2,1)}
 .car *{touch-action:pan-y}
 .car pre{user-select:text;-webkit-user-select:text}
 .car.dragging,.car.dragging *{cursor:grabbing}
 .frame{grid-area:1/1;display:flex;flex-direction:column;min-width:0;transition:transform .72s cubic-bezier(.3,.7,.2,1),opacity .72s ease,visibility 0s linear .72s;transform:translateX(104%) scale(.86);opacity:0;visibility:hidden}
 .frame.on{transform:none;opacity:1;visibility:visible;transition-delay:0s}
 .frame.left{transform:translateX(-104%) scale(.86)}
-.frame>.code{flex:1;display:flex;flex-direction:column;box-shadow:0 18px 40px -24px rgba(16,24,40,.45)}
-.frame .panes{flex:1}
+.frame>.code{flex:1;box-shadow:0 18px 40px -24px rgba(16,24,40,.45)}
+#usage .carousel{margin-top:34px}
+/* split: Python left, C right; a scan line in the cold-to-hot gradient writes the C */
+.xs{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.xs-p{position:relative;min-width:0;display:flex;flex-direction:column}
+.xs-p pre{flex:1;font-size:12.5px}
+.xs-p.c{border-left:1px solid #232838;background:linear-gradient(180deg,rgba(249,115,22,.035),rgba(220,38,38,.05))}
+.xs .bar .lbl{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.xs-p.c .bar{background:linear-gradient(90deg,#1a1820,#21161a)}
+.xs-p.c .bar b{font-weight:500;color:#ffb072}
+.xs-p.c pre{clip-path:inset(0 0 0 0)}
+.scanning .frame:not(.run) .xs-p.c pre{clip-path:inset(0 0 100% 0)}
+.scan{position:absolute;left:calc(-100% - 1px);width:calc(200% + 1px);top:36px;height:2px;pointer-events:none;opacity:0;background:linear-gradient(90deg,rgba(37,99,235,0),#3b82f6 15%,#f97316 58%,#ef4444 85%,rgba(239,68,68,0));box-shadow:0 0 14px 2px rgba(249,115,22,.45)}
+.frame.run .xs-p.c pre{animation:xs-write 2.4s cubic-bezier(.45,.05,.55,.95) both}
+.frame.run .scan{animation:xs-scan 2.4s cubic-bezier(.45,.05,.55,.95) both}
+@keyframes xs-write{from{clip-path:inset(0 0 100% 0)}to{clip-path:inset(0 0 0 0)}}
+@keyframes xs-scan{0%{top:36px;opacity:0}6%{opacity:1}92%{opacity:1}100%{top:100%;opacity:0}}
+.car-note{flex:1;text-align:right;font-size:12px;color:var(--ink4)}
+@media(max-width:860px){.xs{grid-template-columns:minmax(0,1fr)}.xs-p.c{border-left:0;border-top:1px solid #232838}.scan{left:0;width:100%}.car-note{display:none}.split.usage{gap:20px}}
+@media (prefers-reduced-motion:reduce){.frame.run .xs-p.c pre,.frame.run .scan{animation:none}}
 .car-bar{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:13px;color:var(--ink3);margin-top:12px}
 .car-ctl{display:flex;align-items:center;gap:6px;flex-shrink:0}
 .car-count{font-family:var(--mono);font-size:12px}
@@ -218,7 +228,7 @@ h3.where{margin-top:44px;font-size:20px}
 footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;color:var(--ink3)}
 .foot{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
 .foot-links{display:flex;gap:18px}.foot-links a:hover{color:var(--ink)}
-@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.badge i{animation:none}.code .panes>pre{transition:none}}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.badge i{animation:none}}
 </style>
 </head>
 <body>
@@ -265,20 +275,19 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
       <span class="k">Usage</span>
       <h2>Plain Python in, C out</h2>
       <p class="lede">On the first call scramjit reads the argument types, generates C specialized to them, compiles it with cimo and caches it. Later calls with the same types run native code directly.</p>
-      <ul class="pts" style="margin-top:22px">
-        <li><b>Still Python.</b> Without the decorator the function runs unchanged in CPython, debuggable and testable as Python.</li>
-        <li><b>Never changes results.</b> Every compiled function is tested against CPython running it undecorated.</li>
-        <li><b>No GIL while it runs.</b> Threads calling a compiled function run in parallel.</li>
-        <li><b>Arrays in place.</b> numpy arrays are passed by pointer, shape and strides, never copied.</li>
-      </ul>
     </div>
-    <div class="carousel" tabindex="0" role="group" aria-roledescription="carousel" aria-label="Examples; use the left and right arrow keys to move between them">
-      <div class="car-clip"><div class="car">
-      <div class="frame on" data-title="Recurrence · each step depends on the one before"><div class="code xf">
-        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="fname">ema.py</span>
-          <div class="tabs" role="tablist" aria-label="Source or generated C"><button type="button" role="tab" aria-selected="true">Python</button><button type="button" role="tab" aria-selected="false" class="hot">generated C</button></div></div>
-        <div class="panes">
-<pre data-lang="py" data-name="ema.py">import numpy as np
+    <ul class="pts">
+      <li><b>Still Python.</b> Without the decorator the function runs unchanged in CPython, debuggable and testable as Python.</li>
+      <li><b>Never changes results.</b> Every compiled function is tested against CPython running it undecorated.</li>
+      <li><b>No GIL while it runs.</b> Threads calling a compiled function run in parallel.</li>
+      <li><b>Arrays in place.</b> numpy arrays are passed by pointer, shape and strides, never copied.</li>
+    </ul>
+  </div>
+  <div class="carousel" tabindex="0" role="group" aria-roledescription="carousel" aria-label="Examples; use the left and right arrow keys to move between them">
+    <div class="car-clip"><div class="car">
+      <div class="frame on" data-title="Recurrence · each step depends on the one before"><div class="code xs">
+        <div class="xs-p py"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="lbl">ema.py</span></div>
+<pre data-lang="py">import numpy as np
 import scramjit
 
 @scramjit.jit
@@ -289,23 +298,20 @@ def ema(x, y, a: float):
 
 x = np.random.rand(1_000_000)
 y = np.empty_like(x)
-ema(x, y, 0.1)   # compiled here, native from now on</pre>
-<pre data-lang="c" data-name="ema · float64[:], float64[:], float" hidden>#line 5 "ema.py"
+ema(x, y, 0.1)   # compiled here, native from now on</pre></div>
+        <div class="xs-p c"><div class="bar"><span class="lbl"><b>generated C</b> · ema · float64[:], float64[:], float</span></div>
+<pre data-lang="c">#line 5 "ema.py"
 void ema(const double *x, int64_t x_len,
          double *y, int64_t y_len, double a)
 {
     y[0] = x[0];
     for (int64_t i = 1; i &lt; x_len; i++)
         y[i] = a * x[i] + (1 - a) * y[i - 1];
-}</pre>
-        </div>
-        <div class="cfoot"><i></i>Illustrative C: the exact output, including bounds checks, is being designed.</div>
+}</pre><i class="scan" aria-hidden="true"></i></div>
       </div></div>
-      <div class="frame" data-title="Dynamic programming · edit distance over bytes" aria-hidden="true"><div class="code xf">
-        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="fname">distance.py</span>
-          <div class="tabs" role="tablist" aria-label="Source or generated C"><button type="button" role="tab" aria-selected="true">Python</button><button type="button" role="tab" aria-selected="false" class="hot">generated C</button></div></div>
-        <div class="panes">
-<pre data-lang="py" data-name="distance.py">import numpy as np
+      <div class="frame" data-title="Dynamic programming · edit distance over bytes" aria-hidden="true"><div class="code xs">
+        <div class="xs-p py"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="lbl">distance.py</span></div>
+<pre data-lang="py">import numpy as np
 import scramjit
 
 @scramjit.jit
@@ -324,8 +330,9 @@ def edit_distance(a, b, row):
 
 a = np.frombuffer(b"kitten", np.uint8)
 b = np.frombuffer(b"sitting", np.uint8)
-edit_distance(a, b, np.empty(len(b) + 1, np.int64))   # 3</pre>
-<pre data-lang="c" data-name="edit_distance · uint8[:], uint8[:], int64[:]" hidden>#line 5 "distance.py"
+edit_distance(a, b, np.empty(len(b) + 1, np.int64))   # 3</pre></div>
+        <div class="xs-p c"><div class="bar"><span class="lbl"><b>generated C</b> · edit_distance · uint8[:], uint8[:], int64[:]</span></div>
+<pre data-lang="c">#line 5 "distance.py"
 int64_t edit_distance(const uint8_t *a, int64_t a_len,
                       const uint8_t *b, int64_t b_len,
                       int64_t *row, int64_t row_len)
@@ -346,15 +353,11 @@ int64_t edit_distance(const uint8_t *a, int64_t a_len,
         }
     }
     return row[b_len];
-}</pre>
-        </div>
-        <div class="cfoot"><i></i>Illustrative C: the exact output, including bounds checks, is being designed.</div>
+}</pre><i class="scan" aria-hidden="true"></i></div>
       </div></div>
-      <div class="frame" data-title="Threads · the GIL is released while compiled code runs" aria-hidden="true"><div class="code xf">
-        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="fname">mandel.py</span>
-          <div class="tabs" role="tablist" aria-label="Source or generated C"><button type="button" role="tab" aria-selected="true">Python</button><button type="button" role="tab" aria-selected="false" class="hot">generated C</button></div></div>
-        <div class="panes">
-<pre data-lang="py" data-name="mandel.py">from concurrent.futures import ThreadPoolExecutor
+      <div class="frame" data-title="Threads · the GIL is released while compiled code runs" aria-hidden="true"><div class="code xs">
+        <div class="xs-p py"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="lbl">mandel.py</span></div>
+<pre data-lang="py">from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import scramjit
 
@@ -373,10 +376,11 @@ def mandel_rows(out, y0: int, y1: int, iters: int):
             out[j, i] = n
 
 out = np.zeros((2048, 2048), np.int32)
-with ThreadPoolExecutor(8) as pool:   # 8 cores busy, no GIL contention
+with ThreadPoolExecutor(8) as pool:   # 8 cores, no GIL contention
     for k in range(8):
-        pool.submit(mandel_rows, out, 256 * k, 256 * k + 256, 200)</pre>
-<pre data-lang="c" data-name="mandel_rows · int32[:, :], int, int, int" hidden>#line 6 "mandel.py"
+        pool.submit(mandel_rows, out, 256 * k, 256 * k + 256, 200)</pre></div>
+        <div class="xs-p c"><div class="bar"><span class="lbl"><b>generated C</b> · mandel_rows · int32[:, :], int, int, int</span></div>
+<pre data-lang="c">#line 6 "mandel.py"
 void mandel_rows(int32_t *out, int64_t h, int64_t w,
                  int64_t y0, int64_t y1, int64_t iters)
 {
@@ -395,13 +399,10 @@ void mandel_rows(int32_t *out, int64_t h, int64_t w,
             out[j * w + i] = (int32_t)n;
         }
     }
-}</pre>
-        </div>
-        <div class="cfoot"><i></i>Illustrative C: the exact output, including bounds checks, is being designed.</div>
+}</pre><i class="scan" aria-hidden="true"></i></div>
       </div></div>
-      </div></div>
-      <div class="car-bar"><span class="car-title">Recurrence · each step depends on the one before</span><span class="car-ctl"><button type="button" class="car-prev" aria-label="Previous example">‹</button><span class="car-count">01 / 03</span><button type="button" class="car-next" aria-label="Next example">›</button></span></div>
-    </div>
+    </div></div>
+    <div class="car-bar"><span class="car-title">Recurrence · each step depends on the one before</span><span class="car-note">The C is illustrative: the exact output, including bounds checks, is being designed.</span><span class="car-ctl"><button type="button" class="car-prev" aria-label="Previous example">‹</button><span class="car-count">01 / 03</span><button type="button" class="car-next" aria-label="Next example">›</button></span></div>
   </div>
   <p class="doclink"><a href="docs/?p=first-function">Docs: your first function →</a></p>
 </div></section>
@@ -529,42 +530,34 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
     pre.innerHTML = out + esc(text.slice(last));
   });
 })();
-// Usage carousel. Each frame has Python / generated C tabs. Autoplay (while in view, not hovered or
-// focused): show the Python, flip to the C, then move on. Arrows, buttons, keys, swipe and drag move it;
-// clicking a tab keeps that frame on the pane chosen.
+// Usage carousel: Python and its C side by side; a scan line writes the C whenever a frame becomes
+// active. Autoplay while in view and not hovered or focused; arrows, buttons, keys, swipe and drag move it.
 (function () {
   var wrap = document.querySelector('.carousel'); if (!wrap) return;
-  var frames = [].slice.call(wrap.querySelectorAll('.frame')), N = frames.length, i = 0, tmr = null, flip = null, paused = false;
+  var frames = [].slice.call(wrap.querySelectorAll('.frame')), N = frames.length, i = 0, tmr = null, paused = false;
   var title = wrap.querySelector('.car-title'), count = wrap.querySelector('.car-count');
   var RM = matchMedia('(prefers-reduced-motion:reduce)').matches;
-  function pane(f, k) {
-    f.querySelectorAll('.tabs button').forEach(function (t, j) { t.setAttribute('aria-selected', j === k); });
-    var ps = f.querySelectorAll('.panes > pre');
-    ps.forEach(function (p, j) { p.hidden = j !== k; });
-    f.querySelector('.fname').textContent = ps[k].dataset.name;
-  }
-  frames.forEach(function (f) {
-    f.querySelectorAll('.tabs button').forEach(function (t, k) {
-      t.addEventListener('click', function () { f.dataset.chosen = '1'; clearTimeout(flip); pane(f, k); });
-    });
-  });
+  // the track takes the height of the frame on show, so short examples leave no gap
+  var track = wrap.querySelector('.car');
+  function fit() { track.style.height = frames[i].offsetHeight + 'px'; }
+  fit(); addEventListener('resize', fit); if (document.fonts) document.fonts.ready.then(fit);
+  if ('ResizeObserver' in window) { var ro = new ResizeObserver(function () { fit(); }); frames.forEach(function (f) { ro.observe(f); }); }
+  function run(f) { if (RM) return; f.classList.remove('run'); f.offsetWidth; f.classList.add('run'); }
   function pad(n) { return (n < 10 ? '0' : '') + n; }
   function clear(el) { el.style.transition = el.style.transform = el.style.opacity = el.style.visibility = ''; }
-  function go(dir, fromDrag, auto) {
+  function go(dir, fromDrag) {
     var from = frames[i], j = (i + dir + N) % N, to = frames[j];
-    if (auto && !to.dataset.chosen) pane(to, 0);
+    track.classList.add('moved');
     if (!fromDrag) { to.style.transition = 'none'; to.classList.toggle('left', dir < 0); to.offsetWidth; to.style.transition = ''; }
     clear(from); clear(to);
     to.classList.remove('left'); to.classList.add('on'); to.removeAttribute('aria-hidden');
     from.classList.remove('on'); from.classList.toggle('left', dir > 0); from.setAttribute('aria-hidden', 'true');
-    i = j; title.textContent = to.dataset.title; count.textContent = pad(i + 1) + ' / ' + pad(N); arm();
+    i = j; title.textContent = to.dataset.title; count.textContent = pad(i + 1) + ' / ' + pad(N); fit(); run(to); arm();
   }
   function inView() { var r = wrap.getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight && !document.hidden; }
   function arm() {
-    clearTimeout(tmr); clearTimeout(flip); if (RM) return;
-    var f = frames[i];
-    flip = setTimeout(function () { if (!paused && inView() && !f.dataset.chosen) pane(f, 1); }, 4500);
-    tmr = setTimeout(function () { if (!paused && inView()) go(1, false, true); else arm(); }, 10000);
+    clearTimeout(tmr); if (RM) return;
+    tmr = setTimeout(function () { if (!paused && inView()) go(1); else arm(); }, 9000);
   }
   wrap.querySelector('.car-prev').addEventListener('click', function () { go(-1); });
   wrap.querySelector('.car-next').addEventListener('click', function () { go(1); });
@@ -604,7 +597,12 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
     arm();
   }
   car.addEventListener('pointerup', endDrag); car.addEventListener('pointercancel', endDrag);
-  arm();
+  // the first frame writes its C when the carousel first comes into view
+  if (!RM && 'IntersectionObserver' in window) wrap.classList.add('scanning');
+  if ('IntersectionObserver' in window) new IntersectionObserver(function (es, ob) {
+    if (es[0].isIntersecting) { ob.disconnect(); run(frames[i]); arm(); }
+  }, { threshold: 0.35 }).observe(wrap);
+  else arm();
 })();
 // The heat line under the top bar fills as you scroll down the page.
 (function () {

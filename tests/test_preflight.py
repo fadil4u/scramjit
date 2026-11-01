@@ -254,6 +254,13 @@ def test_a_complex_power_is_flagged_only_when_possible(tmp_path):
     assert 'line 7' not in out and '2 compiled' in out
 
 
+def test_a_function_with_no_loop_is_noted(tmp_path):
+    (tmp_path / 'p.py').write_text('from scramjit import scram\n@scram\ndef f(x: float):\n    return x + 1\n'
+                                   '@scram\ndef g(a):\n    for v in a:\n        pass\n')
+    out = run(['-m', 'scramjit', 'preflight', 'p.py'], tmp_path).stdout
+    assert out.count('no loop') == 1 and out.index('no loop') < out.index('✓ g')
+
+
 def test_differences_from_python_are_flagged(tmp_path):
     (tmp_path / 'p.py').write_text('from scramjit import scram\n@scram\ndef f(n: int, k: int):\n    return n ** k\n')
     r = run(['-m', 'scramjit', 'preflight', 'p.py'], tmp_path)
@@ -274,9 +281,15 @@ def test_json(proj):
     assert d['compiled'] == 4 and d['python'] == 1 and r.returncode == 1
     bad = next(f for f in d['files'][0]['functions'] if f['name'] == 'summarize')
     assert bad['state'] == 'python' and bad['problems'][0]['line'] == SIM.splitlines().index('    names = {}') + 1 and bad['problems'][0]['hint']
-    r = run(['-m', 'scramjit', 'preflight', '--json', '--run', 'app.py'], proj)
-    d = json.loads(r.stderr)
+    r = run(['-m', 'scramjit', 'preflight', '--json', '-o', 'out.json', '--run', 'app.py'], proj)
+    assert 'args []' in r.stdout
+    d = json.loads((proj / 'out.json').read_text())
     assert {f['name'] for f in d['functions']} == {'ema', 'grid', 'summarize'} and d['exit_status'] == 0
+
+
+def test_json_to_a_file_without_running(proj):
+    r = run(['-m', 'scramjit', 'preflight', '--json', '-o', 'out.json', 'sim.py'], proj)
+    assert r.stdout == '' and json.loads((proj / 'out.json').read_text())['compiled'] == 4
 
 
 def test_color_rules(proj):

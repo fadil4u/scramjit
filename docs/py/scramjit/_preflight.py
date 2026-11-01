@@ -268,6 +268,10 @@ def python_files(path):
     return out
 
 
+def has_loop(fdef):
+    return any(isinstance(n, (ast.For, ast.While, ast.comprehension)) for n in ast.walk(fdef))
+
+
 def subscript_lines(fdef, offset):
     return {n.lineno + offset for n in ast.walk(fdef) if isinstance(n, ast.Subscript)}
 

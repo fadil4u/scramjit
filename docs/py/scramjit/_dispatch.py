@@ -6,6 +6,7 @@ import inspect
 import struct
 import sys
 import textwrap
+import ctypes
 import os
 import threading
 import time
@@ -155,6 +156,80 @@ def functions():
     return list(_functions)
 
 
+def _make_plan(f, entry, args):
+    """A small function for calls with these argument types, or f._slow if they need the general path.
+    It's generated because a call is where the time goes: what's known from the types is decided here,
+    once. Anything it can't vouch for at call time (an int past 64 bits, an array of another dtype,
+    dimension or layout, an empty one) goes to f._slow, so plans change only speed."""
+    env = {'kernel': entry.kernel, 'slow': f._slow, 'failed': f._failed, 'box': f._box, 'ret': entry.ret, 'pool': [],
+           'addressof': ctypes.addressof, 'c_char': ctypes.c_char, 'bytearray': bytearray, 'memoryview': memoryview}
+    names = [f'a{i}' for i in range(len(args))]
+    guards, setup, cargs = [], [], []
+    for i, (x, t, n) in enumerate(zip(args, entry.types, names)):
+        if t.kind == 'array':
+            env[f'd{i}'] = x.dtype
+            setup.append(f'fl = {n}.flags')
+            guards.append(f'{n}.dtype is d{i} and {n}.ndim == {x.ndim} and fl.c_contiguous and fl.writeable is {bool(x.flags.writeable)}')
+            if x.flags.writeable:
+                cargs.append(f'addressof(c_char.from_buffer({n}))')
+            else:
+                cargs.append(n)
+            cargs.extend(f'{n}.shape[{k}]' for k in range(x.ndim))
+        elif t.kind == 'tuple':
+            return f._slow_call
+        elif t.np:
+            cargs.append(f'{n}.item()')
+        else:
+            if t.kind == 'int':
+                guards.append(f'-9223372036854775808 <= {n} <= 9223372036854775807')
+            cargs.append(n)
+    if entry.libm is not None:
+        pointer = ctypes.c_char_p(entry.libm)
+        env['libm_keep'] = (entry.libm, pointer)        # alive as long as the plan
+        env['libm'] = ctypes.cast(pointer, ctypes.c_void_p).value
+        cargs.append('libm')
+    size = 40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0)
+    r = entry.ret
+    if r is T.NONE:
+        result = 'None'
+    elif r is T.INT:
+        result = 'q[0]'
+    elif r is T.FLOAT:
+        result = 'd[0]'
+    elif r.kind == 'tuple':
+        env['boxes'] = [(32 + 16 * i, 40 + 16 * i, et) for i, et in enumerate(r.elem)]
+        result = 'tuple(box(io, at, flag, et) for at, flag, et in boxes)'
+    else:
+        result = 'box(io, 0, 16, ret)'
+    head = ', '.join(names)
+    pad = '    '
+    checks = ''.join(f'{pad}{pad}{s}\n' for s in dict.fromkeys(setup))
+    src = f"""def plan({head}):
+    try:
+{checks}        if not ({' and '.join(guards) or 'True'}):
+            return slow(({head}{',' if names else ''}))
+        carg = ({''.join(c + ', ' for c in cargs)})
+    except (ValueError, TypeError, BufferError):        # empty arrays have no buffer to take the address of
+        return slow(({head}{',' if names else ''}))
+    try:
+        io, ioaddr, q, d = pool.pop()
+    except IndexError:
+        io = bytearray({size})
+        ioaddr = addressof(c_char.from_buffer(io))
+        view = memoryview(io)
+        q, d = view.cast('q'), view.cast('d')
+    status = kernel(*carg, ioaddr)
+    if status:
+        pool.append((io, ioaddr, q, d))
+        failed(status, io)
+    value = {result}
+    pool.append((io, ioaddr, q, d))
+    return value
+"""
+    exec(src, env)  # noqa: S102
+    return env['plan']
+
+
 class Function:
     def __init__(self, fn, boundscheck=True, cache=True, fallback=True, parity=True):
         functools.update_wrapper(self, fn)
@@ -164,6 +239,7 @@ class Function:
         self._parity = parity
         self._cache = {}
         self._use_disk = cache
+        self._plans = {}          # the arguments' Python types -> a function that makes the call (see _make_plan)
         self._compile_s = {}      # signature -> seconds spent compiling it
         self._why = {}            # signature -> (line, reason) it runs as Python
         self._stats = {}          # signature -> [calls, native seconds, Python seconds], under preflight --run
@@ -215,6 +291,9 @@ class Function:
         return v.source
 
     def __call__(self, *args, **kwargs):
+        plan = self._plans.get(tuple(map(type, args)))
+        if plan is not None and not kwargs:             # these types were checked when the plan was made
+            return plan(*args)
         for i, p, ann in self._contracts:
             if i < len(args) and not _contract_ok(args[i], ann):
                 raise TypeError(f'{self.__name__}() argument {p!r} must be {_ANNOTATIONS[ann]}, '
@@ -227,9 +306,28 @@ class Function:
             entry = self._specialize(key, args)
         if _profile:
             return self._timed(key, entry, args)
+        if entry is not PYTHON:
+            self._plans[tuple(map(type, args))] = _make_plan(self, entry, args)
+        elif None not in key and not any(t.kind == 'array' for t in key):
+            self._plans[tuple(map(type, args))] = self._fn   # these types always run as Python
         if entry is PYTHON:
             return self._fn(*args)
         return self._run(entry, args)
+
+    def _slow(self, args):
+        """A call a plan turned down: an int past 64 bits, an array of another shape of type."""
+        key = tuple(map(_arg_type, args))
+        entry = self._cache.get(key)
+        if entry is None:
+            entry = self._specialize(key, args)
+        return self._fn(*args) if entry is PYTHON else self._run(entry, args)
+
+    def _failed(self, status, io):
+        slots = [int.from_bytes(io[i:i + 8], 'little', signed=True) for i in range(0, 40, 8)]
+        _raise_at(exception(status, slots), self._filename, slots[1], self.__name__)
+
+    def _slow_call(self, *args):
+        return self._slow(args)
 
     def _timed(self, key, entry, args):
         s = self._stats.setdefault(key, [0, 0.0, 0.0])

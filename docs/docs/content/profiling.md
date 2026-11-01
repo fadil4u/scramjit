@@ -37,7 +37,7 @@ src/sim.py
 2 compiled, 1 runs as Python
 ```
 
-A line that only fails because an earlier one did isn't listed. `-q` shows only what doesn't compile, and `--json` prints the report for tools.
+A line that only fails because an earlier one did isn't listed. `-q` shows only what doesn't compile, and `--json` prints the report for tools (`-o FILE` writes it to a file).
 
 Undecorated functions with a loop that would compile are listed too, as suggestions that don't affect the exit status:
 

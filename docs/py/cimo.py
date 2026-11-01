@@ -4619,6 +4619,7 @@ from .gcm import pinned
 from .gvn import replaceuses
 from .util import newtmp, getcon
 _DIVOPS = (D.Odiv, D.Orem, D.Oudiv, D.Ourem)
+_MULS = (D.Omul, D.Osmulh, D.Oumulh)
 def nload(fn):
     n = 0
     b = fn.start
@@ -4766,6 +4767,36 @@ def divconst(fn):
         b.ins = out
         b.nins = len(out)
     return changed
+def _bigcon(c):
+    n = c.i & D.M64
+    parts = sum(1 for k in range(0, 64, 16) if (n >> k) & 0xffff)
+    inv = sum(1 for k in range(0, 64, 16) if (~n >> k) & 0xffff)
+    return min(parts, inv) > 1
+def hoistcons(fn):
+    regs = {}
+    for b in fn.rpo[1:fn.nblk]:
+        if b.loop <= 1:
+            continue
+        for i in b.ins[:b.nins]:
+            if i.op not in _MULS or KBASE(i.cls) != 0:
+                continue
+            for n in range(2):
+                r = i.arg[n]
+                if D.rtype(r) != D.RCon:
+                    continue
+                c = fn.con[r & D.VMASK]
+                if c.type != D.CBits or not _bigcon(c):
+                    continue
+                k = (r, i.cls)
+                if k not in regs:
+                    regs[k] = newtmp('con', i.cls, fn)
+                i.arg[n] = regs[k]
+    if not regs:
+        return False
+    st = fn.start
+    st.ins = st.ins[:st.nins] + [D.Ins(D.Ocopy, k, t, r, D.R) for (r, k), t in regs.items()]
+    st.nins = len(st.ins)
+    return True
 ''',
 'backend/defs.py': '''\
 import struct
@@ -7587,6 +7618,10 @@ class _Driver:
             cfg.filldom(fn)
             if middle.run(fn):
                 self._cleanup(fn, cfg, ssa, gvn, gcm)
+        if ext.cse and T.name.startswith('arm64'):
+            cfg.fillloop(fn)
+            if cse.hoistcons(fn):
+                ssa.filluse(fn)
         if T.name == 'wasm':
             D.unvolatile(fn)
             T.emitfn(fn, self.outf)
@@ -24528,10 +24563,10 @@ def optimize(fn):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "6a21a7254591dd05ccad",
-"runtime-arm64": "e497ec44e01e8be3d0e5",
-"runtime-arm64_apple": "8efd6b9ad0c33131ad31",
-"runtime-arm64_win": "473eb4808ad87db0d995"
+"compiler": "0deb0ee24997311f441e",
+"runtime-arm64": "e551bfe86a5e1c685f0e",
+"runtime-arm64_apple": "b5576692c099462224ee",
+"runtime-arm64_win": "d56068d5b2234ba79422"
 }
 ''',
 'onefile.py': '''\

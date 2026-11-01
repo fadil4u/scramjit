@@ -61,6 +61,20 @@ Checking every operation would cost speed on every loop, and numeric code rarely
 
 The results are the same in all of these. What changes is what you can observe while the code runs.
 
+### Small functions get slower
+
+Crossing from Python into compiled code costs about 1.5 µs per call for numbers and 2.5 µs with an array, on arm64 Linux. A small Python function takes about 35 ns, so decorating `def add(a, b): return a + b` makes it about 40x slower. The crossing pays for itself at around **30 to 50 loop iterations per call**:
+
+| Iterations per call | Plain Python | Compiled | |
+| --- | ---: | ---: | ---: |
+| 1 | 146 ns | 2,426 ns | 17x slower |
+| 20 | 1,589 ns | 2,470 ns | 1.6x slower |
+| 50 | 3,867 ns | 2,512 ns | 1.5x faster |
+| 100 | 7,609 ns | 2,565 ns | 3x faster |
+| 1,000 | 79,694 ns | 3,522 ns | 21x faster |
+
+So decorate the function that holds the loop, not a helper called from one. In Pyodide the crossing is about 13 µs, so the break-even is higher. `scramjit preflight` adds a note to decorated functions with no loop, and only suggests decorating functions that have one.
+
 ### Ctrl-C waits for the call to finish
 
 Python handles signals between bytecodes, and compiled code has none, so `KeyboardInterrupt` arrives when the compiled call returns. In one test, a signal sent 0.2 s into a long call interrupted it after 10.7 s. A compiled infinite loop can't be stopped with Ctrl-C; you have to kill the process. While developing a long-running function, keep the amount of work per call small, or test it undecorated first.

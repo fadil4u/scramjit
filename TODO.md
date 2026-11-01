@@ -38,6 +38,7 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
    `for i in range(a, len(x))` with `arr[i + c]` today).
 7. **Store-to-load forwarding:** `y[i]` written then `y[i - 1]` read next iteration; keeping it in
    a register gives `ema` 2.39 ns against 3.07 (cimo doesn't do it).
-8. **Call boundary cost:** a compiled call measured about 3.3 µs (signature key, argument list, status
-   buffer, ctypes-style call), against 83 ns for a small function in plain Python, so decorating a tiny
-   function can make it about 40x slower. Trim it, and warn in preflight about functions with no loop.
+8. **Call boundary cost:** a compiled call now costs about 1.5 µs with numbers (was 3.2) and 2.5 µs with an
+   array (was 6.6), through a function generated per signature (`_make_plan`). About 1.4 µs of that is
+   cimo's `Kernel.__call__`, of which raw ctypes is about 0.45: see cimo's `TODO.md`. In Pyodide it's about
+   13 µs. Break-even is 30 to 50 loop iterations per call.

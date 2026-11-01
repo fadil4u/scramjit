@@ -60,6 +60,8 @@ def static(t, reports, quiet=False):
             if a.compiler is not None:
                 if not quiet:
                     t.write(f'  {_mark(t, True)} {f.name:<{width}}  {t.style("compiled", "muted")}')
+                    if not P.has_loop(f):
+                        t.write(f'      {t.style("note:", "note")} no loop: a compiled call costs more than a small Python function')
                     for line, text in sorted(a.compiler.gotchas.items()):
                         t.write(f'      {t.style("note:", "warning")} line {line} {text}')
                 continue

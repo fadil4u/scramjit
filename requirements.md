@@ -448,6 +448,14 @@ type whatever the values, so `a[i] ** 0.5` gives `nan` as numpy does. This and e
 from CPython are in `docs/docs/content/gotchas.md`; keep that page complete. `parity=False` gives C's `pow`, and `x * x` for small powers. `x ** 2` calls libm's
 `pow` as CPython does, which is why `v ** 2` over an array gains about 18x where `v * v` gains far more.
 
+**Call boundary.** Calls were 3.2 µs with numbers and 6.6 µs with an array, half of it scramjit's wrapper.
+Each signature now gets a small generated function: checks decided by the argument types run once when
+it's made, and anything it can't vouch for at call time (an int past 64 bits, another dtype or layout, an
+empty array) takes the general path, so it changes only speed. Status buffers come from a pool, not
+thread-locals, because a signal handler can re-enter between the kernel returning and its result being
+read. Calling `Kernel.address` directly would skip cimo's wrapper, but its trampoline is what lets `malloc`
+and the stack guard find their per-thread context, so that isn't safe; the rest needs a cimo fast path.
+
 **M3 progress.** The disk cache is cimo's: scramjit's C is deterministic, so a second process finds
 it (Gray-Scott first call 0.53 s, then 0.06 s, mostly preprocessing the prelude); no second cache
 needed. Preflight is built (`scramjit/_preflight.py`): static analysis sets each failing statement

@@ -44,11 +44,15 @@ def build_tree():
     p.opt('-q', '--quiet', flag=True, help='Show only what doesn\'t compile')
     p.opt('--no-suggest', flag=True, help='Don\'t list undecorated functions that would compile')
     p.opt('--json', flag=True, help='Print the report as JSON')
+    p.opt('-o', '--output', metavar='file', complete='file',
+          help='Write the `--json` report to a file, the reliable way with `--run`, where stderr also has the '
+               'program\'s own output')
     p.opt('--allow-partial', flag=True, help='Accept partly compiled functions (none exist until loop lifting)')
     p.example('scramjit preflight src/')
     p.example('scramjit preflight src/sim.py:ema', 'one function, line by line')
     p.example('scramjit preflight --run simulate.py --steps 2000')
     p.example('scramjit preflight --run -m pytest tests/', 'in CI: every function, with the types it really gets')
+    p.example('scramjit preflight --json -o report.json --run app.py', 'for tools')
 
     c = root.command(
         'c', 'Print the C generated for a function', func=cmd_c,
@@ -187,7 +191,7 @@ def cmd_preflight(ctx):
             if r is not None:
                 reports.append(r)
     if v.get('json'):
-        report.static_json(sys.stdout, reports)
+        _with_output(ctx, lambda stream: report.static_json(stream, reports), sys.stdout)
         return max(status, any(r.error is not None or any(a.compiler is None for _, a in r.functions) for r in reports))
     if not reports:
         e = ctx.err
@@ -199,6 +203,14 @@ def cmd_preflight(ctx):
         out.write('')
     report.summary(out, good, bad, broken, 0 if v.get('quiet') else sum(len(r.candidates) for r in reports))
     return max(status, 1 if bad or broken else 0)
+
+
+def _with_output(ctx, write, default):
+    path = ctx.values.get('output')
+    if not path:
+        return write(default)
+    with open(path, 'w', encoding='utf-8') as f:
+        return write(f)
 
 
 class _Nothing:
@@ -245,7 +257,7 @@ def _preflight_run(ctx, program):
     total = time.perf_counter() - t0
     sys.stdout.flush()
     if ctx.values.get('json'):
-        bad = report.run_json(sys.stderr, total, status)
+        bad = _with_output(ctx, lambda stream: report.run_json(stream, total, status), sys.stderr)
     else:
         bad = report.run(ctx.err, total, status)
     if ctx.values.get('paths'):

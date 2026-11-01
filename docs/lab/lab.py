@@ -21,11 +21,11 @@ S = {'k': 1, 'row': 0, 'angle': 0.0, 'rates': {}}
 
 
 def terrain(seed):
-    """Fractal value noise (numpy, vectorized: this part isn't the demo), squared into valleys."""
+    """Fractal value noise (numpy, vectorized: this part isn't the demo)."""
     rng = np.random.default_rng(seed)
     h = np.zeros((N, N))
     amp = 1.0
-    for octave in range(6):
+    for octave in range(5):           # the finest octave is 4 cells across, not 1
         k = 2 ** (octave + 2)
         g = rng.random((k + 1, k + 1))
         t = np.linspace(0, k, N)
@@ -33,11 +33,9 @@ def terrain(seed):
         f = t - i
         rows = g[i] * (1 - f)[:, None] + g[i + 1] * f[:, None]
         h += (rows[:, i] * (1 - f) + rows[:, i + 1] * f) * amp
-        amp *= 0.5
+        amp *= 0.45
     h = (h - h.min()) / (h.max() - h.min())
-    ridges = 1 - np.abs(2 * h - 1)                    # ridged: sharp crests, long valleys
-    h = 0.55 * ridges ** 2 + 0.45 * h ** 1.6
-    return (h - h.min()) / (h.max() - h.min())
+    return h ** 1.8                                    # peaks stand out, valleys open up
 
 
 def reset(seed=7):

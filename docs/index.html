@@ -176,6 +176,22 @@ section.s{padding:76px 0 8px}
 .cm-s-sj .CodeMirror-selected,.cm-s-sj.CodeMirror-focused .CodeMirror-selected{background:#2a2f45}
 .cm-s-sj .cm-keyword{color:#ff7b72}.cm-s-sj .cm-builtin{color:#ffa657}.cm-s-sj .cm-number{color:#79c0ff}.cm-s-sj .cm-string{color:#a5d6ff}
 .cm-s-sj .cm-comment{color:#6e7681}.cm-s-sj .cm-def{color:#d2a8ff}.cm-s-sj .cm-variable-2{color:#c9d1d9}.cm-s-sj .cm-operator{color:#c9d1d9}
+.lab-local{position:absolute;top:12px;left:12px;z-index:2;display:flex;align-items:center;gap:7px;font:500 11.5px var(--mono);color:#c9d1e2;background:rgba(8,10,18,.6);border:1px solid #2a3042;padding:5px 10px;border-radius:999px;cursor:help}
+.lab-local-dot{width:7px;height:7px;border-radius:50%;background:#22c55e;box-shadow:0 0 8px rgba(34,197,94,.7)}
+.lab-rate small{color:#8e98b0;font-size:11px}
+/* full screen: the whole demo, the terrain getting most of the width */
+.lab-full{position:absolute;top:12px;right:12px;z-index:2;display:grid;place-items:center;width:34px;height:34px;border-radius:8px;border:1px solid #2a3042;background:rgba(8,10,18,.6);color:#c9d1e2;cursor:pointer}
+.lab-full:hover{border-color:#f9731688;color:#fff}
+.lab-full svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.lab-full .i-exit,.lab.is-full .lab-full .i-enter{display:none}.lab.is-full .lab-full .i-exit{display:block}
+.lab.is-full{position:fixed;inset:0;z-index:100;margin:0;border-radius:0;border:0;grid-template-columns:minmax(0,.75fr) minmax(0,1.6fr)}
+.lab:fullscreen{position:static}
+.lab.is-full .lab-left{min-height:0;height:100vh}
+.lab.is-full .lab-code{flex:1;height:auto}
+.lab.is-full .lab-panel pre{height:30vh}
+.lab.is-full .lab-right{min-height:0;height:100vh}
+@media(max-width:960px){.lab.is-full{grid-template-columns:minmax(0,1fr);grid-template-rows:55vh minmax(0,1fr);overflow:auto}
+.lab.is-full .lab-right{order:-1;height:55vh}.lab.is-full .lab-left{height:auto}.lab.is-full .lab-code{height:260px;flex:none}}
 /* thin dark scrollbars in the editor and the stage panel (CodeMirror draws its own bars) */
 .lab .CodeMirror-vscrollbar,.lab .CodeMirror-hscrollbar,.lab-panel pre{scrollbar-width:thin;scrollbar-color:#2d3448 transparent}
 .lab .CodeMirror-vscrollbar::-webkit-scrollbar,.lab .CodeMirror-hscrollbar::-webkit-scrollbar,.lab-panel pre::-webkit-scrollbar{width:8px;height:8px}
@@ -503,7 +519,9 @@ void mandel_rows(int32_t *out, int64_t h, int64_t w,
     </div>
     <div class="lab-right">
       <canvas aria-label="A 3D terrain shaped by the code on the left"></canvas>
-      <div class="lab-cover"><button type="button" class="btn btn-p lab-start">Run it live</button><p class="lab-status">Loads Pyodide (7 MB), numpy, cimo and scramjit. Everything runs in this page.</p></div>
+      <div class="lab-local" title="scramjit (Python to C) and cimo (C to WebAssembly) are Python programs, and they run right here in this page, in Pyodide. There's no compile server behind this demo."><span class="lab-local-dot"></span>The whole compiler runs in your browser</div>
+      <button type="button" class="lab-full" aria-label="Full screen" title="Full screen"><svg class="i-enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg><svg class="i-exit" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg></button>
+      <div class="lab-cover"><button type="button" class="btn btn-p lab-start">Run it live</button><p class="lab-status">Loads Pyodide (7 MB), numpy, cimo and scramjit. Then the whole toolchain runs right here: Python, scramjit turning it into C, cimo compiling the C to WebAssembly. There's no compile server.</p></div>
       <div class="lab-stats"><span class="lab-dot"></span><span class="lab-rate">drag to turn the terrain</span></div>
     </div>
   </div>
@@ -806,6 +824,6 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="lab.js?v=4" defer></script>
+<script src="lab.js?v=6" defer></script>
 </body>
 </html>

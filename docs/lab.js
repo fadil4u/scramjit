@@ -200,7 +200,8 @@
       hb.release(); hp.destroy();
       if (vo) { vb.release(); vo.destroy(); }
       const sp = compiled && pyRate[preset] ? `  ·  ${Math.round(rate / pyRate[preset])}× Python` : '';
-      $('.lab-rate').textContent = `${Math.round(rate).toLocaleString()} ${UNITS[preset]}${sp}`;
+      const where = info.state === 'compiled' ? ' <small>· compiled in this page</small>' : '';
+      $('.lab-rate').innerHTML = `${Math.round(rate).toLocaleString()} ${UNITS[preset]}${sp}${where}`;
     }
     if (renderer) draw();
     requestAnimationFrame(frame);
@@ -231,6 +232,17 @@
     });
     $('.lab-reset').addEventListener('click', () => { if (running) { lab.reset(); rate = 0; } });
     root.querySelectorAll('.lab-chip').forEach(c => c.addEventListener('click', () => showStage(c.dataset.s)));
+    // full screen: the Fullscreen API where it works on elements, a fixed full-window layout elsewhere
+    const relayout = () => { resize(); if (editor) editor.refresh(); };
+    const setFull = on => { root.classList.toggle('is-full', on); $('.lab-full').setAttribute('aria-label', on ? 'Exit full screen' : 'Full screen'); requestAnimationFrame(relayout); };
+    $('.lab-full').addEventListener('click', () => {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else if (root.classList.contains('is-full')) setFull(false);
+      else if (root.requestFullscreen) root.requestFullscreen().catch(() => setFull(true));
+      else setFull(true);
+    });
+    document.addEventListener('fullscreenchange', () => setFull(document.fullscreenElement === root));
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && root.classList.contains('is-full') && !document.fullscreenElement) setFull(false); });
     $('.lab-start').addEventListener('click', () => boot().catch(e => { status('Could not start: ' + e.message); root.classList.remove('loading'); }));
     initGL();
     // a still terrain before Python loads

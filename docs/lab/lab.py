@@ -345,7 +345,8 @@ def run(f, k, warm=False):
                 S['row'] = 0
                 S['frame_done'] = True
                 S['scale'] *= 0.955
-                if S['scale'] < 1e-9:        # deep enough: start the next dive
+                # deep enough, or too deep for maxit to find the edge (mostly black): the next dive
+                if S['scale'] < 1e-9 or (S['img'][..., :3].max(axis=2) == 0).mean() > 0.55:
                     S['dive'] = (S['dive'] + 1) % 4
                     S['scale'] = 3.2 / FRACTAL_N
         return int(its)                      # iterations

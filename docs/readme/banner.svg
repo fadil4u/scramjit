@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="260" viewBox="0 0 1000 260" role="img" aria-label="scramjit: Python at native speed">
+  <defs>
+    <linearGradient id="flow" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#2563eb"/><stop offset=".6" stop-color="#f97316"/><stop offset="1" stop-color="#dc2626"/></linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2563eb"/><stop offset=".6" stop-color="#f97316"/><stop offset="1" stop-color="#dc2626"/></linearGradient>
+    <radialGradient id="glow" cx=".72" cy=".5" r=".6"><stop offset="0" stop-color="#f97316" stop-opacity=".2"/><stop offset="1" stop-color="#f97316" stop-opacity="0"/></radialGradient>
+    <clipPath id="c"><rect width="1000" height="260" rx="18"/></clipPath>
+  </defs>
+  <g clip-path="url(#c)">
+    <rect width="1000" height="260" fill="#080a12"/>
+    <rect width="1000" height="260" fill="url(#glow)"/>
+    <g fill="none" stroke="url(#flow)" stroke-linecap="round" opacity=".55">
+      <path d="M0 58C260 58 430 112 560 118S860 118 1000 118" stroke-width="1.6"/>
+      <path d="M0 94C260 94 430 122 560 124S860 124 1000 124" stroke-width="1.2" opacity=".7"/>
+      <path d="M0 202C260 202 430 148 560 142S860 142 1000 142" stroke-width="1.6"/>
+      <path d="M0 166C260 166 430 138 560 136S860 136 1000 136" stroke-width="1.2" opacity=".7"/>
+      <path d="M560 130H1000" stroke-width="2.4"/>
+    </g>
+    <g transform="translate(64 80) scale(3.125)">
+      <rect width="32" height="32" rx="8" fill="url(#mark)"/>
+      <path d="M5.5 9.5L13 14h6l7.5-4.5M5.5 22.5L13 18h6l7.5 4.5" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="16" cy="16" r="1.7" fill="#fff"/>
+    </g>
+    <text x="188" y="133" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="56" font-weight="700" letter-spacing="-1.5" fill="#fff">scramjit</text>
+    <text x="190" y="170" font-family="Inter,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="23" fill="#aab3c8">Python at native speed.</text>
+  </g>
+</svg>

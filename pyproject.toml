@@ -21,7 +21,7 @@ classifiers = [
 dev = ["pytest", "numpy"]
 
 [project.urls]
-Homepage = "https://farizrahman4u.github.io/scramjit/"
+Homepage = "https://www.scramjit.dev"
 Source = "https://github.com/farizrahman4u/scramjit"
 
 [tool.setuptools.packages.find]

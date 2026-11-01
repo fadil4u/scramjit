@@ -390,7 +390,8 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.badge i{animation:none}}
 </style>
 <link rel="alternate" type="text/plain" href="agent-prompt.txt" title="Prompt for Agents">
-<link rel="stylesheet" href="agent.css?v=7d9f32de">
+<link rel="alternate" type="text/plain" href="llms.txt" title="Raw docs for agents">
+<link rel="stylesheet" href="agent.css?v=24738fdf">
 </head>
 <body>
 <header class="top"><a class="skip" href="#main">Skip to content</a><div class="wrap top-in">
@@ -717,19 +718,20 @@ for (int64_t i = 0; i &lt; a_len; i++)
 <section class="s" id="semantics"><div class="wrap">
   <span class="k">Semantics</span>
   <h2>Same results as CPython</h2>
-  <p class="lede">Where Python and C disagree, scramjit does what Python does, except that integers are 64-bit. Every compiled function is tested against CPython running it undecorated, including on randomly generated programs.</p>
+  <p class="lede">Where Python and C disagree, scramjit does what Python does, with <a href="docs/?p=gotchas">a few documented exceptions</a>. Every compiled function is tested against CPython running it undecorated, including on randomly generated programs.</p>
   <div class="tblw"><table class="tbl">
     <tr><th>Topic</th><th>Python</th><th>C</th><th>scramjit</th></tr>
     <tr><td><code>//</code> and <code>%</code></td><td>round toward −∞</td><td>truncate toward 0</td><td><span class="pill py">Python's rule</span></td></tr>
     <tr><td>Negative indices</td><td>count from the end</td><td>out of bounds</td><td><span class="pill py">Python's rule</span></td></tr>
     <tr><td>Float order</td><td>as written</td><td>may reassociate</td><td><span class="pill py">as written</span> no FMA unless opted in</td></tr>
-    <tr><td>Integers</td><td>unbounded</td><td>fixed width</td><td><code>int64</code> unless narrowed; wraps</td></tr>
+    <tr><td>Integers</td><td>unbounded</td><td>fixed width</td><td><code>int64</code> unless narrowed; wraps. <a href="docs/?p=gotchas#integers-are-64-bit-and-wrap">Gotcha</a></td></tr>
+    <tr><td><code>n ** k</code>, negative variable <code>k</code></td><td>a float</td><td>depends on the code</td><td>raises <code>ValueError</code>. <a href="docs/?p=gotchas#a-negative-exponent-on-n-k-raises">Gotcha</a></td></tr>
     <tr><td>Bounds checks</td><td>always</td><td>never</td><td><span class="pill py">Python's rule</span> <code>IndexError</code>; opt out with <code>boundscheck=False</code></td></tr>
     <tr><td><code>math</code> functions</td><td>platform libm or its own code</td><td>whatever libm is linked</td><td><span class="pill py">bit for bit</span> the same code CPython runs, on every platform</td></tr>
     <tr><td>Division by 0</td><td>raises</td><td><code>inf</code> or a crash</td><td><span class="pill py">Python's rule</span> <code>ZeroDivisionError</code></td></tr>
   </table></div>
   <p class="note">Code outside the subset runs as plain Python, with a <code>FallbackWarning</code> naming the line; <code>@scram(fallback=False)</code> makes it an error.</p>
-  <p class="doclink"><a href="docs/?p=semantics">Docs: semantics →</a></p>
+  <p class="doclink"><a href="docs/?p=semantics">Docs: semantics →</a> <span class="sep">·</span> <a href="docs/?p=gotchas">gotchas →</a></p>
 </div></section>
 
 <section class="s" id="platforms"><div class="wrap">
@@ -937,6 +939,6 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/wast/wast.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="lab.js?v=25" defer></script>
-<script src="agent.js?v=60dd552e"></script>
+<script src="agent.js?v=707e8198"></script>
 </body>
 </html>

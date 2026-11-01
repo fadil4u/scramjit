@@ -10,6 +10,8 @@ prompt (`../agent-prompt.txt`). Both use `../agent.js` and `../agent.css`; after
 their `?v=` in both `index.html` files.
 
 - `content/<page>.md`: one page each, plain Markdown (GitHub flavored: tables, fenced code).
+- `../llms.txt`: the index of these raw pages for agents; add new pages there too (`tests/test_site.py`
+  checks it).
 - `nav.json`: the order and grouping. Parts with `"walk": true` are the walkthrough (numbered,
   with progress and Next links); the others are reference.
 

@@ -1,7 +1,7 @@
 # scramjit
 JIT for Python hot loops, written in pure Python.
 Repo: https://github.com/farizrahman4u/scramjit
-Docs: https://www.scramjit.dev/docs/
+Docs (raw Markdown): https://www.scramjit.dev/llms.txt
 
 ## What
 On the first call per argument-type signature, `@scram` generates C for the function and compiles it in-process with cimo, a pure-Python C compiler. No LLVM, C toolchain or binary wheels. Arrays aren't copied. The GIL is released, so threads run in parallel. Source stays plain Python. MIT licensed.

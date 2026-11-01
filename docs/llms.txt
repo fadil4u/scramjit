@@ -1,0 +1,33 @@
+# scramjit
+
+> Python hot loops at native speed: a JIT written in pure Python, compiling through cimo.
+
+## Prompt
+
+- [Prompt for coding agents](https://www.scramjit.dev/agent-prompt.txt): install, API, CLI, what compiles and how to fix what doesn't
+
+## Getting started
+
+- [Introduction](https://www.scramjit.dev/docs/content/introduction.md): What scramjit is, where it helps and where it doesn't
+- [Install](https://www.scramjit.dev/docs/content/install.md): Installing scramjit, in CPython and in Pyodide
+- [Your first function](https://www.scramjit.dev/docs/content/first-function.md): A first @scram function, step by step
+
+## Writing functions
+
+- [Types and annotations](https://www.scramjit.dev/docs/content/types.md): Type inference, annotations as contracts, narrowing
+- [Loops and builtins](https://www.scramjit.dev/docs/content/loops-and-builtins.md): How range, zip, comprehensions and other builtins compile
+- [Arrays, lists and tuples](https://www.scramjit.dev/docs/content/containers.md): numpy arrays, tuples and lists
+- [Semantics](https://www.scramjit.dev/docs/content/semantics.md): Where results match CPython, and the 64-bit integer exception
+- [Fallback and errors](https://www.scramjit.dev/docs/content/errors.md): Fallback to Python, FallbackWarning and CompileError
+- [Preflight](https://www.scramjit.dev/docs/content/profiling.md): scramjit preflight, f.preflight() and acting on its hints
+
+## Going further
+
+- [Compilation and caching](https://www.scramjit.dev/docs/content/caching.md): When compiling happens, the GIL and the disk cache
+- [In the browser](https://www.scramjit.dev/docs/content/browser.md): Pyodide, JupyterLite, marimo and PyScript
+- [How it works](https://www.scramjit.dev/docs/content/how-it-works.md): From syntax tree to machine code
+
+## Reference
+
+- [Platforms](https://www.scramjit.dev/docs/content/platforms.md): Supported platforms and security
+- [FAQ](https://www.scramjit.dev/docs/content/faq.md): Common questions

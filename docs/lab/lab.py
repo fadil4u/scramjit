@@ -14,8 +14,8 @@ from scramjit._runtime import PRELUDE
 N = 128
 PRESETS = {
     'erosion': {'entry': 'erode', 'unit': 'droplets'},
-    'beacon': {'entry': 'viewshed', 'unit': 'rows'},
-    'landslides': {'entry': 'slide', 'unit': 'rows'},
+    'beacon': {'entry': 'viewshed', 'unit': 'sightlines'},     # one per cell: a line of sight
+    'landslides': {'entry': 'slide', 'unit': 'cells'},
 }
 S = {'k': 1, 'row': 0, 'angle': 0.0, 'rates': {}}
 
@@ -145,13 +145,13 @@ def run(f, k, warm=False):
             S['row'] = 0 if r1 >= N else r1
             if r1 >= N:
                 S['angle'] = a + 0.12
-        return r1 - r0
+        return (r1 - r0) * N                 # cells: one sightline each
     r0 = S['row'] if not warm else 0     # landslides
     r1 = min(N, r0 + k)
     f(S['h'] if not warm else S['h'].copy(), 0.012, 0.25, r0, r1 if not warm else 2)
     if not warm:
         S['row'] = 0 if r1 >= N else r1
-    return r1 - r0
+    return (r1 - r0) * N                     # cells
 
 
 def step(budget_ms):

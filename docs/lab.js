@@ -4,7 +4,7 @@
   'use strict';
   const PYODIDE = 'https://cdn.jsdelivr.net/pyodide/v0.27.7/full/';
   const PRESETS = { erosion: 'Hydraulic erosion', beacon: 'Beacon (viewshed)', landslides: 'Landslides' };
-  const UNITS = { erosion: 'droplets/s', beacon: 'rows/s', landslides: 'rows/s' };
+  const UNITS = { erosion: 'droplets/s', beacon: 'sightlines/s', landslides: 'cells/s' };
   const SJ_FILES = ['__init__.py', '_compiler.py', '_dispatch.py', '_errors.py', '_runtime.py', '_types.py'];
   const STAGES = ['python', 'ast', 'types', 'c', 'wasm'];
   const root = document.getElementById('lab-demo');

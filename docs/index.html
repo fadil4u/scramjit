@@ -57,6 +57,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--hot);outline-offset
 @media(max-width:860px){.topnav .hide-sm{display:none}}
 /* banner */
 .banner{position:relative;background:var(--night);color:#c9d1d9;overflow:hidden;height:clamp(560px,calc(100vh - 62px),740px)}
+.banner-front{position:relative;height:100%;background:var(--night)}
 .flow{position:absolute;inset:0}
 .flow canvas{display:block;width:100%;height:100%}
 .flow-shade{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 52% 70% at 8% 45%,rgba(8,10,18,.95) 0,rgba(8,10,18,.8) 50%,rgba(8,10,18,0) 100%),linear-gradient(0deg,rgba(8,10,18,.7),rgba(8,10,18,0) 16%)}
@@ -75,15 +76,11 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--hot);outline-offset
 .pip button svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .pip button .i-done,.pip button.done .i-copy{display:none}.pip button.done .i-done{display:block}.pip button.done{color:#7ee2b8}
 .pip button:hover{background:#2b3245;color:#fff}
-/* the header keeps clear of the corner where the page's own gutter is too narrow */
-@media(max-width:1259px){.top-in{padding-right:64px}}
-@media(max-width:1100px){.topnav a{padding:7px 8px}}
-@media(max-width:960px){.topnav .hide-sm{display:none}}
-@media(max-width:600px){.top-in{padding-right:48px;gap:8px}.topnav{gap:0}.topnav .navcta{margin-left:4px}.navcta .btn{font-size:0;gap:0;padding:8px 10px}}
 .hero-note{margin-top:14px;font-size:13px;color:#7d879e;max-width:46ch}
 .hero-note a{color:#ffb072}.hero-note a:hover{color:#ffd2ad}
 @media(max-width:900px){
-.banner{height:auto;display:flex;flex-direction:column}
+.banner{height:auto}
+.banner-front{height:auto;display:flex;flex-direction:column}
 .banner-in{order:1;display:block}
 .banner-copy{margin:0;max-width:none;padding:40px 0 8px}
 .flow{order:2;position:relative;height:300px;flex:none}
@@ -393,7 +390,7 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.badge i{animation:none}}
 </style>
 <link rel="alternate" type="text/plain" href="agent-prompt.txt" title="Prompt for Agents">
-<link rel="stylesheet" href="agent.css?v=e1c872d8">
+<link rel="stylesheet" href="agent.css?v=b21c11b0">
 </head>
 <body>
 <header class="top"><a class="skip" href="#main">Skip to content</a><div class="wrap top-in">
@@ -413,6 +410,7 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
 
 <main id="main" tabindex="-1">
 <section class="banner" id="top">
+<div class="banner-front">
   <div class="flow"><canvas aria-label="Air flowing through a scramjet engine: cold at the inlet, burning in the combustor, hot at the nozzle"></canvas><div class="flow-shade"></div></div>
   <div class="wrap banner-in">
     <div class="banner-copy">
@@ -426,6 +424,7 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
       <p class="hero-note">Pure Python, with cimo as its only dependency. CPython 3.9+ on Linux, macOS and Windows, and Pyodide in the browser.</p>
     </div>
   </div>
+</div>
 </section>
 
 <section class="proof" aria-label="scramjit by design"><div class="wrap proof-row">
@@ -938,6 +937,6 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/wast/wast.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="lab.js?v=25" defer></script>
-<script src="agent.js?v=4416a73f"></script>
+<script src="agent.js?v=52e53d52"></script>
 </body>
 </html>

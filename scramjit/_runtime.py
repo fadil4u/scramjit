@@ -20,10 +20,19 @@ VALUE_ERROR_MESSAGES = [
     'range() arg 3 must not be zero',
     'min() iterable argument is empty',
     'max() iterable argument is empty',
+    'math domain error',
 ]
 OVERFLOW_ERROR_MESSAGES = [
     'cannot convert float infinity to integer',
+    'math range error',
 ]
+
+# Math functions CPython takes from the platform's C library. Compiled code calls the same
+# functions, through a table of their addresses in the host library (see _dispatch._libm_table),
+# wrapped in CPython's own handling of special values and errors (mathmodule.c).
+LIBM = ['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'asinh', 'acosh', 'atanh', 'sinh', 'cosh',
+        'tanh', 'exp', 'exp2', 'expm1', 'log', 'log2', 'log10', 'log1p', 'cbrt', 'erf', 'erfc',
+        'atan2', 'pow']
 
 
 def exception(status, io):
@@ -148,4 +157,102 @@ static inline int64_t sj_float_to_int(double f) {
 /* int / int: exact in double when both are within 2**53, else the long path */
 #define sj_truediv(a, b) ((a) <= 9007199254740992LL && (a) >= -9007199254740992LL && \
     (b) <= 9007199254740992LL && (b) >= -9007199254740992LL ? (double)(a) / (double)(b) : sj_truediv_big(a, b))
+/* ---- math: CPython's mathmodule.c wrappers around the C library (PSF license). The library
+ * functions themselves come from the host, through sj_m (the addresses, in LIBM's order). */
+typedef double (*sj_f1)(double);
+typedef double (*sj_f2)(double, double);
+#define SJ_LIBM1(i) ((sj_f1)(uintptr_t)sj_m[i])
+#define SJ_LIBM2(i) ((sj_f2)(uintptr_t)sj_m[i])
+
+/* m_log, m_log2, m_log10: special values directly, positive finite values to the library */
+static double sj_m_log(sj_f1 f, double x) {
+    if (isfinite(x)) {
+        if (x > 0.0) return f(x);
+        if (x == 0.0) return -INFINITY;
+        return NAN;
+    }
+    if (x != x) return x;
+    if (x > 0.0) return x;
+    return NAN;
+}
+
+/* m_atan2 */
+static double sj_m_atan2(sj_f2 f, double y, double x) {
+    const double pi = 3.141592653589793;
+    if (x != x || y != y) return NAN;
+    if (isinf(y)) {
+        if (isinf(x)) return copysign(copysign(1., x) == 1. ? 0.25 * pi : 0.75 * pi, y);
+        return copysign(0.5 * pi, y);
+    }
+    if (isinf(x) || y == 0.) return copysign(copysign(1., x) == 1. ? 0. : pi, y);
+    return f(y, x);
+}
+
+/* math.pow: returns 0, or 1 for ValueError, 2 for OverflowError */
+static int sj_math_pow(sj_f2 f, double x, double y, double *out) {
+    double r = 0.;
+    int err = 0;                                  /* 1: EDOM, 2: ERANGE */
+    if (!isfinite(x) || !isfinite(y)) {
+        if (x != x) r = y == 0. ? 1. : x;
+        else if (y != y) r = x == 1. ? 1. : y;
+        else if (isinf(x)) {
+            int odd_y = isfinite(y) && fmod(fabs(y), 2.0) == 1.0;
+            if (y > 0.) r = odd_y ? x : fabs(x);
+            else if (y == 0.) r = 1.;
+            else r = odd_y ? copysign(0., x) : 0.;
+        } else {
+            if (fabs(x) == 1.0) r = 1.;
+            else if (y > 0. && fabs(x) > 1.0) r = y;
+            else if (y < 0. && fabs(x) < 1.0) r = -y;
+            else r = 0.;
+        }
+    } else {
+        r = f(x, y);
+        if (!isfinite(r)) {
+            if (r != r) err = 1;
+            else if (isinf(r)) err = x == 0. ? 1 : 2;
+        }
+    }
+    *out = r;
+    if (err == 2 && fabs(r) < 1.5) err = 0;       /* is_error: underflow isn't an error */
+    return err;
+}
+
+/* math.fmod: returns 0, or 1 for ValueError */
+static int sj_math_fmod(double x, double y, double *out) {
+    if (isinf(y) && isfinite(x)) { *out = x; return 0; }
+    double r = fmod(x, y);
+    *out = r;
+    return (r != r && x == x && y == y) ? 1 : 0;
+}
+
+/* vector_norm (math.hypot): error-free squares and sums, then a corrected sqrt */
+static double sj_vector_norm(int64_t n, double *vec, double max, int found_nan) {
+    double x, h, scale, csum = 1.0, frac1 = 0.0, frac2 = 0.0, hi, lo, s;
+    int max_e;
+    if (isinf(max)) return max;
+    if (found_nan) return NAN;
+    if (max == 0.0 || n <= 1) return max;
+    frexp(max, &max_e);
+    if (max_e < -1023) {
+        for (int64_t i = 0; i < n; i++) vec[i] /= 2.2250738585072014e-308;
+        return 2.2250738585072014e-308 * sj_vector_norm(n, vec, max / 2.2250738585072014e-308, found_nan);
+    }
+    scale = ldexp(1.0, -max_e);
+    for (int64_t i = 0; i < n; i++) {
+        x = vec[i] * scale;
+        hi = x * x; lo = fma(x, x, -hi);          /* dl_mul */
+        s = csum + hi; frac2 += (csum - s) + hi;  /* dl_fast_sum */
+        csum = s;
+        frac1 += lo;
+    }
+    h = sqrt(csum - 1.0 + (frac1 + frac2));
+    hi = -h * h; lo = fma(-h, h, -hi);
+    s = csum + hi; frac2 += (csum - s) + hi;
+    csum = s;
+    frac1 += lo;
+    x = csum - 1.0 + (frac1 + frac2);
+    h += x / (2.0 * h);
+    return h / scale;
+}
 '''

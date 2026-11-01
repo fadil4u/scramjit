@@ -13,10 +13,15 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
   a warning when it is on, because contraction is process-wide. When cimo takes `fma=` per
   compile: pass it, drop the environment variable and the warning; `exact=False` can then turn
   contraction on.
-- **Math functions** aren't compiled yet. Bit-exact parity on native targets needs cimo to link
-  the host libm (see "Semantics" in `requirements.md`).
+- **Math functions call the host libm through a table of addresses** (`_dispatch._libm_table`,
+  `SJ_LIBM1` in the prelude), passed to each kernel that uses them, because cimo resolves `sin`
+  etc. to its bundled libm. When cimo can link the host libm for math calls: call them directly.
 
 ## Next
+
+0. **Math in Pyodide:** functions that involve no C library code (`sqrt`, `hypot`, `floor`,
+   `fmod`, ...) compile there; the others fall back until ported from the libm Pyodide's CPython
+   is built with (emscripten's), and checked in Pyodide.
 
 1. **M2: builtins, lists, narrowing.** `enumerate`, `zip`, `reversed`, comprehensions and generator
    expressions fused into one loop, `sum`/`any`/`all`, `math.*` (bit-exact), fixed-size lists,

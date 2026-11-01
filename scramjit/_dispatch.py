@@ -14,7 +14,7 @@ import warnings
 from . import _types as T
 from ._compiler import Compiler
 from ._errors import CompileError, FallbackWarning, Unsupported
-from ._runtime import PRELUDE, exception
+from ._runtime import LIBM, PRELUDE, exception
 
 _cimo = None
 _cimo_lock = threading.Lock()
@@ -36,6 +36,27 @@ def _get_cimo():
                                   RuntimeWarning, stacklevel=4)
                 _cimo = cimo
     return _cimo
+
+
+_libm = None
+
+
+def _libm_table():
+    """Addresses of the C library math functions CPython itself calls (LIBM's order), packed for
+    compiled code, which calls them through this table: the same functions, the same results."""
+    global _libm
+    if _libm is None:
+        import ctypes
+        import ctypes.util
+        import struct as st
+        if sys.platform == 'win32':
+            lib = ctypes.CDLL('ucrtbase')
+        elif sys.platform == 'darwin':
+            lib = ctypes.CDLL('libSystem.dylib')
+        else:
+            lib = ctypes.CDLL(ctypes.util.find_library('m') or 'libm.so.6')
+        _libm = st.pack(f'<{len(LIBM)}Q', *(ctypes.cast(getattr(lib, n), ctypes.c_void_p).value for n in LIBM))
+    return _libm
 
 
 def _arg_type(x):
@@ -111,13 +132,14 @@ PYTHON = _Python()
 
 
 class Compiled:
-    __slots__ = ('kernel', 'ret', 'types', 'source')
+    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm')
 
-    def __init__(self, kernel, ret, types_, source):
+    def __init__(self, kernel, ret, types_, source, libm):
         self.kernel = kernel
         self.ret = ret
         self.types = types_
         self.source = source
+        self.libm = libm
 
 
 class Function:
@@ -225,7 +247,7 @@ class Function:
         if any(t.np for t in key) or c.ret.np:
             import numpy
             self._np = numpy
-        return Compiled(kernel, c.ret, key, source)
+        return Compiled(kernel, c.ret, key, source, _libm_table() if c.uses_libm else None)
 
     def _run(self, entry, args):
         cargs = []
@@ -239,6 +261,8 @@ class Function:
                 cargs.append(x.item())
             else:
                 cargs.append(x)
+        if entry.libm is not None:
+            cargs.append(entry.libm)
         io = bytearray(32 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0))
         status = entry.kernel(*cargs, io)
         if status:

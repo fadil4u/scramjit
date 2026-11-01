@@ -266,3 +266,61 @@ def test_tuple_unpacking_mismatch_falls_back():
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', FallbackWarning)
         same(f, 3)
+
+
+# ---- math: the same C library functions CPython calls, with CPython's wrappers: bit for bit
+
+import linecache  # noqa: E402
+import math  # noqa: E402
+
+MATH_ONE = ['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'asinh', 'acosh', 'atanh', 'tanh', 'cbrt',
+            'log1p', 'sqrt', 'fabs', 'sinh', 'cosh', 'exp', 'exp2', 'expm1', 'erf', 'erfc', 'log',
+            'log2', 'log10', 'floor', 'ceil', 'trunc', 'degrees', 'radians', 'isnan', 'isinf', 'isfinite']
+MATH_TWO = ['atan2', 'pow', 'fmod', 'copysign', 'hypot', 'log']
+SPECIAL = [0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, 1e-310, -1e-310, 1e-300, 1e300, -1e300, 710.0,
+           -745.5, 20.0, math.inf, -math.inf, math.nan, math.pi, 1 - 1e-16]
+
+
+def compiled_math(expr, nargs, tag):
+    args = ', '.join('xyz'[:nargs])
+    src = f'import math\n\ndef m_{tag}({args}):\n    return {expr}\n'
+    name = f'<math {tag}>'
+    linecache.cache[name] = (len(src), None, src.splitlines(True), name)
+    ns = {}
+    exec(compile(src, name, 'exec'), ns)
+    return scram(ns[f'm_{tag}'], fallback=False)
+
+
+def test_math_functions_are_bit_exact():
+    rng = np.random.default_rng(17)
+    rand = list(rng.standard_normal(300) * 10) + list(rng.random(200) * 2 - 1) + list(10.0 ** rng.uniform(-300, 300, 200))
+    for name in MATH_ONE:
+        f = compiled_math(f'math.{name}(x)', 1, name)
+        for x in SPECIAL + rand:
+            if name in ('floor', 'ceil', 'trunc') and math.isfinite(x) and abs(x) >= 2.0 ** 63:
+                continue        # the result is beyond int64, where scramjit's ints wrap
+            same(f, x)
+        for x in (0, 1, -1, 7, 10 ** 15, -(10 ** 15), True, np.float64(2.5), np.int64(9)):
+            if name == 'trunc' and isinstance(x, np.int64):
+                continue
+            same(f, x)
+    for name in MATH_TWO:
+        f = compiled_math(f'math.{name}(x, y)', 2, f'{name}2')
+        for x in SPECIAL[::2] + rand[:60]:
+            for y in SPECIAL[1::2] + rand[60:90]:
+                same(f, x, y)
+        for x, y in [(2, 10), (2, 0.5), (-8, 1 / 3), (0, -1), (10, 1), (8, 2), (1, 0)]:
+            same(f, x, y)
+    h3 = compiled_math('math.hypot(x, y, z)', 3, 'hypot3')
+    for x, y, z in [(3.0, 4.0, 12.0), (1e-320, 1e-321, 0.0), (math.inf, math.nan, 1.0), (1e308, 1e308, 1e308)]:
+        same(h3, x, y, z)
+
+
+def test_math_imported_names():
+    src = 'from math import sqrt as sq, pi\n\ndef g(x):\n    return sq(x) * 2.0\n'
+    linecache.cache['<math import>'] = (len(src), None, src.splitlines(True), '<math import>')
+    ns = {}
+    exec(compile(src, '<math import>', 'exec'), ns)
+    f = scram(ns['g'], fallback=False)
+    for x in (4.0, 2.0, -1.0, 0.0):
+        same(f, x)

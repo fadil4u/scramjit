@@ -20,7 +20,9 @@ import math
 
 from . import _types as T
 from ._errors import Unsupported
-from ._runtime import INDEX_ERROR, OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION
+import sys
+
+from ._runtime import INDEX_ERROR, LIBM, OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION
 
 BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'sum', 'any', 'all')
 MATH_CONSTANTS = {'pi': math.pi, 'e': math.e, 'tau': math.tau, 'inf': math.inf, 'nan': math.nan}
@@ -29,6 +31,23 @@ ARITH = {ast.Add: 'Add', ast.Sub: 'Sub', ast.Mult: 'Mult', ast.Div: 'Div', ast.F
          ast.Mod: 'Mod', ast.BitAnd: 'BitAnd', ast.BitOr: 'BitOr', ast.BitXor: 'BitXor'}
 CMP = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=', ast.Eq: '==', ast.NotEq: '!='}
 SWAP = {'<': '>', '<=': '>=', '>': '<', '>=': '<=', '==': '==', '!=': '!='}
+
+# math functions: name -> (kind, can_overflow). 'f1' wraps a one-argument C library function the
+# way CPython's math_1 does; '1a' like math_1a (no special-value checks); the rest are CPython's
+# own logic (see _runtime).
+MATH_FUNCS = {
+    **{n: ('f1', 0) for n in ('sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'asinh', 'acosh', 'atanh',
+                               'tanh', 'cbrt', 'log1p', 'sqrt', 'fabs')},
+    **{n: ('f1', 1) for n in ('sinh', 'cosh', 'exp', 'exp2', 'expm1')},
+    'erf': ('1a', 0), 'erfc': ('1a', 0),
+    'log': ('log', 0), 'log2': ('log', 0), 'log10': ('log', 0),
+    'atan2': ('atan2', 0), 'pow': ('pow', 0), 'fmod': ('fmod', 0), 'copysign': ('copysign', 0),
+    'hypot': ('hypot', 0), 'floor': ('round', 0), 'ceil': ('round', 0), 'trunc': ('round', 0),
+    'degrees': ('scale', 0), 'radians': ('scale', 0),
+    'isnan': ('test', 0), 'isinf': ('test', 0), 'isfinite': ('test', 0),
+}
+EXACT_ANYWHERE = ('sqrt', 'fabs', 'fmod', 'copysign', 'hypot', 'floor', 'ceil', 'trunc', 'degrees',
+                  'radians', 'isnan', 'isinf', 'isfinite')   # no C library function involved
 
 
 def c_float(x):
@@ -79,6 +98,7 @@ class Compiler:
         self.lines = []
         self.depth = 1
         self.ntemp = 0
+        self.uses_libm = False
         self.cnames = {}       # comprehension variable -> (C name, flag), shadowing the function's
         self.facts = {}        # loop variable -> (lowest value, array whose len() bounds it, slack)
 
@@ -384,7 +404,39 @@ class Compiler:
         name = e.func.id
         return name in ('sum', 'any', 'all') or (name in ('min', 'max') and len(e.args) == 1)
 
+    def math_func(self, func):
+        """The math function a call refers to (math.sin, or sin from `from math import sin`)."""
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
+                and func.value.id not in self.env and self.globals.get(func.value.id) is math:
+            return func.attr if func.attr in MATH_FUNCS else self.fail(func, f'math.{func.attr}()')
+        if isinstance(func, ast.Name) and func.id not in self.env and func.id in self.globals:
+            obj = self.globals[func.id]
+            for n in MATH_FUNCS:
+                if obj is getattr(math, n, None):
+                    return n
+        return None
+
+    def math_type(self, e, name):
+        kind, _ = MATH_FUNCS[name]
+        if e.keywords:
+            self.fail(e, f'math.{name}() with keyword arguments')
+        if sys.platform == 'emscripten' and name not in EXACT_ANYWHERE:
+            self.fail(e, f'math.{name}() is not compiled in Pyodide yet')
+        ts = [self.typeof(a) for a in e.args]
+        if not all(t.is_number for t in ts) or any(t.np and t.kind == 'bool' for t in ts):
+            self.fail(e, f'math.{name}() of these arguments')
+        n = len(ts)
+        if (kind in ('f1', '1a', 'round', 'scale', 'test') and n != 1) or (kind == 'log' and not 1 <= n <= (2 if name == 'log' else 1)) \
+                or (kind in ('atan2', 'pow', 'fmod', 'copysign') and n != 2):
+            self.fail(e, f'math.{name}() with {n} arguments')
+        if name == 'trunc' and ts[0].np and ts[0].kind != 'float':
+            self.fail(e, 'math.trunc() of a numpy int (it raises TypeError)')
+        return T.INT if kind == 'round' else T.BOOL if kind == 'test' else T.FLOAT
+
     def call_type(self, e):
+        mf = self.math_func(e.func)
+        if mf:
+            return self.math_type(e, mf)
         if not isinstance(e.func, ast.Name):
             self.fail(e, 'this call')
         name = e.func.id
@@ -517,7 +569,6 @@ class Compiler:
                 params += [f'{et.ctype} v_{p}__{i}' for i, et in enumerate(t.elem)]
             else:
                 params.append(f'{t.ctype} v_{p}')
-        params.append('int64_t *sj_io')
         self.mark(self.f)
         head = len(self.lines)
         for name, t in self.env.items():
@@ -539,6 +590,9 @@ class Compiler:
         self.lines.append('sj_fail:')
         self.emit('sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;')
         self.emit('return sj_st;')
+        if self.uses_libm:
+            params.append('const uint64_t *sj_m')
+        params.append('int64_t *sj_io')
         return '\n'.join(self.lines[:head] + [f'int sj_kernel({", ".join(params)}) {{']
                          + self.lines[head:] + ['}', ''])
 
@@ -1092,6 +1146,9 @@ class Compiler:
         return r, rf
 
     def call(self, e):
+        mf = self.math_func(e.func)
+        if mf:
+            return self.math_call(e, mf)
         name = e.func.id
         line = self.line(e)
         if self.is_reduction(e):
@@ -1256,6 +1313,107 @@ class Compiler:
         self.source_loops(src, after_first, item)
         self.emit(f'if (!{gen} && {c_} != 0.0 && isfinite({c_})) {f_} += {c_};')
         return f_, ('1' if generic else gen if rt.np == 'dyn' else '0')
+
+
+    def math_call(self, e, name):
+        kind, can_overflow = MATH_FUNCS[name]
+        line = self.line(e)
+        ts = [self.typeof(a) for a in e.args]
+        vals = [self.expr(a) for a in e.args]          # arguments first, in order, as Python does
+        vals = [(self.hold(c, t), self.hold_flag(f)) for (c, f), t in zip(vals, ts)]
+        xs = [self.coerce(c, t, T.FLOAT) for (c, _), t in zip(vals, ts)]
+        dom = f'SJ_FAIL({VALUE_ERROR}, {line}, 4, 0)'
+        rng = f'SJ_FAIL({OVERFLOW_ERROR}, {line}, 1, 0)'
+
+        def libm(n):
+            self.uses_libm = True
+            return LIBM.index(n)
+        if kind in ('f1', '1a'):
+            x = self.hold(xs[0], T.FLOAT)
+            if name == 'sqrt':
+                call = f'sqrt({x})'
+            elif name == 'fabs':
+                call = f'fabs({x})'
+            elif name == 'log1p':                       # CPython's _Py_log1p keeps -0.0
+                call = f'({x} == 0.0 ? {x} : SJ_LIBM1({libm(name)})({x}))'
+            else:
+                call = f'SJ_LIBM1({libm(name)})({x})'
+            r = self.hold(call, T.FLOAT)
+            if kind == 'f1':                            # math_1
+                self.emit(f'if ({r} != {r} && {x} == {x}) {dom};')
+                self.emit(f'if (isinf({r}) && isfinite({x})) {rng if can_overflow else dom};')
+            return r, '0'
+        if kind == 'log':
+            def loghelper(i, fn):
+                t = ts[i]
+                if t.kind in ('int', 'bool') and t.np is False:     # a Python int: checked directly
+                    self.emit(f'if ((int64_t){vals[i][0]} <= 0) {dom};')
+                    return self.hold(f'sj_m_log(SJ_LIBM1({libm(fn)}), (double){vals[i][0]})', T.FLOAT)
+                x = self.hold(xs[i], T.FLOAT)
+                r = self.hold(f'sj_m_log(SJ_LIBM1({libm(fn)}), {x})', T.FLOAT)
+                self.emit(f'if ({r} != {r} && {x} == {x}) {dom};')
+                self.emit(f'if (isinf({r}) && isfinite({x})) {dom};')
+                return r
+            num = loghelper(0, name)
+            if len(e.args) == 1:
+                return num, '0'
+            den = loghelper(1, 'log')
+            self.emit(f'if ({den} == 0.0) SJ_FAIL({ZERO_DIVISION}, {line}, 1, 0);')
+            return f'({num} / {den})', '0'
+        if kind == 'atan2':
+            y, x = self.hold(xs[0], T.FLOAT), self.hold(xs[1], T.FLOAT)
+            r = self.hold(f'sj_m_atan2(SJ_LIBM2({libm("atan2")}), {y}, {x})', T.FLOAT)
+            self.emit(f'if ({r} != {r} && {y} == {y} && {x} == {x}) {dom};')
+            self.emit(f'if (isinf({r}) && isfinite({y}) && isfinite({x})) {rng};')
+            return r, '0'
+        if kind in ('pow', 'fmod'):
+            r, err = self.temp(), self.temp()
+            self.emit(f'double {r}; int {err} = ' + (f'sj_math_pow(SJ_LIBM2({libm("pow")}), {xs[0]}, {xs[1]}, &{r});'
+                                                    if kind == 'pow' else f'sj_math_fmod({xs[0]}, {xs[1]}, &{r});'))
+            self.emit(f'if ({err} == 1) {dom};')
+            if kind == 'pow':
+                self.emit(f'if ({err} == 2) {rng};')
+            return r, '0'
+        if kind == 'copysign':
+            return f'copysign({xs[0]}, {xs[1]})', '0'
+        if kind == 'hypot':
+            if not xs:
+                return '0.0', '0'
+            v, mx, fn = self.temp(), self.temp(), self.temp()
+            self.emit(f'double {v}[{len(xs)}] = {{{", ".join(f"fabs({x})" for x in xs)}}}; double {mx} = 0.0; int {fn} = 0;')
+            self.emit(f'for (int k = 0; k < {len(xs)}; k++) {{ {fn} |= {v}[k] != {v}[k]; if ({v}[k] > {mx}) {mx} = {v}[k]; }}')
+            return self.hold(f'sj_vector_norm({len(xs)}, {v}, {mx}, {fn})', T.FLOAT), '0'
+        if kind == 'scale':
+            k = 180.0 / math.pi if name == 'degrees' else math.pi / 180.0
+            return f'({xs[0]} * {c_float(k)})', '0'
+        if kind == 'test':
+            x = self.hold(xs[0], T.FLOAT)
+            return {'isnan': f'({x} != {x})', 'isinf': f'isinf({x})', 'isfinite': f'isfinite({x})'}[name], '0'
+        # floor, ceil, trunc: a Python int is returned as it is (its __floor__ etc.); a float, or a
+        # numpy int (no __floor__: converted to float first), is rounded and converted to int
+        t, (c, f) = ts[0], vals[0]
+        fn = {'floor': 'floor', 'ceil': 'ceil', 'trunc': 'trunc'}[name]
+
+        def rounded():
+            x = self.hold(f'{fn}({xs[0]})', T.FLOAT)
+            self.emit(f'if ({x} != {x}) SJ_FAIL({VALUE_ERROR}, {line}, 0, 0);')
+            self.emit(f'if (isinf({x})) SJ_FAIL({OVERFLOW_ERROR}, {line}, 0, 0);')
+            return f'sj_float_to_int({x})'
+        if t.kind == 'float':
+            return rounded(), '0'
+        if t.np is False:
+            return self.coerce(c, t, T.INT), '0'
+        if t.np is True:
+            return rounded(), '0'
+        r = self.temp()
+        self.emit(f'int64_t {r};')
+        self.open(f'if ({f})')
+        self.emit(f'{r} = {rounded()};')
+        self.close('} else {')
+        self.depth += 1
+        self.emit(f'{r} = (int64_t)({c});')
+        self.close()
+        return r, '0'
 
 
 def ends_with_return(stmts):

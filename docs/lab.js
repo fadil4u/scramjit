@@ -1,4 +1,4 @@
-// The live demo: Python (in Pyodide) erodes a terrain; flip scramjit on and the same function is
+// The live demo: Python (in Pyodide) erodes a terrain; turn scramjit on and the same function is
 // compiled to WebAssembly (syntax tree -> types -> C -> cimo) and runs much faster. three.js draws.
 (function () {
   'use strict';
@@ -6,7 +6,6 @@
   const PRESETS = { erosion: 'Hydraulic erosion', beacon: 'Beacon (viewshed)', landslides: 'Landslides' };
   const UNITS = { erosion: 'droplets/s', beacon: 'sightlines/s', landslides: 'cells/s' };
   const SJ_FILES = ['__init__.py', '_compiler.py', '_dispatch.py', '_errors.py', '_runtime.py', '_types.py'];
-  const STAGES = ['python', 'ast', 'types', 'c', 'wasm'];
   const root = document.getElementById('lab-demo');
   if (!root) return;
   const $ = s => root.querySelector(s);
@@ -55,65 +54,99 @@
     startedAt = performance.now();
   }
 
-  // ---- code and the pipeline
+  // ---- code and the pipeline. One pane: the Python editor; with scramjit on, tabs for the syntax
+  // tree with its inferred types, the generated C and the WebAssembly.
   function showStage(s) {
     stage = s;
-    root.querySelectorAll('.lab-chip').forEach(c => c.classList.toggle('open', c.dataset.s === s));
+    root.querySelectorAll('.lab-tab').forEach(c => c.classList.toggle('open', c.dataset.s === s));
+    $('.lab-code').hidden = s !== 'python';
+    $('.lab-panel').hidden = s !== 'c' && s !== 'wasm';
+    $('.lab-tree').hidden = s !== 'tree';
+    if (s === 'python') { if (editor) editor.refresh(); return; }
+    if (s === 'tree') { renderTree(); return; }
     const pre = $('.lab-panel pre');
-    const t = {
-      python: 'Plain Python. Pyodide runs it in the browser, one bytecode at a time.',
-      ast: info.ast || '',
-      types: info.types ? 'Inferred for this call:\n\n' + info.types : (compiled ? '' : 'Turn scramjit on to infer types.'),
-      c: info.c || (info.state === 'fallback' ? 'Runs as Python: ' + info.reason : 'Turn scramjit on to generate C.'),
-      wasm: info.state === 'compiled' ? `cimo compiled the C to WebAssembly in ${info.compile_ms} ms, in this page, and linked it into Pyodide's memory. The function now runs as native WebAssembly on the same numpy array.` : (info.state === 'fallback' ? 'Not compiled: ' + info.reason : 'Turn scramjit on to compile.'),
-    }[s];
-    pre.textContent = info.state === 'error' ? info.error : t;
-    if (s === 'wasm' && info.state === 'compiled') {        // disassemble when asked, then keep it
-      if (!info.wat) {
-        pre.textContent = ';; disassembling…';
-        setTimeout(() => {
-          try { info.wat = lab.wasm_text(); } catch (e) { info.wat = ';; could not disassemble: ' + e.message; }
-          if (stage === 'wasm') pre.textContent = info.wat;
-        }, 30);
-      } else pre.textContent = info.wat;
-    }
+    if (info.state === 'error') { pre.textContent = info.error; return; }
+    if (info.state === 'fallback') { pre.textContent = 'scramjit runs this as Python:\n\n' + info.reason; return; }
+    if (s === 'c') { pre.textContent = info.c || ''; return; }
+    if (!info.wat) {                                    // disassemble when asked, then keep it
+      pre.textContent = ';; disassembling…';
+      setTimeout(() => {
+        try { info.wat = lab.wasm_text(); } catch (e) { info.wat = ';; could not disassemble: ' + e.message; }
+        if (stage === 'wasm') pre.textContent = info.wat;
+      }, 30);
+    } else pre.textContent = info.wat;
   }
-  function lightStages(n) {
-    root.querySelectorAll('.lab-chip').forEach((c, i) => c.classList.toggle('lit', i < n));
+
+  const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  const KIND = { FunctionDef: 'def', For: 'loop', While: 'loop', If: 'cond', Else: 'cond' };
+  function tyClass(t) { return t.includes('[') ? 'arr' : /float/.test(t) ? 'flt' : /int|bool/.test(t) ? 'int' : ''; }
+  function badge(name, t) { return `<span class="lab-ty ${tyClass(t)}">${name ? `<b>${esc(name)}</b>: ` : ''}${esc(t)}</span>`; }
+  function exprHTML(e) {
+    const kids = e.c ? `<ul>${e.c.map(exprHTML).join('')}</ul>` : '';
+    return `<li><div class="lab-row"><span class="lab-k ex">${esc(e.k)}</span><span class="lab-t">${esc(e.t)}</span>${e.ty ? badge('', e.ty) : ''}</div>${kids}</li>`;
   }
-  function setCode() {
+  function stmtHTML(n) {
+    const x = n.e ? ' x' : '';
+    const kids = n.c ? `<ul>${n.c.map(stmtHTML).join('')}</ul>` : '';
+    const ex = n.e ? `<div class="lab-ex" hidden><ul>${n.e.map(exprHTML).join('')}</ul></div>` : '';
+    return `<li><div class="lab-row${x}"><span class="lab-caret">${n.e ? '▸' : ''}</span><span class="lab-k ${KIND[n.k] || ''}">${esc(n.k)}</span>` +
+      `<span class="lab-t">${esc(n.t)}</span>${(n.b || []).map(b => badge(b[0], b[1])).join('')}</div>${ex}${kids}</li>`;
+  }
+  function renderTree() {
+    const el = $('.lab-tree');
+    if (info.state !== 'compiled') { el.textContent = info.state === 'error' ? info.error : 'scramjit runs this as Python:\n\n' + (info.reason || ''); return; }
+    if (el.dataset.for === info.c) return;              // already drawn for this code
+    el.dataset.for = info.c;
+    el.innerHTML = `<p class="lab-tree-head">The function's syntax tree, statement by statement, with the type scramjit inferred for each name it binds. Click a statement for its expressions.</p><ul>${stmtHTML(info.tree)}</ul>`;
+  }
+
+  function note(t, busy) { const n = $('.lab-note'); n.textContent = t; n.classList.toggle('busy', !!busy); }
+  // the raster line sweeps down the editor; the C replaces the Python line by line, then the C tab opens
+  function sweep() {
+    const pane = $('.lab-pane');
+    $('.lab-panel pre').textContent = info.c;
+    $('.lab-panel pre').scrollTop = 0;
+    editor.scrollTo(0, 0);
+    $('.lab-code').hidden = false; $('.lab-panel').hidden = false; $('.lab-tree').hidden = true;
+    pane.style.setProperty('--p', 0);
+    pane.classList.add('sweep');
+    const t0 = performance.now(), d = RM ? 0 : 1500;
+    (function step(now) {
+      const u = d ? Math.min(1, (now - t0) / d) : 1, e = u < .5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u);
+      pane.style.setProperty('--p', e.toFixed(4));
+      if (u < 1 && compiled) requestAnimationFrame(step);
+      else { pane.classList.remove('sweep'); showStage(compiled ? 'c' : 'python'); }
+    })(t0);
+  }
+  // load the editor's code. Turning scramjit on (intro) compiles, then sweeps the Python into C;
+  // edits while it's on recompile in place.
+  function setCode(intro) {
     if (!lab) return;
     const src = editor.getValue();
     $('.lab-err').hidden = true;
     if (!compiled) {
       info = JSON.parse(lab.set_code(preset, src, false));
-      lightStages(1);
+      note('');
       finish();
+      if (stage !== 'python') showStage('python');
       return;
     }
-    // scramjit on: the stages light up as the pipeline runs (compiling blocks, so paint first)
-    lightStages(1);
-    let k = 1;
-    const tick = () => { if (k < 3) { lightStages(++k); setTimeout(tick, RM ? 0 : 220); } else compile(); };
-    setTimeout(tick, RM ? 0 : 220);
-    function compile() {
-      requestAnimationFrame(() => setTimeout(() => {
-        info = JSON.parse(lab.set_code(preset, src, true));
-        lightStages(info.state === 'compiled' ? 5 : 3);
-        showStage(info.state === 'compiled' ? 'c' : 'c');
-        finish();
-      }, 0));
-    }
+    note('scramjit is compiling…', true);
+    requestAnimationFrame(() => setTimeout(() => {     // compiling blocks the page, so paint first
+      if (!compiled) return;
+      info = JSON.parse(lab.set_code(preset, src, true));
+      note(info.state === 'compiled' ? `compiled in ${(info.compile_ms / 1000).toFixed(1)} s` : info.state === 'fallback' ? 'runs as Python' : '');
+      finish();
+      if (info.state === 'compiled' && intro) sweep();
+      else if (info.state === 'fallback' && intro) showStage('c');
+      else showStage(stage);
+    }, 30));
   }
   function finish() {
-    if (info.state === 'error') {
-      const e = $('.lab-err');
-      e.hidden = false; e.textContent = info.error;
-    }
+    const e = $('.lab-err');
+    e.hidden = info.state !== 'error';
+    if (info.state === 'error') e.textContent = info.error;
     root.classList.toggle('fast', info.state === 'compiled');
-    if (!compiled) showStage(stage === 'c' || stage === 'types' || stage === 'wasm' ? 'python' : stage);
-    else if (stage === 'python') showStage('c');
-    else showStage(stage);
   }
 
   // ---- 3D terrain
@@ -233,20 +266,27 @@
     sel.addEventListener('change', () => {
       preset = sel.value; rate = 0;
       if (sources[preset]) editor.setValue(sources[preset]);
-      if (running) { lab.reset(); clearTimeout(editTimer); setCode(); }
+      if (running) { lab.reset(); clearTimeout(editTimer); setCode(compiled); }
     });
     const setMode = on => {
       if (on === compiled) return;
       compiled = on; rate = 0;
-      $('.lab-py').setAttribute('aria-pressed', !on);
-      $('.lab-sj').setAttribute('aria-pressed', on);
+      $('.lab-sj').setAttribute('aria-checked', on);
+      $('.lab-state').textContent = on ? 'on' : 'off';
+      root.classList.toggle('sj', on);
       root.classList.remove('nudge'); nudged = true;
-      if (running) setCode();
+      if (!on) showStage('python');
+      if (running) setCode(on);
     };
-    $('.lab-py').addEventListener('click', () => setMode(false));
-    $('.lab-sj').addEventListener('click', () => setMode(true));
-    $('.lab-reset').addEventListener('click', () => { if (running) { lab.reset(); rate = 0; } });
-    root.querySelectorAll('.lab-chip').forEach(c => c.addEventListener('click', () => showStage(c.dataset.s)));
+    $('.lab-sj').addEventListener('click', () => setMode(!compiled));
+    $('.lab-reset').addEventListener('click', () => { if (running) { lab.reset(Math.floor(Math.random() * 1e9)); rate = 0; } });
+    root.querySelectorAll('.lab-tab').forEach(c => c.addEventListener('click', () => showStage(c.dataset.s)));
+    $('.lab-tree').addEventListener('click', e => {        // a statement opens its expressions
+      const row = e.target.closest('.lab-row.x');
+      if (!row) return;
+      row.classList.toggle('on');
+      row.nextElementSibling.hidden = !row.classList.contains('on');
+    });
     // full screen: the Fullscreen API where it works on elements, a fixed full-window layout elsewhere
     const relayout = () => { resize(); if (editor) editor.refresh(); };
     const setFull = on => { root.classList.toggle('is-full', on); $('.lab-full').setAttribute('aria-label', on ? 'Exit full screen' : 'Full screen'); requestAnimationFrame(relayout); };

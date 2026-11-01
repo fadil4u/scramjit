@@ -402,6 +402,9 @@ hydraulic erosion, a viewshed beacon, thermal landslides) loads Pyodide, numpy, 
 200x faster than Pyodide's CPython (about 2,400 against 400,000 droplets per second), compiling
 in about 2.5 s. `tools/sync_site.py` refreshes the copies the site loads. Exact `math.hypot`
 is slow in WebAssembly (cimo's `fma` is software there), so the beacon uses `math.sqrt`.
+At compiled speed, erosion and landslides reach their steady state (a flat plain) in under a
+second, so the demo adds clock-based uplift toward the starting terrain (2 s time constant) and
+gentler droplets: the terrain shows the balance, and more work per second carves deeper.
 
 **M2: builtins, lists, narrowing.** Lowering rules for `enumerate`, `zip`, `map`, `filter`,
 comprehensions and the reductions; fixed-size lists as arrays; narrow types from annotations,

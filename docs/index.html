@@ -158,18 +158,22 @@ section.s{padding:76px 0 8px}
 @media (prefers-reduced-motion:reduce){.frame{transition:opacity .3s ease,visibility 0s linear .3s;transform:none!important}}
 @media(max-width:600px){.car-bar{font-size:12.5px}}
 /* live demo */
-.lab{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);margin-top:28px;background:var(--code);border:1px solid var(--codeline);border-radius:14px;overflow:hidden}
-.lab-left{display:flex;flex-direction:column;min-width:0;border-right:1px solid #232838}
+.lab{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);height:clamp(540px,calc(100vh - 120px),760px);margin-top:28px;background:var(--code);border:1px solid var(--codeline);border-radius:14px;overflow:hidden}
+.lab-left{display:flex;flex-direction:column;min-width:0;min-height:0;border-right:1px solid #232838}
 .lab-bar{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #232838;background:var(--code2)}
 .lab-bar select,.lab-reset{font:500 12.5px var(--font);color:#c9d1e2;background:#1b2030;border:1px solid #2a3042;border-radius:7px;padding:6px 9px;cursor:pointer}
-.lab-reset{margin-left:auto}
+.lab-reset{margin-left:auto;display:inline-flex;align-items:center;gap:6px}
+.lab-reset svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round}
+.lab-reset:hover{border-color:#3d4560;color:#fff}
 .lab-code .CodeMirror{height:100%;background:transparent;color:#c9d1d9;font:12px/1.6 var(--mono)}
 .cm-s-sj .CodeMirror-gutters{background:transparent;border-right:0}.cm-s-sj .CodeMirror-linenumber{color:#3a4258}
 .cm-s-sj .CodeMirror-cursor{border-left:2px solid #ffb072}
 .cm-s-sj .CodeMirror-selected,.cm-s-sj.CodeMirror-focused .CodeMirror-selected{background:#2a2f45}
 .cm-s-sj .cm-keyword{color:#ff7b72}.cm-s-sj .cm-builtin{color:#ffa657}.cm-s-sj .cm-number{color:#79c0ff}.cm-s-sj .cm-string{color:#a5d6ff}
 .cm-s-sj .cm-comment{color:#6e7681}.cm-s-sj .cm-def{color:#d2a8ff}.cm-s-sj .cm-variable-2{color:#c9d1d9}.cm-s-sj .cm-operator{color:#c9d1d9}
-.lab-local{position:absolute;top:12px;left:12px;z-index:2;display:flex;align-items:center;gap:7px;font:500 11.5px var(--mono);color:#c9d1e2;background:rgba(8,10,18,.6);border:1px solid #2a3042;padding:5px 10px;border-radius:999px;cursor:help}
+.lab-local{position:absolute;top:12px;left:12px;z-index:2;display:flex;align-items:center;gap:7px;font:500 11.5px var(--mono);color:#c9d1e2;background:rgba(8,10,18,.6);border:1px solid #2a3042;padding:5px 10px;border-radius:999px;cursor:help;opacity:0;visibility:hidden;transition:opacity .4s,visibility .4s}
+.lab.fast .lab-local{opacity:1;visibility:visible}
+.lab-sw{display:none}
 .lab-local-dot{width:7px;height:7px;border-radius:50%;background:#22c55e;box-shadow:0 0 8px rgba(34,197,94,.7)}
 .lab-rate small{color:#8e98b0;font-size:11px}
 /* full screen: the whole demo, the terrain getting most of the width */
@@ -177,15 +181,8 @@ section.s{padding:76px 0 8px}
 .lab-full:hover{border-color:#f9731688;color:#fff}
 .lab-full svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .lab-full .i-exit,.lab.is-full .lab-full .i-enter{display:none}.lab.is-full .lab-full .i-exit{display:block}
-.lab.is-full{position:fixed;inset:0;z-index:100;margin:0;border-radius:0;border:0;grid-template-columns:clamp(600px,38vw,760px) minmax(0,1fr)}
-.lab.is-full .lab-pipe{flex-wrap:wrap;row-gap:6px}
+.lab.is-full{position:fixed;inset:0;z-index:100;margin:0;border-radius:0;border:0;height:100vh;height:100dvh;grid-template-columns:clamp(600px,38vw,760px) minmax(0,1fr)}
 .lab:fullscreen{position:static}
-.lab.is-full .lab-left{min-height:0;height:100vh}
-.lab.is-full .lab-code{flex:1;height:auto}
-.lab.is-full .lab-panel pre{height:30vh}
-.lab.is-full .lab-right{min-height:0;height:100vh}
-@media(max-width:960px){.lab.is-full{grid-template-columns:minmax(0,1fr);grid-template-rows:55vh minmax(0,1fr);overflow:auto}
-.lab.is-full .lab-right{order:-1;height:55vh}.lab.is-full .lab-left{height:auto}.lab.is-full .lab-code{height:260px;flex:none}}
 /* thin dark scrollbars in the editor and the stage panel (CodeMirror draws its own bars) */
 .lab .CodeMirror-vscrollbar,.lab .CodeMirror-hscrollbar,.lab-panel pre{scrollbar-width:thin;scrollbar-color:#2d3448 transparent}
 .lab .CodeMirror-vscrollbar::-webkit-scrollbar,.lab .CodeMirror-hscrollbar::-webkit-scrollbar,.lab-panel pre::-webkit-scrollbar{width:8px;height:8px}
@@ -193,31 +190,67 @@ section.s{padding:76px 0 8px}
 .lab .CodeMirror-vscrollbar::-webkit-scrollbar-thumb,.lab .CodeMirror-hscrollbar::-webkit-scrollbar-thumb,.lab-panel pre::-webkit-scrollbar-thumb{background:#2d3448;border-radius:4px;border:2px solid var(--code)}
 .lab .CodeMirror-vscrollbar::-webkit-scrollbar-thumb:hover,.lab .CodeMirror-hscrollbar::-webkit-scrollbar-thumb:hover,.lab-panel pre::-webkit-scrollbar-thumb:hover{background:#465070}
 .lab .CodeMirror-scrollbar-filler,.lab .CodeMirror-gutter-filler{background:transparent}
-.lab-err{margin:0 12px 8px;padding:7px 10px;border-radius:6px;font:12px var(--mono);color:#fecdd3;background:rgba(190,18,60,.2);white-space:pre-wrap}
-.lab-pipe{display:flex;align-items:center;gap:4px;padding:10px 12px;border-top:1px solid #232838;overflow-x:auto;scrollbar-width:none}
-.lab-pipe::-webkit-scrollbar{display:none}
-.lab-pipe i{font-style:normal;color:#3d4559;font-size:12px}
-.lab-chip{flex:none;font:inherit;border:1px solid #2a3042;background:#151925;border-radius:7px;padding:4px 9px;cursor:pointer;transition:background .3s,border-color .3s,box-shadow .3s}
-.lab-chip b{font:600 11.5px var(--mono);color:#6f7891;transition:color .3s}
-.lab-chip.lit{border-color:#3b5bdb;background:#16213d}.lab-chip.lit b{color:#cfe0ff}
-.fast .lab-chip.lit:nth-of-type(n+3){border-color:#c2410c;background:#2a1712}.fast .lab-chip.lit:nth-of-type(n+3) b{color:#ffd2ad}
-.lab-chip.open{box-shadow:0 0 0 2px rgba(249,115,22,.55)}
-.lab-code{height:300px;min-height:0}
-.lab-panel{border-top:1px solid #232838}
-.lab-panel pre{margin:0;height:170px;overflow:auto;padding:10px 14px;font:11.5px/1.55 var(--mono);color:#b9c2d6;white-space:pre}
-.lab-right{position:relative;min-height:520px;background:radial-gradient(ellipse at 50% 30%,#141a2c,#080a12 70%)}
+.lab-err{margin:8px 12px 0;padding:7px 10px;border-radius:6px;font:12px var(--mono);color:#fecdd3;background:rgba(190,18,60,.2);white-space:pre-wrap}
+.lab-tabs{display:flex;align-items:center;gap:2px;padding:6px 10px;border-bottom:1px solid #232838;overflow-x:auto;scrollbar-width:none}
+.lab-tabs::-webkit-scrollbar{display:none}
+.lab-tab{flex:none;border:0;background:none;color:#7d869c;font:600 11.5px var(--mono);padding:4px 10px;border-radius:6px;cursor:pointer;white-space:nowrap;transition:background .25s,color .25s,max-width .45s,padding .45s,opacity .35s}
+.lab-tab:hover{color:#d6deeb}
+.lab-tab.open{color:#fff;background:#1d2436}
+.lab-tab[data-s=python].open{background:linear-gradient(90deg,#1e40af,#2563eb)}
+.lab.fast .lab-tab.lab-more.open{background:linear-gradient(90deg,#9a3412,#b91c1c)}
+.lab-more{max-width:0;padding-left:0;padding-right:0;opacity:0;overflow:hidden;pointer-events:none}
+.lab.sj .lab-more{max-width:140px;padding-left:10px;padding-right:10px;opacity:1;pointer-events:auto}
+.lab.sj .lab-more:nth-of-type(3){transition-delay:.08s}.lab.sj .lab-more:nth-of-type(4){transition-delay:.16s}
+.lab-note{margin-left:auto;padding-left:10px;font:500 11px var(--mono);color:#6f7891;white-space:nowrap}
+.lab-note.busy::before{content:"";display:inline-block;width:8px;height:8px;margin-right:7px;border-radius:50%;background:#f97316;animation:labblink .8s ease-in-out infinite alternate}
+@keyframes labblink{to{opacity:.25}}
+.lab-pane{position:relative;flex:1;min-height:0;--p:0}
+.lab-tree{position:absolute;inset:0;overflow:auto;padding:12px 14px 20px;font:11.5px/1.5 var(--mono);color:#b9c2d6;scrollbar-width:thin;scrollbar-color:#2d3448 transparent}
+.lab-tree[hidden]{display:none}
+.lab-tree ul{list-style:none;margin:0;padding:0 0 0 16px;border-left:1px solid #252b3c;margin-left:6px}
+.lab-tree>ul{border-left:0;padding-left:0;margin-left:0}
+.lab-tree li{position:relative;margin:3px 0}
+.lab-tree ul ul>li::before{content:"";position:absolute;left:-16px;top:11px;width:12px;border-top:1px solid #252b3c}
+.lab-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:2px 6px;border-radius:6px;cursor:default}
+.lab-row.x{cursor:pointer}.lab-row.x:hover{background:#151a28}
+.lab-k{flex:none;font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;color:#cfe0ff;background:#1b2b52}
+.lab-k.loop{color:#ffd2ad;background:#3a1d10}.lab-k.cond{color:#e9d5ff;background:#2e1a47}.lab-k.def{color:#fff;background:#1e40af}
+.lab-k.ex{color:#aab3c8;background:#1b2030}
+.lab-t{color:#d6deeb;white-space:pre}
+.lab-ty{flex:none;font-size:10.5px;padding:0 6px;border-radius:999px;border:1px solid #2a3042;color:#9aa4bb}
+.lab-ty b{font-weight:600;color:#c9d1e2}
+.lab-ty.arr{border-color:#6d28d966;color:#d8b4fe}.lab-ty.flt{border-color:#c2410c66;color:#ffb072}.lab-ty.int{border-color:#2563eb66;color:#93c5fd}
+.lab-row .lab-caret{flex:none;width:10px;color:#4b5470;transition:transform .2s}.lab-row.x.on .lab-caret{transform:rotate(90deg)}
+.lab-ex{margin:2px 0 6px 22px;padding:6px 8px;border-radius:6px;background:#0d111c;border:1px solid #1d2232}
+.lab-tree-head{margin:0 0 10px;color:#6f7891}
+/* the raster line: the C, above it, replaces the Python, below it, as it sweeps down */
+.lab-pane.sweep .lab-code{clip-path:inset(calc(var(--p) * 100%) 0 0 0)}
+.lab-pane.sweep .lab-panel{clip-path:inset(0 0 calc((1 - var(--p)) * 100%) 0)}
+.lab-scan{position:absolute;left:0;right:0;top:calc(var(--p) * 100%);height:2px;z-index:3;pointer-events:none;opacity:0;transition:opacity .2s;background:linear-gradient(90deg,rgba(37,99,235,0),#3b82f6 12%,#f97316 58%,#ef4444 88%,rgba(239,68,68,0));box-shadow:0 0 16px 3px rgba(249,115,22,.45)}
+.lab-scan::after{content:"";position:absolute;left:0;right:0;bottom:2px;height:26px;background:linear-gradient(0deg,rgba(249,115,22,.12),rgba(249,115,22,0))}
+.lab-pane.sweep .lab-scan{opacity:1}
+.lab-code,.lab-panel{position:absolute;inset:0}
+.lab-code[hidden],.lab-panel[hidden]{display:none}
+.lab-panel pre{margin:0;height:100%;box-sizing:border-box;overflow:auto;padding:10px 14px;font:11.5px/1.55 var(--mono);color:#b9c2d6;white-space:pre}
+.lab-right{position:relative;min-height:0;background:radial-gradient(ellipse at 50% 30%,#141a2c,#080a12 70%)}
 .lab-right canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:grab}
 .lab-cover{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;background:rgba(8,10,18,.55)}
 .lab-status{max-width:34ch;font-size:13px;color:#aab3c8}
 .lab.running .lab-cover{display:none}.lab.loading .lab-start{opacity:.5;pointer-events:none}
 .lab-hud{position:absolute;left:14px;bottom:14px;right:14px;display:flex;flex-direction:column;align-items:flex-start;gap:8px;pointer-events:none}
 .lab-hud>*{pointer-events:auto}
-.lab-mode{position:relative;display:inline-flex;padding:4px;gap:4px;border-radius:12px;background:rgba(8,10,18,.75);border:1px solid #2a3042;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
-.lab-mode button{display:inline-flex;align-items:center;gap:7px;border:0;border-radius:8px;padding:9px 16px;font:600 14px var(--font);color:#8e98b0;background:none;cursor:pointer;transition:background .25s,color .25s,box-shadow .25s}
-.lab-mode button:hover{color:#e6edf3}
-.lab-mode svg{width:15px;height:15px;fill:currentColor}
-.lab-py[aria-pressed=true]{color:#fff;background:linear-gradient(90deg,#1e40af,#2563eb)}
-.lab-sj[aria-pressed=true]{color:#fff;background:linear-gradient(90deg,#2563eb,#f97316 55%,#dc2626);box-shadow:0 0 22px -4px rgba(249,115,22,.75)}
+.lab-mode{position:relative;display:inline-flex;align-items:center}
+.lab-sj{display:inline-flex;align-items:center;gap:9px;border:1px solid #2a3042;border-radius:12px;padding:9px 12px 9px 14px;font:600 14px var(--font);color:#c9d1e2;background:rgba(8,10,18,.75);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);cursor:pointer;transition:border-color .25s,box-shadow .25s,color .25s}
+.lab-sj:hover{border-color:#3d4560;color:#fff}
+.lab-sj svg{width:15px;height:15px;fill:currentColor}
+.lab-track{position:relative;width:38px;height:20px;border-radius:999px;background:#2d3448;transition:background .25s}
+.lab-knob{position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:#8e98b0;transition:left .25s,background .25s}
+.lab-state{min-width:22px;font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:#6f7891}
+.lab-sj[aria-checked=true]{color:#fff;border-color:#f9731699;box-shadow:0 0 22px -4px rgba(249,115,22,.7)}
+.lab-sj[aria-checked=true] svg{color:#ffb072}
+.lab-sj[aria-checked=true] .lab-track{background:linear-gradient(90deg,#2563eb,#f97316 60%,#dc2626)}
+.lab-sj[aria-checked=true] .lab-knob{left:21px;background:#fff}
+.lab-sj[aria-checked=true] .lab-state{color:#ffd2ad}
 .lab-nudge{position:absolute;left:calc(100% + 10px);top:50%;transform:translateY(-50%);white-space:nowrap;font:600 12.5px var(--font);color:#ffd2ad;opacity:0;transition:opacity .4s;pointer-events:none}
 .lab-nudge::before{content:"←";margin-right:6px}
 .lab.nudge .lab-nudge{opacity:1}
@@ -226,8 +259,10 @@ section.s{padding:76px 0 8px}
 .lab-stats{display:flex;align-items:center;gap:8px;font:500 12.5px var(--mono);color:#c9d1e2;background:rgba(8,10,18,.6);padding:6px 10px;border-radius:7px}
 @media (prefers-reduced-motion:reduce){.lab.nudge .lab-sj{animation:none;box-shadow:0 0 0 3px rgba(249,115,22,.5)}}
 .lab-dot{width:8px;height:8px;border-radius:50%;background:#3b82f6}.fast .lab-dot{background:#f97316;box-shadow:0 0 10px #f97316}
-@media(max-width:960px){.lab{grid-template-columns:minmax(0,1fr)}.lab-left{border-right:0;border-bottom:1px solid #232838}.lab-right{min-height:380px}.lab-code{height:260px}}
-@media(max-width:600px){.lab-right{min-height:320px}.lab-bar{flex-wrap:wrap}.lab-panel pre{height:150px}}
+@media(max-width:960px){.lab{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,44fr) minmax(0,56fr);height:min(calc(100svh - 84px),860px)}
+.lab-right{order:-1}.lab-left{border-right:0;border-top:1px solid #232838}
+.lab.is-full{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:600px){.lab-lw{display:none}.lab-sw{display:inline}.lab-bar{padding:8px 10px}.lab-tabs{padding:5px 8px}.lab-note{display:none}.lab-sj{padding:7px 10px 7px 12px;font-size:13px}.lab-hud{left:10px;bottom:10px}.lab-stats{font-size:11.5px}}
 /* cards */
 .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-top:28px}
 .card{position:relative;background:var(--white);border:1px solid var(--line);border-radius:12px;padding:20px 20px 22px;transition:border-color .12s,transform .12s,box-shadow .12s;overflow:hidden}
@@ -507,40 +542,43 @@ void mandel_rows(int32_t *out, int64_t h, int64_t w,
 <section class="s" id="lab"><div class="wrap">
   <span class="k">Live demo</span>
   <h2>Watch Python get fast</h2>
-  <p class="lede">A terrain eroding under thousands of raindrops, written in plain Python and running in this page in Pyodide. Flip scramjit on: the same function is parsed, typed, turned into C and compiled to WebAssembly by cimo, all in Python, in your browser.</p>
+  <p class="lede">A terrain eroding under thousands of raindrops, written in plain Python and running in this page in Pyodide. Turn scramjit on: the same function is parsed, typed, turned into C and compiled to WebAssembly by cimo, all in Python, in your browser.</p>
   <div class="lab" id="lab-demo">
     <div class="lab-left">
       <div class="lab-bar">
         <select class="lab-preset" aria-label="Preset"></select>
-        <button type="button" class="lab-reset">New terrain</button>
+        <button type="button" class="lab-reset"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 20 9 8l4 6.5"/><path d="m11 17 5-8 6 11H2"/><path d="m7.4 10.7 1.6 1.3 1.4-1.2"/></svg>New terrain</button>
       </div>
-      <div class="lab-code"><textarea aria-label="Python code"></textarea></div>
+      <div class="lab-tabs" role="tablist" aria-label="The code, and what scramjit makes of it">
+        <button type="button" class="lab-tab open" data-s="python">Python</button>
+        <button type="button" class="lab-tab lab-more" data-s="tree">AST &amp; types</button>
+        <button type="button" class="lab-tab lab-more" data-s="c">C</button>
+        <button type="button" class="lab-tab lab-more" data-s="wasm">Wasm</button>
+        <span class="lab-note"></span>
+      </div>
       <div class="lab-err" role="status" hidden></div>
-      <div class="lab-pipe">
-        <button type="button" class="lab-chip lit" data-s="python"><b>Python</b></button><i>→</i>
-        <button type="button" class="lab-chip" data-s="ast"><b>Syntax tree</b></button><i>→</i>
-        <button type="button" class="lab-chip" data-s="types"><b>Types</b></button><i>→</i>
-        <button type="button" class="lab-chip" data-s="c"><b>C</b></button><i>→</i>
-        <button type="button" class="lab-chip" data-s="wasm"><b>WebAssembly</b></button>
+      <div class="lab-pane">
+        <div class="lab-code"><textarea aria-label="Python code"></textarea></div>
+        <div class="lab-panel" hidden><pre></pre></div>
+        <div class="lab-tree" hidden></div>
+        <i class="lab-scan" aria-hidden="true"></i>
       </div>
-      <div class="lab-panel"><pre>Plain Python. Pyodide runs it in the browser, one bytecode at a time.</pre></div>
     </div>
     <div class="lab-right">
       <canvas aria-label="A 3D terrain shaped by the code on the left"></canvas>
-      <div class="lab-local" title="scramjit (Python to C) and cimo (C to WebAssembly) are Python programs, and they run right here in this page, in Pyodide. There's no compile server behind this demo."><span class="lab-local-dot"></span>The whole compiler runs in your browser</div>
+      <div class="lab-local" title="scramjit (Python to C) and cimo (C to WebAssembly) are Python programs, and they run right here in this page, in Pyodide. There's no compile server behind this demo."><span class="lab-local-dot"></span><span class="lab-lw">The whole compiler</span><span class="lab-sw">Compiler</span> runs in your browser</div>
       <button type="button" class="lab-full" aria-label="Full screen" title="Full screen"><svg class="i-enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg><svg class="i-exit" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg></button>
       <div class="lab-cover"><button type="button" class="btn btn-p lab-start">Run it live</button><p class="lab-status">Loads Pyodide (7 MB), numpy, cimo and scramjit. Then the whole toolchain runs right here: Python, scramjit turning it into C, cimo compiling the C to WebAssembly. There's no compile server.</p></div>
       <div class="lab-hud">
-        <div class="lab-mode" role="group" aria-label="Run the code as">
-          <button type="button" class="lab-py" aria-pressed="true">Python</button>
-          <button type="button" class="lab-sj" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>scramjit</button>
-          <span class="lab-nudge" aria-hidden="true">Slow? Flip it</span>
+        <div class="lab-mode">
+          <button type="button" class="lab-sj" role="switch" aria-checked="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>scramjit<span class="lab-track"><span class="lab-knob"></span></span><span class="lab-state">off</span></button>
+          <span class="lab-nudge" aria-hidden="true">Slow? Turn it on</span>
         </div>
         <div class="lab-stats"><span class="lab-dot"></span><span class="lab-rate">drag to turn the terrain</span></div>
       </div>
     </div>
   </div>
-  <p class="note">Edit the code and it reloads as you type. Write something scramjit can't compile and the C panel shows why it runs as Python instead.</p>
+  <p class="note">Edit the code and it reloads as you type. Write something scramjit can't compile and the C tab shows why it runs as Python instead.</p>
 </div></section>
 
 <section class="s" id="why"><div class="wrap">
@@ -839,6 +877,6 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="lab.js?v=8" defer></script>
+<script src="lab.js?v=11" defer></script>
 </body>
 </html>

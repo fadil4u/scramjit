@@ -168,9 +168,8 @@ Each decision is explicit and tested against CPython:
   - functions CPython implements itself (`hypot`, `dist`, `fsum`, `isqrt`, `gamma`, `lgamma`,
     ...) are ported into scramjit's runtime, with CPython's license notice;
   - functions CPython takes from the platform C library (`sin`, `atan2`, `exp`, `pow`, ...) call
-    that same library on native targets (glibc, Apple's libm, the Windows CRT, linked through
-    cimo), and in Pyodide are ported into the runtime from the libm that Pyodide's CPython is
-    built with (emscripten's, derived from musl; MIT);
+    that same library: glibc, Apple's libm or the Windows CRT natively, and emscripten's in Pyodide,
+    where `ctypes.CDLL(None)` gives the addresses (table indices), so nothing needs porting;
   - CPython's own handling around those calls (NaN, infinities, domain and range errors raising
     `ValueError` or `OverflowError`) is reproduced exactly.
 
@@ -406,6 +405,12 @@ All of `math` compiles in Pyodide too, bit-exact: `ctypes.CDLL(None)` gives libm
 main module, which in WebAssembly are table indices, so kernels call the very functions `math` calls
 (`tests/test_math_cases.py`, run natively and through `tools/run_pyodide.mjs`). A pure `sin`, `log`,
 `exp` loop gains 12x there: most of its time is in libm.
+What CPython implements itself (`gamma`, `lgamma`, `remainder`, `fsum`, `comb`, ...) is in
+`scramjit/_mathlib.py`, included only in kernels that use it, so it adds nothing to other compiles.
+`frexp` is implemented from the float's bits, because calling a libm function with a pointer traps in
+WebAssembly (cimo's pointers don't match the signature; a table call with doubles and ints is fine).
+Types that depend on the data still fall back: float `sumprod` (the int 0 when empty) and float
+`prod` without `start=1.0`.
 At compiled speed, erosion and landslides reach their steady state (a flat plain) in under a
 second, so the demo adds clock-based uplift toward the starting terrain (2 s time constant) and
 gentler droplets: the terrain shows the balance, and more work per second carves deeper.

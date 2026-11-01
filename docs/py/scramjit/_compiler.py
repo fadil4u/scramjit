@@ -22,6 +22,7 @@ from . import _types as T
 from ._errors import Unsupported
 import sys
 
+from ._mathlib import snippets
 from ._runtime import (INDEX_ERROR, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
                        OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION)
 
@@ -46,6 +47,12 @@ MATH_FUNCS = {
     'hypot': ('hypot', 0), 'floor': ('round', 0), 'ceil': ('round', 0), 'trunc': ('round', 0),
     'degrees': ('scale', 0), 'radians': ('scale', 0),
     'isnan': ('test', 0), 'isinf': ('test', 0), 'isfinite': ('test', 0),
+    # ported from mathmodule.c (_mathlib.py)
+    'gamma': ('gamma', 0), 'lgamma': ('gamma', 0), 'remainder': ('remainder', 0), 'nextafter': ('nextafter', 0),
+    'ulp': ('ulp', 0), 'fma': ('fma', 0), 'ldexp': ('ldexp', 0), 'isclose': ('isclose', 0), 'frexp': ('frexp', 0),
+    'modf': ('modf', 0), 'isqrt': ('intf', 0), 'factorial': ('intf', 0), 'gcd': ('intf', 0), 'lcm': ('intf', 0),
+    'comb': ('intf', 0), 'perm': ('intf', 0), 'fsum': ('iter', 0), 'prod': ('iter', 0), 'dist': ('iter', 0),
+    'sumprod': ('iter', 0),
 }
 
 
@@ -98,6 +105,7 @@ class Compiler:
         self.depth = 1
         self.ntemp = 0
         self.uses_libm = False
+        self.helpers = set()      # helpers from _mathlib this kernel uses
         self.aliases = {}
         self.hoisted = {}      # ast.dump of a wraparound index -> its temporary, per loop iteration
         self.owned = []        # temporaries holding a list being built (freed on every exit)
@@ -471,7 +479,8 @@ class Compiler:
         """The math function a call refers to (math.sin, or sin from `from math import sin`)."""
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
                 and func.value.id not in self.env and self.globals.get(func.value.id) is math:
-            return func.attr if func.attr in MATH_FUNCS else self.fail(func, f'math.{func.attr}()')
+            # (a function this Python's math lacks isn't compiled: running it raises AttributeError)
+            return func.attr if func.attr in MATH_FUNCS and hasattr(math, func.attr) else self.fail(func, f'math.{func.attr}()')
         if isinstance(func, ast.Name) and func.id not in self.env and func.id in self.globals:
             obj = self.globals[func.id]
             for n in MATH_FUNCS:
@@ -481,18 +490,106 @@ class Compiler:
 
     def math_type(self, e, name):
         kind, _ = MATH_FUNCS[name]
-        if e.keywords:
-            self.fail(e, f'math.{name}() with keyword arguments')
+        if kind == 'iter':
+            return self.math_iter_type(e, name)
+        allowed = {'isclose': {'rel_tol', 'abs_tol'}, 'nextafter': {'steps'}}.get(kind, set())
+        if {k.arg for k in e.keywords} - allowed or any(k.arg is None for k in e.keywords):
+            self.fail(e, f'math.{name}() with these keyword arguments')
+        for k in e.keywords:
+            t = self.typeof(k.value)
+            if not t.is_number or (k.arg == 'steps' and t.kind == 'float'):
+                self.fail(e, f'math.{name}() with this {k.arg}')
         ts = [self.typeof(a) for a in e.args]
+        if kind == 'intf':
+            n = len(ts)
+            if not all(t.kind in ('int', 'bool') and not (t.np and t.kind == 'bool') for t in ts) \
+                    or (name in ('isqrt', 'factorial') and n != 1) or (name == 'comb' and n != 2) \
+                    or (name == 'perm' and n not in (1, 2)):
+                self.fail(e, f'math.{name}() of these arguments')
+            return T.INT
         if not all(t.is_number for t in ts) or any(t.np and t.kind == 'bool' for t in ts):
             self.fail(e, f'math.{name}() of these arguments')
         n = len(ts)
         if (kind in ('f1', '1a', 'round', 'scale', 'test') and n != 1) or (kind == 'log' and not 1 <= n <= (2 if name == 'log' else 1)) \
-                or (kind in ('atan2', 'pow', 'fmod', 'copysign') and n != 2):
+                or (kind in ('atan2', 'pow', 'fmod', 'copysign', 'remainder', 'nextafter', 'isclose', 'ldexp') and n != 2) \
+                or (kind in ('gamma', 'ulp', 'frexp', 'modf') and n != 1) or (kind == 'fma' and n != 3):
             self.fail(e, f'math.{name}() with {n} arguments')
+        if kind == 'ldexp' and ts[1].kind == 'float':
+            self.fail(e, 'math.ldexp() with a float exponent (it raises TypeError)')
+        if kind == 'frexp':
+            return T.tuple_of([T.FLOAT, T.INT])
+        if kind == 'modf':
+            return T.tuple_of([T.FLOAT, T.FLOAT])
+        if kind == 'isclose':
+            return T.BOOL
         if name == 'trunc' and ts[0].np and ts[0].kind != 'float':
             self.fail(e, 'math.trunc() of a numpy int (it raises TypeError)')
         return T.INT if kind == 'round' else T.BOOL if kind == 'test' else T.FLOAT
+
+    def seq_elem_type(self, src):
+        """The element type of a sequence math takes: a tuple, or what reductions loop over."""
+        if isinstance(src, ast.List) or self.is_tuple_expr(src):
+            ts = [self.typeof(x) for x in src.elts] if isinstance(src, ast.List) else self.typeof(src).elem
+            if not ts or not all(t.is_number for t in ts):
+                self.fail(src, 'this sequence')
+            if len({t.name for t in ts}) == 1:
+                return ts[0]
+            if any(t.np for t in ts):
+                return self.join_all(src, ts, 'this sequence')
+            return T.FLOAT if any(t.kind == 'float' for t in ts) else T.INT
+        return self.source_elem_type(src)
+
+    def is_tuple_expr(self, src):
+        return isinstance(src, ast.Tuple) or (isinstance(src, ast.Name) and src.id in self.env
+                                              and self.env[src.id].kind == 'tuple')
+
+    def seq_loops(self, src, after_first, item):
+        if isinstance(src, ast.List) or self.is_tuple_expr(src):
+            if isinstance(src, ast.List):              # computed in full, as Python builds it
+                ts = [self.typeof(x) for x in src.elts]
+                vals = [(self.hold(c, t), self.hold_flag(f)) for (c, f), t in zip((self.expr(x) for x in src.elts), ts)]
+            else:
+                ts, vals = self.typeof(src).elem, self.texpr(src)
+            after_first()
+            for v, t in zip(vals, ts):
+                item(v, t)
+            return
+        self.source_loops(src, after_first, item)
+
+    def math_iter_type(self, e, name):
+        kws = {k.arg: k.value for k in e.keywords}
+        if name == 'fsum':
+            if kws or len(e.args) != 1:
+                self.fail(e, 'math.fsum() with these arguments')
+            el = self.seq_elem_type(e.args[0])
+            if not el.is_number:
+                self.fail(e, 'math.fsum() of non-numbers')
+            return T.FLOAT
+        if name == 'prod':
+            if set(kws) - {'start'} or len(e.args) != 1:
+                self.fail(e, 'math.prod() with these arguments')
+            el = self.seq_elem_type(e.args[0])
+            st = self.typeof(kws['start']) if 'start' in kws else T.INT
+            if not el.is_number or el.kind == 'bool' or not st.is_number or st.kind == 'bool' or st.np \
+                    or el.ctype not in ('double', 'int64_t'):
+                self.fail(e, 'math.prod() of these values')
+            if st.kind == 'int':
+                if el.kind == 'float':
+                    self.fail(e, 'math.prod() of floats returns the int 1 when empty, so its type depends '
+                              'on the data; write math.prod(..., start=1.0)')
+                return T.INT if el.np is False else T.INT_DYN
+            return T.FLOAT if el.np is False else T.FLOAT_DYN
+        # dist and sumprod: two named sequences
+        if kws or len(e.args) != 2 or not all(isinstance(a, (ast.Name, ast.List)) or self.is_tuple_expr(a) for a in e.args):
+            self.fail(e, f'math.{name}() of anything but two named sequences or tuples')
+        els = [self.seq_elem_type(a) for a in e.args]
+        if not all(t.is_number for t in els):
+            self.fail(e, f'math.{name}() of non-numbers')
+        if name == 'dist':
+            return T.FLOAT
+        if not all(t.kind == 'int' and t.ctype == 'int64_t' for t in els):
+            self.fail(e, 'math.sumprod() of floats returns the int 0 when empty, so its type depends on the data')
+        return T.INT if not any(t.np for t in els) else T.INT_DYN
 
     def call_type(self, e):
         mf = self.math_func(e.func)
@@ -676,7 +773,7 @@ class Compiler:
         if self.uses_libm:
             params.append('const uint64_t *sj_m')
         params.append('int64_t *sj_io')
-        return '\n'.join(self.lines[:head] + [f'int sj_kernel({", ".join(params)}) {{']
+        return snippets(self.helpers) + '\n'.join(self.lines[:head] + [f'int sj_kernel({", ".join(params)}) {{']
                          + self.lines[head:] + ['}', ''])
 
     def block(self, stmts):
@@ -1308,6 +1405,8 @@ class Compiler:
             return [(self.hold(c, et), self.hold_flag(f)) for (c, f), et in zip(self.tuple_var(e.id), t.elem)]
         if self.is_shape(e):
             return [(self.extent(e.value.id, k), '0') for k in range(len(t.elem))]
+        if isinstance(e, ast.Call) and self.math_func(e.func):
+            return self.math_tuple(e, self.math_func(e.func))
         raise AssertionError(e)
 
     def extent(self, name, k):
@@ -1716,13 +1815,191 @@ class Compiler:
         return f_, ('1' if generic else gen if rt.np == 'dyn' else '0')
 
 
+    def math_iter(self, e, name):
+        line = self.line(e)
+        kws = {k.arg: k.value for k in e.keywords}
+        if name == 'fsum':
+            self.helpers.add('fsum')
+            s, r, err = self.temp(), self.temp(), self.temp()
+            self.emit(f'sj_fsum_t {s}; {s}.n = 0; {s}.special = 0.0; {s}.inf = 0.0;')
+
+            def item(v, t):
+                x = self.hold(self.coerce(v[0], t, T.FLOAT), T.FLOAT)
+                self.emit(f'if (sj_fsum_add(&{s}, {x})) SJ_FAIL({OVERFLOW_ERROR}, {line}, 3, 0);')
+            self.seq_loops(e.args[0], lambda: None, item)
+            self.emit(f'double {r} = 0.0; int {err} = sj_fsum_end(&{s}, &{r});')
+            self.emit(f'if ({err}) SJ_FAIL({VALUE_ERROR}, {line}, 14, 0);')
+            return r, '0'
+        if name == 'prod':
+            rt = self.typeof(e)
+            acc, rf = self.temp(), self.temp()
+            self.emit(f'{rt.ctype} {acc} = 1; int {rf} = 0;')
+
+            def after_first():
+                if 'start' in kws:
+                    c, _ = self.expr(kws['start'])
+                    self.emit(f'{acc} = ({rt.ctype})({c});')
+
+            def item(v, t):
+                x = self.hold(self.coerce(v[0], t, rt), rt)
+                self.emit(f'{acc} = ' + (f'sj_mul({acc}, {x});' if rt.kind == 'int' else f'{acc} * {x};') + f' {rf} |= {v[1]};')
+            self.seq_loops(e.args[0], after_first, item)
+            return acc, rf
+        # dist, sumprod: both sequences read in full first, as CPython does
+        rt = self.typeof(e)
+        ct = 'double' if name == 'dist' else 'int64_t'
+        bufs, counts, flags = [], [], []
+        for a in e.args:
+            n = (str(len(a.elts)) if isinstance(a, ast.List) else str(len(self.typeof(a).elem)) if self.is_tuple_expr(a)
+                 else self.iter_prep(self.iterable(a))[0])
+            buf, cnt, fl = self.temp(), self.temp(), self.temp()
+            self.owned.append((buf, ct))
+            self.emit(f'{buf} = malloc(sizeof({ct}) * (size_t)({n} + 1)); if (!{buf}) SJ_FAIL({MEMORY_ERROR}, {line}, 0, 0);')
+            self.emit(f'int64_t {cnt} = 0; int {fl} = 0;')
+
+            def item(v, t, buf=buf, cnt=cnt, fl=fl):
+                to = T.FLOAT if name == 'dist' else T.INT
+                self.emit(f'{buf}[{cnt}++] = {self.coerce(v[0], t, to)}; {fl} |= {v[1]};')
+            self.seq_loops(a, lambda: None, item)
+            bufs.append(buf)
+            counts.append(cnt)
+            flags.append(fl)
+        if name == 'dist':
+            self.emit(f'if ({counts[0]} != {counts[1]}) SJ_FAIL({VALUE_ERROR}, {line}, 10, 0);')
+            mx, fn = self.temp(), self.temp()
+            self.emit(f'double {mx} = 0.0; int {fn} = 0;')
+            self.emit(f'for (int64_t k = 0; k < {counts[0]}; k++) {{ {bufs[0]}[k] = fabs({bufs[0]}[k] - {bufs[1]}[k]); '
+                      f'{fn} |= {bufs[0]}[k] != {bufs[0]}[k]; if ({bufs[0]}[k] > {mx}) {mx} = {bufs[0]}[k]; }}')
+            return self.hold(f'sj_vector_norm({counts[0]}, {bufs[0]}, {mx}, {fn})', T.FLOAT), '0'
+        self.emit(f'if ({counts[0]} != {counts[1]}) SJ_FAIL({VALUE_ERROR}, {line}, 11, 0);')
+        acc = self.temp()
+        self.emit(f'int64_t {acc} = 0;')
+        self.emit(f'for (int64_t k = 0; k < {counts[0]}; k++) {acc} = sj_add({acc}, sj_mul({bufs[0]}[k], {bufs[1]}[k]));')
+        return acc, f'({flags[0]} | {flags[1]})'
+
+    def math_tuple(self, e, name):
+        """frexp and modf: a list of (value, flag)."""
+        t = self.typeof(e.args[0])
+        c, _ = self.expr(e.args[0])
+        x = self.hold(self.coerce(c, t, T.FLOAT), T.FLOAT)
+        if name == 'frexp':
+            self.helpers.add('frexp')
+            m, ex = self.temp(), self.temp()
+            self.emit(f'double {m} = {x}; int64_t {ex} = 0;')
+            self.emit(f'if (isfinite({x}) && {x} != 0.0) {m} = sj_frexp({x}, &{ex});')
+            return [(m, '0'), (ex, '0')]
+        fr, ip = self.temp(), self.temp()
+        self.emit(f'double {ip} = trunc({x}), {fr} = isinf({x}) ? copysign(0.0, {x}) : copysign({x} - {ip}, {x});')
+        return [(fr, '0'), (ip, '0')]
+
+    def math_ported(self, e, name, kind, ts, vals, xs):
+        """The functions ported from mathmodule.c that take numbers."""
+        line = self.line(e)
+        dom = f'SJ_FAIL({VALUE_ERROR}, {line}, 4, 0)'
+        rng = f'SJ_FAIL({OVERFLOW_ERROR}, {line}, 1, 0)'
+        kws = {k.arg: k.value for k in e.keywords}
+        if kind == 'gamma':
+            self.uses_libm = True
+            self.helpers.add(name)
+            r, err = self.temp(), self.temp()
+            fn = 'sj_m_tgamma' if name == 'gamma' else 'sj_m_lgamma'
+            x = self.hold(xs[0], T.FLOAT)
+            self.emit(f'double {r}; int {err} = {fn}(sj_m, {x}, &{r});')
+            if self.exact:
+                self.emit(f'if ({err} == 1) {dom};')
+                self.emit(f'if ({err} == 2) {rng};')
+            return r, '0'
+        if kind == 'remainder':
+            self.helpers.add('remainder')
+            a, b = self.hold(xs[0], T.FLOAT), self.hold(xs[1], T.FLOAT)
+            r = self.hold(f'sj_m_remainder({a}, {b})', T.FLOAT)
+            if self.exact:
+                self.emit(f'if ({r} != {r} && {a} == {a} && {b} == {b}) {dom};')
+            return r, '0'
+        if kind == 'nextafter':
+            self.helpers.add('nextafter')
+            if 'steps' in kws:
+                c, _ = self.expr(kws['steps'])
+                st = self.hold(f'(int64_t)({c})', T.INT)
+                self.emit(f'if ({st} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 12, 0);')
+                return f'sj_nextafter({xs[0]}, {xs[1]}, (uint64_t){st})', '0'
+            self.uses_libm = True                       # without steps, CPython calls the C library's
+            return f'SJ_LIBM2({LIBM.index("nextafter")})({xs[0]}, {xs[1]})', '0'
+        if kind == 'ulp':
+            self.helpers.add('ulp')
+            return f'sj_ulp({xs[0]})', '0'
+        if kind == 'fma':
+            a, b, c = (self.hold(x, T.FLOAT) for x in xs)
+            r = self.hold(f'fma({a}, {b}, {c})', T.FLOAT)
+            self.emit(f'if ({r} != {r} && {a} == {a} && {b} == {b} && {c} == {c}) SJ_FAIL({VALUE_ERROR}, {line}, 13, 0);')
+            self.emit(f'if (isinf({r}) && isfinite({a}) && isfinite({b}) && isfinite({c})) SJ_FAIL({OVERFLOW_ERROR}, {line}, 2, 0);')
+            return r, '0'
+        if kind == 'ldexp':
+            self.uses_libm = True
+            x = self.hold(xs[0], T.FLOAT)
+            i = self.hold(f'(int64_t){vals[1][0]}', T.INT)
+            r = self.temp()
+            self.emit(f'double {r} = {x};')
+            self.emit(f'if ({x} != 0.0 && isfinite({x})) {{ if ({i} > 2147483647LL) {r} = copysign(INFINITY, {x}); '
+                      f'else if ({i} < -2147483648LL) {r} = copysign(0.0, {x}); '
+                      f'else {r} = ((double (*)(double, int))(uintptr_t)sj_m[{LIBM.index("ldexp")}])({x}, (int){i}); '
+                      f'if (isinf({r})) {rng}; }}')
+            return r, '0'
+        # isclose
+        a, b = self.hold(xs[0], T.FLOAT), self.hold(xs[1], T.FLOAT)
+        tol = {}
+        for k in e.keywords:                            # in the order written, after the arguments
+            c, _ = self.expr(k.value)
+            tol[k.arg] = self.hold(self.coerce(c, self.typeof(k.value), T.FLOAT), T.FLOAT)
+        rel, ab = tol.get('rel_tol', '1e-09'), tol.get('abs_tol', '0.0')
+        self.emit(f'if ({rel} < 0.0 || {ab} < 0.0) SJ_FAIL({VALUE_ERROR}, {line}, 9, 0);')
+        d = self.hold(f'fabs({b} - {a})', T.FLOAT)
+        return (f'({a} == {b} || (!isinf({a}) && !isinf({b}) && ({d} <= fabs({rel} * {b}) || {d} <= fabs({rel} * {a}) '
+                f'|| {d} <= {ab})))'), '0'
+
+    def math_int(self, e, name, vals):
+        line = self.line(e)
+        xs = [self.hold(f'(int64_t){c}', T.INT) for c, _ in vals]
+        if name in ('gcd', 'lcm'):
+            self.helpers.add(name)
+            fn = 'sj_gcd2' if name == 'gcd' else 'sj_lcm2'
+            if not xs:
+                return ('0LL' if name == 'gcd' else '1LL'), '0'
+            acc = self.temp()
+            self.emit(f'int64_t {acc} = sj_abs({xs[0]});')
+            for x in xs[1:]:
+                self.emit(f'{acc} = {fn}({acc}, {x});')
+            return acc, '0'
+        if name == 'isqrt':
+            self.helpers.add('isqrt')
+            self.emit(f'if ({xs[0]} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 6, 0);')
+            return f'sj_isqrt({xs[0]})', '0'
+        if name == 'factorial':
+            self.helpers.add('perm')
+            self.emit(f'if ({xs[0]} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 5, 0);')
+            return f'sj_perm({xs[0]}, {xs[0]})', '0'
+        self.helpers.add(name)
+        if len(xs) == 1:                                # perm(n) is factorial(n)
+            self.emit(f'if ({xs[0]} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 5, 0);')
+            return f'sj_perm({xs[0]}, {xs[0]})', '0'
+        n, k = xs
+        self.emit(f'if ({n} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 7, 0);')
+        self.emit(f'if ({k} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 8, 0);')
+        return f'sj_{name}({n}, {k})', '0'
+
     def math_call(self, e, name):
         kind, can_overflow = MATH_FUNCS[name]
+        if kind == 'iter':
+            return self.math_iter(e, name)
         line = self.line(e)
         ts = [self.typeof(a) for a in e.args]
         vals = [self.expr(a) for a in e.args]          # arguments first, in order, as Python does
         vals = [(self.hold(c, t), self.hold_flag(f)) for (c, f), t in zip(vals, ts)]
+        if kind == 'intf':
+            return self.math_int(e, name, vals)
         xs = [self.coerce(c, t, T.FLOAT) for (c, _), t in zip(vals, ts)]
+        if kind in ('gamma', 'remainder', 'nextafter', 'ulp', 'fma', 'ldexp', 'isclose'):
+            return self.math_ported(e, name, kind, ts, vals, xs)
         dom = f'SJ_FAIL({VALUE_ERROR}, {line}, 4, 0)'
         rng = f'SJ_FAIL({OVERFLOW_ERROR}, {line}, 1, 0)'
 

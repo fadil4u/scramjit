@@ -4339,6 +4339,7 @@ def phicopyref(fn, b, p):
 from . import defs as D
 from .defs import KBASE
 from .cfg import dom
+from .gcm import pinned
 from .gvn import replaceuses
 from .util import newtmp
 _DIV = {D.Odiv: D.Odiv, D.Orem: D.Odiv, D.Oudiv: D.Oudiv, D.Ourem: D.Oudiv}
@@ -4349,6 +4350,22 @@ def nload(fn):
         n += sum(1 for i in b.ins[:b.nins] if D.isload(i.op))
         b = b.link
     return n
+def domcse(fn):
+    seen = {}
+    changed = False
+    for b in fn.rpo[:fn.nblk]:
+        for i in b.ins[:b.nins]:
+            if i.op == D.Onop or pinned(i) or i.to == D.R:
+                continue
+            for b1, r in seen.setdefault((i.op, i.cls, i.arg[0], i.arg[1]), []):
+                if dom(b1, b):
+                    replaceuses(fn, i.to, r)
+                    i.set(D.Ins(D.Onop))
+                    changed = True
+                    break
+            else:
+                seen[(i.op, i.cls, i.arg[0], i.arg[1])].append((b, i.to))
+    return changed
 def divrem(fn):
     divs = {}
     found = False
@@ -5810,6 +5827,8 @@ def ieq(ia, ib):
 gvntbl = None
 gvntbln = 0
 gvndivs = {}
+gvnselects = {}
+gvnjmps = {}
 def gvndup(i, insert):
     idx = ihash(i) % gvntbln
     while True:
@@ -6038,6 +6057,51 @@ def propjnz0(fn, bif, s0, snon0, r, cls):
             if branchdom(fn, bif, s0, snon0, b):
                 replaceuse(fn, u, r, CON_Z)
         k += 1
+def diamond(b, p):
+    h = b.idom
+    if p is h:
+        return None if h.s1 is h.s2 else int(h.s1 is b)
+    if p.jmp.type != Jjmp or p.npred != 1 or p.pred[0] is not h:
+        return None
+    return int(h.s1 is p)
+def dedupselect(fn, b):
+    h = b.idom
+    if h is None or h.jmp.type != Jjnz or h.s1 is h.s2:
+        return
+    prev = None
+    p = b.phi
+    while p:
+        kill = False
+        if p.narg == 2:
+            w0, w1 = diamond(b, p.blk[0]), diamond(b, p.blk[1])
+            if w0 is not None and w1 is not None and w0 != w1:
+                k = (p.cls, h.jmp.arg, p.arg[w0 ^ 1], p.arg[w0])
+                seen = gvnselects.setdefault(k, [])
+                for b1, r in seen:
+                    if dom(b1, b):
+                        replaceuses(fn, p.to, r)
+                        p.to = R
+                        kill = True
+                        break
+                else:
+                    seen.append((b, p.to))
+        if kill:
+            if prev is None:
+                b.phi = p.link
+            else:
+                prev.link = p.link
+        else:
+            prev = p
+        p = p.link
+def knownjmp(fn, b):
+    for a in gvnjmps.get(b.jmp.arg, ()):
+        if a.jmp.type != Jjnz or a.s1 is a.s2:
+            continue
+        if a.s1.npred == 1 and branchdom(fn, a, a.s1, a.s2, b):
+            return 1
+        if a.s2.npred == 1 and branchdom(fn, a, a.s2, a.s1, b):
+            return 0
+    return None
 def dedupjmp(fn, b):
     if b.jmp.type != Jjnz:
         return
@@ -6060,6 +6124,15 @@ def dedupjmp(fn, b):
         if zz is not None:
             z = zz
             hit = True
+    if not hit and _ext.cse and rtype(b.jmp.arg) == RTmp:
+        known = knownjmp(fn, b)
+        if known is not None:
+            z = int(not known)
+            hit = True
+        else:
+            seen = gvnjmps.setdefault(b.jmp.arg, [])
+            if len(seen) < 8:
+                seen.append(b)
     if hit:
         if v == 0 or z:
             b.s1 = b.s2
@@ -6081,7 +6154,7 @@ def rebuildcfg(fn):
                 if gvndup(i, 0) is i:
                     addins(s, i)
 def gvn(fn):
-    global gvntbl, gvntbln, gvndivs
+    global gvntbl, gvntbln, gvndivs, gvnselects, gvnjmps
     from .ssa import filluse, ssacheck
     from .parse import printfn
     con01[0] = getcon(0, fn)
@@ -6106,9 +6179,13 @@ def gvn(fn):
     gvntbln = nins + nins // 2
     gvntbl = [None] * gvntbln
     gvndivs = {}
+    gvnselects = {}
+    gvnjmps = {}
     for n in range(fn.nblk):
         b = fn.rpo[n]
         dedupphi(fn, b)
+        if _ext.cse:
+            dedupselect(fn, b)
         for i in b.ins[:b.nins]:
             dedupins(fn, b, i)
         dedupjmp(fn, b)
@@ -7118,11 +7195,13 @@ class _Driver:
         if ext.cse:
             loads = cse.nload(fn)
             cfg.filldom(fn)
+            merged = cse.domcse(fn)
+            ssa.filluse(fn)
             alias.fillalias(fn)
             load.loadopt(fn)
             ssa.filluse(fn)
             ssa.ssacheck(fn)
-            if cse.nload(fn) != loads:
+            if merged or cse.nload(fn) != loads:
                 cfg.filldom(fn)
                 self._cleanup(fn, cfg, ssa, gvn, gcm)
         from .. import middle
@@ -24055,10 +24134,10 @@ def optimize(fn):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "7869424e783fa0fd1b0b",
-"runtime-arm64": "738b34720fbf9b476440",
-"runtime-arm64_apple": "29ffe4b818c8665e4de7",
-"runtime-arm64_win": "5892977d0f97d2953441"
+"compiler": "bf673e9d167cb665e39f",
+"runtime-arm64": "c2cda6f9afc21e5dc000",
+"runtime-arm64_apple": "0e4eee12b683cb73bf8e",
+"runtime-arm64_win": "2bd8050fc1bade476ac1"
 }
 ''',
 'onefile.py': '''\

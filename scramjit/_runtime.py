@@ -26,10 +26,22 @@ VALUE_ERROR_MESSAGES = [
     'min() iterable argument is empty',
     'max() iterable argument is empty',
     'math domain error',
+    'factorial() not defined for negative values',
+    'isqrt() argument must be nonnegative',
+    'n must be a non-negative integer',
+    'k must be a non-negative integer',
+    'tolerances must be non-negative',
+    'both points must have the same number of dimensions',
+    'Inputs are not the same length',
+    'steps must be a non-negative integer',
+    'invalid operation in fma',
+    '-inf + inf in fsum',
 ]
 OVERFLOW_ERROR_MESSAGES = [
     'cannot convert float infinity to integer',
     'math range error',
+    'overflow in fma',
+    'intermediate overflow in fsum',
 ]
 
 # Math functions CPython takes from the platform's C library. Compiled code calls the same
@@ -37,7 +49,7 @@ OVERFLOW_ERROR_MESSAGES = [
 # wrapped in CPython's own handling of special values and errors (mathmodule.c).
 LIBM = ['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'asinh', 'acosh', 'atanh', 'sinh', 'cosh',
         'tanh', 'exp', 'exp2', 'expm1', 'log', 'log2', 'log10', 'log1p', 'cbrt', 'erf', 'erfc',
-        'atan2', 'pow']
+        'atan2', 'pow', 'ldexp', 'nextafter']
 
 
 def exception(status, io):

@@ -101,7 +101,7 @@ plain loops. Later calls with the same types go straight to the compiled code.
 | `range`, `enumerate`, `zip`, list comprehensions | numpy array expressions: `a * 2`, `a.sum()` |
 | `sum(gen, 0.0)`, `min`, `max`, `abs`, tuple unpacking | Calls to other Python functions |
 | Numbers and n-D numpy arrays, including dtypes like `uint8` | Dicts, strings, objects, `**`, `map`, `filter` |
-| `math`, natively and in Pyodide | Lists that grow with `append` |
+| All of `math`, natively and in Pyodide (float `sumprod` excepted) | Lists that grow with `append` |
 
 A function that can't be compiled runs as Python, with a `FallbackWarning` giving the reason:
 

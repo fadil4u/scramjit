@@ -13,7 +13,7 @@
   const RM = matchMedia('(prefers-reduced-motion:reduce)').matches;
 
   let py = null, lab = null, editor = null, preset = 'erosion', compiled = false, running = false;
-  let sources = {}, info = {}, stage = 'python', pyRate = {}, rate = 0, editTimer = null;
+  let sources = {}, info = {}, stage = 'python', pyRate = {}, rate = 0, editTimer = null, presetsLoaded = null;
 
   // ---- loading
   function script(src) {
@@ -41,13 +41,12 @@
     py.FS.writeFile('/home/pyodide/cimo.py', await text('py/cimo.py'));
     for (const f of SJ_FILES) py.FS.writeFile('/home/pyodide/scramjit/' + f, await text('py/scramjit/' + f));
     py.FS.writeFile('/home/pyodide/lab.py', await text('lab/lab.py'));
-    for (const p of Object.keys(PRESETS)) sources[p] = await text('lab/' + p + '.py');
+    await presetsLoaded;
     py.runPython("import sys; sys.path.insert(0, '/home/pyodide')");
     status('Importing…');
     await py.runPythonAsync('import lab');
     lab = py.pyimport('lab');
-    editor.setValue(sources[preset]);
-    setCode();
+    setCode();                            // what's in the editor, edits made before loading included
     root.classList.remove('loading');
     root.classList.add('running');
     running = true;
@@ -203,13 +202,17 @@
   function setup() {
     const ta = $('textarea');
     editor = CodeMirror.fromTextArea(ta, { mode: 'python', theme: 'sj', lineNumbers: true, indentUnit: 4, viewportMargin: Infinity });
-    editor.setValue('# press "Run it live" to load Python in this page');
+    editor.setValue('# loading the code…');
+    presetsLoaded = Promise.all(Object.keys(PRESETS).map(async p => { sources[p] = await text('lab/' + p + '.py'); }))
+      .then(() => { if (!running) editor.setValue(sources[preset]); })
+      .catch(e => editor.setValue('# could not load the presets: ' + e.message));
     editor.on('change', () => { clearTimeout(editTimer); if (running) editTimer = setTimeout(setCode, 700); });
     const sel = $('.lab-preset');
     for (const [k, v] of Object.entries(PRESETS)) sel.add(new Option(v, k));
     sel.addEventListener('change', () => {
       preset = sel.value; rate = 0;
-      if (running) { lab.reset(); editor.setValue(sources[preset]); clearTimeout(editTimer); setCode(); }
+      if (sources[preset]) editor.setValue(sources[preset]);
+      if (running) { lab.reset(); clearTimeout(editTimer); setCode(); }
     });
     $('.lab-switch').addEventListener('click', () => {
       compiled = !compiled; rate = 0;

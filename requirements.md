@@ -78,7 +78,8 @@ The decorator is the whole user-facing API. Options (`boundscheck`, `cache`, `fa
 keyword arguments to it. It is named `scram` (to scram: to go, fast) and imported as
 `from scramjit import scram`; a callable module (`@scramjit`) was rejected because mypy and Pyright
 report "module not callable" for every variant of the trick. The undecorated
-function stays reachable for debugging.
+function stays reachable as `f.__wrapped__` (the `functools` convention), for debugging and
+comparing results.
 
 ## Compilation model: unboxed
 
@@ -154,12 +155,13 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
 
 Each decision is explicit and tested against CPython:
 
-- `int` is int64 unless narrowed; overflow wraps. Open: a checked mode.
+- `int` is int64 unless narrowed; overflow wraps. No checked mode: numeric code rarely nears
+  `2**63`, and checking every operation would cost every loop.
 - `//` and `%` round toward negative infinity, as in Python, not truncate as in C.
 - Negative indices count from the end, as in Python.
 - Bounds checks are on by default and raise `IndexError` as Python does; opt out per function with
   `@scram(boundscheck=False)`.
-- Float division by zero: open (raise as Python does, or return inf as C does).
+- Division by zero, integer or float, raises `ZeroDivisionError` as Python does.
 - Float evaluation order follows Python; no reassociation, no FMA contraction unless opted in.
 
 ## Execution model

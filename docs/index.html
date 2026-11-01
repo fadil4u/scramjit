@@ -213,14 +213,13 @@ h3.where{margin-top:44px;font-size:20px}
 #visibility .note{margin-top:34px}
 @media(max-width:960px){.wf,.wf.flip{grid-template-columns:minmax(0,1fr);gap:18px;margin-top:36px}.wf.flip .wf-cap{order:0}}
 .term pre,.xp{font-size:12.5px;line-height:1.65;white-space:pre}
-.prof{min-height:330px}
-.prof .pl{display:block;opacity:0;transform:translateY(3px);transition:opacity .25s,transform .25s}
-.prof .pl.on,.prof.shown .pl{opacity:1;transform:none}
-.prof .caret{display:inline-block;width:7px;height:1.1em;vertical-align:-2px;background:#ffb072;animation:caret 1s steps(2) infinite}
+.anim .pl{display:block;opacity:0;transform:translateY(3px);transition:opacity .22s,transform .22s}
+.anim .pl.on,.anim.shown .pl{opacity:1;transform:none}
+.anim .caret{display:inline-block;width:7px;height:1.1em;vertical-align:-2px;background:#ffb072;animation:caret 1s steps(2) infinite}
 @keyframes caret{to{visibility:hidden}}
 .t-pr,.t-dim{color:#6e7681}.t-ok{color:#4ade80}.t-hd{color:#fff;font-weight:600}.t-hint{color:#ffb072;font-weight:600}.t-an{color:#93b4ff}
 @media(max-width:600px){.code pre.prof,.code pre.xp{font-size:10.5px;white-space:pre;overflow-wrap:normal;overflow-x:auto}.prof{min-height:0}}
-@media (prefers-reduced-motion:reduce){.prof .pl{transition:none}.prof .caret{animation:none}}
+@media (prefers-reduced-motion:reduce){.anim .pl{transition:none}.anim .caret{animation:none}}
 .st{display:inline-block;width:.62em;height:.62em;border-radius:50%;margin-right:.55em;vertical-align:.04em}
 .st.g{background:#22c55e;box-shadow:0 0 6px rgba(34,197,94,.55)}.st.a{background:#f59e0b;box-shadow:0 0 6px rgba(245,158,11,.55)}.st.r{background:#ef4444;box-shadow:0 0 6px rgba(239,68,68,.55)}
 .legend{display:flex;flex-wrap:wrap;gap:10px 26px;margin-top:20px;font-size:14px;color:var(--ink3)}
@@ -491,42 +490,19 @@ for (int64_t i = 0; i &lt; a_len; i++)
   <div class="wf">
     <div class="wf-cap"><span class="wf-n" style="background:#2563eb">1</span><span class="wf-when">Before you run</span><h3><code>scramjit preflight src/</code></h3><p>Reads every <code>@scram</code> function without running anything, and shows its state and which lines stay in Python, and why.</p></div>
     <div class="code"><div class="bar"><span class="dots"><i></i><i></i><i></i></span>terminal</div>
-<pre class="xp"><span class="t-pr">$</span> scramjit preflight src/
-<span class="t-dim">src/sim.py</span>
-  <i class="st g"></i>flood        compiled
-  <i class="st g"></i>ema          compiled
-  <i class="st a"></i>step         partly compiled
-      <span class="t-dim"> 8</span>  loop stays in Python:
-          line 11 grows a list
-<span class="t-dim">src/report.py</span>
-  <i class="st r"></i>summarize    Python
-      <span class="t-dim">18</span>  iterates a dict
-
-2 compiled · 1 partly · 1 Python</pre></div>
+<pre class="xp anim"><span class="t-pr">$</span> <span class="cmd">scramjit preflight src/</span><span class="pl" data-wait="500"><span class="t-dim">src/sim.py</span></span><span class="pl">  <i class="st g"></i>flood        compiled</span><span class="pl">  <i class="st g"></i>ema          compiled</span><span class="pl">  <i class="st a"></i>step         partly compiled</span><span class="pl">      <span class="t-dim"> 8</span>  loop stays in Python:</span><span class="pl">          line 11 grows a list</span><span class="pl"><span class="t-dim">src/report.py</span></span><span class="pl">  <i class="st r"></i>summarize    Python</span><span class="pl">      <span class="t-dim">18</span>  iterates a dict</span><span class="pl"> </span><span class="pl">2 compiled · 1 partly · 1 Python</span></pre></div>
   </div>
 
   <div class="wf flip">
     <div class="wf-cap"><span class="wf-n" style="background:#e8702a">2</span><span class="wf-when">While it runs</span><h3><code>scramjit preflight --run app.py</code></h3><p>Runs your program, or your tests with <code>--run -m pytest</code>, and reports what happened with the real argument types: state, compile time, time in native code and in Python, and how much of the run was native. It fails CI if anything fell back.</p></div>
     <div class="code term"><div class="bar"><span class="dots"><i></i><i></i><i></i></span>terminal</div>
-<pre class="prof"><span class="t-pr">$</span> <span class="prof-cmd">scramjit preflight --run simulate.py</span><span class="pl"><span class="t-dim">… simulate.py output …</span></span><span class="pl"> </span><span class="pl"><b class="t-hd">scramjit</b> · 4.21 s run · <span class="t-amb">61% native</span></span><span class="pl t-dim">   function   calls  compile  native  python</span><span class="pl"><i class="st g"></i>flood        120  0.14 s   0.22 s       –</span><span class="pl"><i class="st g"></i>ema ×2         2  0.07 s   0.02 s       –</span><span class="pl"><i class="st a"></i>step       2,000  <span class="t-dim">disk</span>     2.35 s  <span class="t-py">1.52 s</span></span><span class="pl"> </span><span class="pl"><b class="t-hint">hints</b></span><span class="pl">  step, line 11: events.append keeps the loop</span><span class="pl">    on line 8 in Python; collect the events after</span><span class="pl">    it with np.flatnonzero(y &gt; 1.0)</span><span class="pl">  ema: a arrives as int and float; annotate a: float</span><span class="pl"> </span><span class="pl"><span class="t-err">failed:</span> step is partly compiled</span></pre></div>
+<pre class="prof anim"><span class="t-pr">$</span> <span class="cmd">scramjit preflight --run simulate.py</span><span class="pl" data-wait="500"><span class="t-dim">… simulate.py output …</span></span><span class="pl"> </span><span class="pl" data-wait="900"><b class="t-hd">scramjit</b> · 4.21 s run · <span class="t-amb">61% native</span></span><span class="pl t-dim">   function   calls  compile  native  python</span><span class="pl"><i class="st g"></i>flood        120  0.14 s   0.22 s       –</span><span class="pl"><i class="st g"></i>ema ×2         2  0.07 s   0.02 s       –</span><span class="pl"><i class="st a"></i>step       2,000  <span class="t-dim">disk</span>     2.35 s  <span class="t-py">1.52 s</span></span><span class="pl"> </span><span class="pl"><b class="t-hint">hints</b></span><span class="pl">  step, line 11: events.append keeps the loop</span><span class="pl">    on line 8 in Python; collect the events after</span><span class="pl">    it with np.flatnonzero(y &gt; 1.0)</span><span class="pl">  ema: a arrives as int and float; annotate a: float</span><span class="pl"> </span><span class="pl"><span class="t-err">failed:</span> step is partly compiled</span></pre></div>
   </div>
 
   <div class="wf">
     <div class="wf-cap"><span class="wf-n" style="background:#dc2626">3</span><span class="wf-when">One function</span><h3><code>f.preflight()</code></h3><p>Prints the function with each line marked native or Python and what the compiler decided: types, bounds checks, which loops were optimized. In a REPL or notebook, or from the command line with <code>scramjit preflight sim.py:step</code>.</p></div>
     <div class="code"><div class="bar"><span class="dots"><i></i><i></i><i></i></span>terminal · python</div>
-<pre class="xp"><span class="t-pr">&gt;&gt;&gt;</span> step.preflight()
-<b class="t-hd">step</b>(float64[:], float64[:], list)
-<span class="t-amb">partly compiled</span> <span class="t-dim">· sim.py · compiled in 38 ms</span>
-<span class="t-dim">─────────────────────────────────────────────</span>
-<span class="t-dim"> 6</span> <i class="st g"></i>for i in range(len(x)):      <span class="t-an">native, lifted</span>
-<span class="t-dim"> 7</span> <i class="st g"></i>  x[i] = x[i] * 0.99 + 0.01  <span class="t-an">bounds proven</span>
-<span class="t-dim"> 8</span> <i class="st r"></i>for i in range(1, len(x)):   <span class="t-py">Python: line 11</span>
-<span class="t-dim"> 9</span> <i class="st r"></i>  y[i] = 0.9 * y[i - 1] + …
-<span class="t-dim">10</span> <i class="st r"></i>  if y[i] &gt; 1.0:
-<span class="t-dim">11</span> <i class="st r"></i>    events.append(i)         <span class="t-py">grows a list</span>
-<span class="t-dim">─────────────────────────────────────────────</span>
-<b class="t-hint">hint</b>  collect the events after the loop with
-      np.flatnonzero(y &gt; 1.0)</pre></div>
+<pre class="xp anim"><span class="t-pr">&gt;&gt;&gt;</span> <span class="cmd">step.preflight()</span><span class="pl" data-wait="500"><b class="t-hd">step</b>(float64[:], float64[:], list)</span><span class="pl"><span class="t-amb">partly compiled</span> <span class="t-dim">· sim.py · compiled in 38 ms</span></span><span class="pl"><span class="t-dim">─────────────────────────────────────────────</span></span><span class="pl"><span class="t-dim"> 6</span> <i class="st g"></i>for i in range(len(x)):      <span class="t-an">native, lifted</span></span><span class="pl"><span class="t-dim"> 7</span> <i class="st g"></i>  x[i] = x[i] * 0.99 + 0.01  <span class="t-an">bounds proven</span></span><span class="pl"><span class="t-dim"> 8</span> <i class="st r"></i>for i in range(1, len(x)):   <span class="t-py">Python: line 11</span></span><span class="pl"><span class="t-dim"> 9</span> <i class="st r"></i>  y[i] = 0.9 * y[i - 1] + …</span><span class="pl"><span class="t-dim">10</span> <i class="st r"></i>  if y[i] &gt; 1.0:</span><span class="pl"><span class="t-dim">11</span> <i class="st r"></i>    events.append(i)         <span class="t-py">grows a list</span></span><span class="pl"><span class="t-dim">─────────────────────────────────────────────</span></span><span class="pl"><b class="t-hint">hint</b>  collect the events after the loop with</span><span class="pl">      np.flatnonzero(y &gt; 1.0)</span></pre></div>
   </div>
 
   <p class="note">Each fallback also raises a <code>FallbackWarning</code> once, naming the line. <code>@scram(fallback=False)</code> makes it an error for code that must be native.</p>
@@ -708,26 +684,35 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
   }, { threshold: 0.4 }).observe(wrap);
   else { play(frames[i], 1600); arm(); }
 })();
-// Profiling terminal: type the command, then the report appears line by line (once, when in view)
+// Preflight screens: when each comes into view, the command is typed in, then the output appears
+// line by line. A line's data-wait adds a pause before it (the program running, the report building).
 (function () {
-  var pre = document.querySelector('pre.prof'); if (!pre) return;
-  var cmd = pre.querySelector('.prof-cmd'), lines = pre.querySelectorAll('.pl'), text = cmd.textContent;
-  var caret = document.createElement('span'); caret.className = 'caret';
-  if (matchMedia('(prefers-reduced-motion:reduce)').matches || !('IntersectionObserver' in window)) { pre.classList.add('shown'); return; }
-  cmd.textContent = ''; cmd.after(caret);
-  new IntersectionObserver(function (es, ob) {
-    if (!es[0].isIntersecting) return;
-    ob.disconnect();
-    var i = 0;
-    (function type() {
-      cmd.textContent = text.slice(0, ++i);
-      if (i < text.length) return setTimeout(type, 40 + Math.random() * 40);
-      setTimeout(function () {
-        caret.remove();
-        lines.forEach(function (el, k) { setTimeout(function () { el.classList.add('on'); }, (k < 2 ? 300 : 1100) + k * 110); });
-      }, 250);
-    })();
-  }, { threshold: 0.5 }).observe(pre);
+  var pres = document.querySelectorAll('pre.anim'); if (!pres.length) return;
+  var RM = matchMedia('(prefers-reduced-motion:reduce)').matches || !('IntersectionObserver' in window);
+  pres.forEach(function (pre) {
+    var cmd = pre.querySelector('.cmd'), lines = [].slice.call(pre.querySelectorAll('.pl')), text = cmd.textContent;
+    if (RM) { pre.classList.add('shown'); return; }
+    var caret = document.createElement('span'); caret.className = 'caret';
+    cmd.textContent = ''; cmd.after(caret);
+    new IntersectionObserver(function (es, ob) {
+      if (!es[0].isIntersecting) return;
+      ob.disconnect();
+      var i = 0;
+      (function type() {
+        cmd.textContent = text.slice(0, ++i);
+        if (i < text.length) return setTimeout(type, 38 + Math.random() * 42);
+        setTimeout(function () {
+          caret.remove();
+          var t = 0;
+          lines.forEach(function (el) {
+            t += 75 + (+el.dataset.wait || 0);
+            setTimeout(function () { el.classList.add('on'); }, t);
+          });
+          setTimeout(function () { var last = lines[lines.length - 1]; if (last) last.appendChild(caret); }, t + 150);
+        }, 220);
+      })();
+    }, { threshold: 0.5 }).observe(pre);
+  });
 })();
 // The heat line under the top bar fills as you scroll down the page.
 (function () {

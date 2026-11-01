@@ -14,6 +14,7 @@
 
   let py = null, lab = null, editor = null, preset = 'erosion', compiled = false, running = false;
   let sources = {}, info = {}, stage = 'python', pyRate = {}, rate = 0, editTimer = null, presetsLoaded = null;
+  let nudged = false, startedAt = 0;
 
   // ---- loading
   function script(src) {
@@ -51,6 +52,7 @@
     root.classList.remove('loading');
     root.classList.add('running');
     running = true;
+    startedAt = performance.now();
   }
 
   // ---- code and the pipeline
@@ -143,6 +145,11 @@
     camera.updateProjectionMatrix();
   }
   function buildMesh(n) {
+    if (mesh) {                           // replace the old mesh (the placeholder before Python loads)
+      scene.remove(mesh);
+      geom.dispose();
+      mesh.material.dispose();
+    }
     N = n;
     geom = new THREE.PlaneGeometry(2, 2, n - 1, n - 1);
     colors = new Float32Array(n * n * 3);
@@ -199,9 +206,12 @@
       updateMesh(hb.data, vb ? vb.data : null);
       hb.release(); hp.destroy();
       if (vo) { vb.release(); vo.destroy(); }
-      const sp = compiled && pyRate[preset] ? `  ·  ${Math.round(rate / pyRate[preset])}× Python` : '';
-      const where = info.state === 'compiled' ? ' <small>· compiled in this page</small>' : '';
-      $('.lab-rate').innerHTML = `${Math.round(rate).toLocaleString()} ${UNITS[preset]}${sp}${where}`;
+      const n = `${Math.round(rate).toLocaleString()} ${UNITS[preset]}`;
+      const x = pyRate[preset] ? ` · ${Math.round(rate / pyRate[preset])}× Python` : '';
+      $('.lab-rate').innerHTML = info.state === 'compiled' ? `Compiled by scramjit · ${n}${x}`
+        : info.state === 'fallback' ? `scramjit fell back to Python (see the C stage) · ${n}`
+        : `Plain Python · ${n}`;
+      if (!compiled && !nudged && performance.now() - startedAt > 4000) { root.classList.add('nudge'); nudged = true; }
     }
     if (renderer) draw();
     requestAnimationFrame(frame);
@@ -225,11 +235,16 @@
       if (sources[preset]) editor.setValue(sources[preset]);
       if (running) { lab.reset(); clearTimeout(editTimer); setCode(); }
     });
-    $('.lab-switch').addEventListener('click', () => {
-      compiled = !compiled; rate = 0;
-      $('.lab-switch').setAttribute('aria-pressed', compiled);
+    const setMode = on => {
+      if (on === compiled) return;
+      compiled = on; rate = 0;
+      $('.lab-py').setAttribute('aria-pressed', !on);
+      $('.lab-sj').setAttribute('aria-pressed', on);
+      root.classList.remove('nudge'); nudged = true;
       if (running) setCode();
-    });
+    };
+    $('.lab-py').addEventListener('click', () => setMode(false));
+    $('.lab-sj').addEventListener('click', () => setMode(true));
     $('.lab-reset').addEventListener('click', () => { if (running) { lab.reset(); rate = 0; } });
     root.querySelectorAll('.lab-chip').forEach(c => c.addEventListener('click', () => showStage(c.dataset.s)));
     // full screen: the Fullscreen API where it works on elements, a fixed full-window layout elsewhere

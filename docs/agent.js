@@ -154,27 +154,36 @@
     move(REST, 550, function () { peel.focus({ preventScroll: true }); });
   }
 
-  // Opens on a click, or when pulled far enough; a short pull falls back.
+  // Opens on a click, or when let go past about a third of the way. Letting go any sooner, dragging
+  // back, or Esc cancels: the corner falls back.
   peel.addEventListener('pointerdown', function (e) {
     if (e.button || isOpen) return;
     cancelAnimationFrame(raf);
-    drag = { x: e.clientX, y: e.clientY, q: q, moved: 0 };
+    drag = { x: e.clientX, y: e.clientY, q: q, moved: 0, most: 0, id: e.pointerId };
     peel.setPointerCapture(e.pointerId);
     peel.classList.add('pulling');
   });
   peel.addEventListener('pointermove', function (e) {
     if (!drag) return;
     drag.moved = Math.max(0, (drag.x - e.clientX + e.clientY - drag.y) / 2);
+    drag.most = Math.max(drag.most, Math.abs(drag.x - e.clientX) + Math.abs(e.clientY - drag.y));
     draw(Math.min(drag.q + drag.moved, full()));
   });
   peel.addEventListener('pointerup', function () {
     if (!drag) return;
-    var moved = drag.moved;
+    var clicked = drag.most < 6, far = q >= full() / 3;
     drag = null;
     peel.classList.remove('pulling');
-    if (moved < 4 || moved >= 40) open(); else move(REST, 300);
+    if (clicked || far) open(); else move(REST, 300);
   });
-  peel.addEventListener('pointercancel', function () { drag = null; peel.classList.remove('pulling'); move(REST, 300); });
+  function cancel() {
+    if (!drag) return;
+    if (peel.hasPointerCapture(drag.id)) peel.releasePointerCapture(drag.id);
+    drag = null;
+    peel.classList.remove('pulling');
+    move(REST, 300);
+  }
+  peel.addEventListener('pointercancel', cancel);
   peel.addEventListener('click', function (e) { if (e.detail === 0 && !isOpen) open(); });  // keyboard
   peel.addEventListener('pointerenter', function (e) { if (e.pointerType === 'mouse' && !drag && !isOpen) move(HOVER, 150); });
   peel.addEventListener('pointerleave', function (e) { if (e.pointerType === 'mouse' && !drag && !isOpen) move(REST, 150); });
@@ -186,7 +195,10 @@
   front.addEventListener('click', function (e) {
     if (isOpen && !e.target.closest('a, button') && !String(getSelection())) close();
   });
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && isOpen) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    if (drag) cancel(); else if (isOpen) close();
+  });
   copy.addEventListener('click', function () {
     if (!navigator.clipboard) return;
     navigator.clipboard.writeText(text.textContent).then(function () {

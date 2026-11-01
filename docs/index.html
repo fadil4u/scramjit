@@ -176,6 +176,13 @@ section.s{padding:76px 0 8px}
 .cm-s-sj .CodeMirror-selected,.cm-s-sj.CodeMirror-focused .CodeMirror-selected{background:#2a2f45}
 .cm-s-sj .cm-keyword{color:#ff7b72}.cm-s-sj .cm-builtin{color:#ffa657}.cm-s-sj .cm-number{color:#79c0ff}.cm-s-sj .cm-string{color:#a5d6ff}
 .cm-s-sj .cm-comment{color:#6e7681}.cm-s-sj .cm-def{color:#d2a8ff}.cm-s-sj .cm-variable-2{color:#c9d1d9}.cm-s-sj .cm-operator{color:#c9d1d9}
+/* thin dark scrollbars in the editor and the stage panel (CodeMirror draws its own bars) */
+.lab .CodeMirror-vscrollbar,.lab .CodeMirror-hscrollbar,.lab-panel pre{scrollbar-width:thin;scrollbar-color:#2d3448 transparent}
+.lab .CodeMirror-vscrollbar::-webkit-scrollbar,.lab .CodeMirror-hscrollbar::-webkit-scrollbar,.lab-panel pre::-webkit-scrollbar{width:8px;height:8px}
+.lab .CodeMirror-vscrollbar::-webkit-scrollbar-track,.lab .CodeMirror-hscrollbar::-webkit-scrollbar-track,.lab-panel pre::-webkit-scrollbar-track{background:transparent}
+.lab .CodeMirror-vscrollbar::-webkit-scrollbar-thumb,.lab .CodeMirror-hscrollbar::-webkit-scrollbar-thumb,.lab-panel pre::-webkit-scrollbar-thumb{background:#2d3448;border-radius:4px;border:2px solid var(--code)}
+.lab .CodeMirror-vscrollbar::-webkit-scrollbar-thumb:hover,.lab .CodeMirror-hscrollbar::-webkit-scrollbar-thumb:hover,.lab-panel pre::-webkit-scrollbar-thumb:hover{background:#465070}
+.lab .CodeMirror-scrollbar-filler,.lab .CodeMirror-gutter-filler{background:transparent}
 .lab-err{margin:0 12px 8px;padding:7px 10px;border-radius:6px;font:12px var(--mono);color:#fecdd3;background:rgba(190,18,60,.2);white-space:pre-wrap}
 .lab-pipe{display:flex;align-items:center;gap:4px;padding:10px 12px;border-top:1px solid #232838;overflow-x:auto;scrollbar-width:none}
 .lab-pipe::-webkit-scrollbar{display:none}
@@ -186,7 +193,7 @@ section.s{padding:76px 0 8px}
 .fast .lab-chip.lit:nth-of-type(n+3){border-color:#c2410c;background:#2a1712}.fast .lab-chip.lit:nth-of-type(n+3) b{color:#ffd2ad}
 .lab-chip.open{box-shadow:0 0 0 2px rgba(249,115,22,.55)}
 .lab-panel{border-top:1px solid #232838}
-.lab-panel pre{margin:0;height:170px;overflow:auto;padding:10px 14px;font:11.5px/1.55 var(--mono);color:#b9c2d6;white-space:pre;scrollbar-width:thin}
+.lab-panel pre{margin:0;height:170px;overflow:auto;padding:10px 14px;font:11.5px/1.55 var(--mono);color:#b9c2d6;white-space:pre}
 .lab-right{position:relative;min-height:520px;background:radial-gradient(ellipse at 50% 30%,#141a2c,#080a12 70%)}
 .lab-right canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:grab}
 .lab-cover{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;background:rgba(8,10,18,.55)}

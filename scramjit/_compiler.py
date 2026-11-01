@@ -131,9 +131,9 @@ class Compiler:
 
     def infer_stmt(self, s, docstring_ok=False):
         if isinstance(s, ast.Assign):
-            if len(s.targets) != 1:
-                self.fail(s, 'chained assignment')
-            self.infer_target(s.targets[0], self.typeof(s.value), s)
+            vt = self.typeof(s.value)
+            for target in s.targets:          # a = b = value: value once, targets left to right
+                self.infer_target(target, vt, s)
         elif isinstance(s, ast.AnnAssign):
             if s.value is None:
                 self.fail(s, 'annotation without a value')
@@ -177,6 +177,11 @@ class Compiler:
             self.index_type(target)
             if not t.is_number or (at.elem.kind == 'int' and t.kind == 'float'):
                 self.fail(s, f'stores {t.name} into a {at.name} array')
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            if t.kind != 'tuple' or len(t.elem) != len(target.elts):
+                self.fail(s, f'unpacks {t.name} into {len(target.elts)} targets')
+            for x, et in zip(target.elts, t.elem):
+                self.infer_target(x, et, s)
         else:
             self.fail(s, 'assignment to something other than a name or an array element')
 
@@ -258,6 +263,19 @@ class Compiler:
                 or self.env[sub.value.id].kind != 'array':
             self.fail(sub, 'indexing something other than an array parameter')
         return self.env[sub.value.id]
+
+    def tuple_index(self, sub):
+        t = self.env[sub.value.id]
+        k = sub.slice
+        neg = isinstance(k, ast.UnaryOp) and isinstance(k.op, ast.USub)
+        if neg:
+            k = k.operand
+        if not (isinstance(k, ast.Constant) and type(k.value) is int):
+            self.fail(sub, 'a tuple indexed with something other than a constant')
+        i = -k.value if neg else k.value
+        if not -len(t.elem) <= i < len(t.elem):
+            self.fail(sub, 'a tuple index out of range')
+        return i % len(t.elem)
 
     def index_type(self, sub):
         if isinstance(sub.slice, (ast.Slice, ast.Tuple)):
@@ -341,11 +359,21 @@ class Compiler:
             return t
         if isinstance(e, ast.IfExp):
             self.check_test(e.test)
-            return self.join_all(e, [self.typeof(e.body), self.typeof(e.orelse)], 'a conditional expression')
+            t = self.join_all(e, [self.typeof(e.body), self.typeof(e.orelse)], 'a conditional expression')
+            if not t.is_number:
+                self.fail(e, f'a conditional expression of type {t.name}')
+            return t
         if isinstance(e, ast.Subscript):
+            if isinstance(e.value, ast.Name) and e.value.id in self.env and self.env[e.value.id].kind == 'tuple':
+                return self.env[e.value.id].elem[self.tuple_index(e)]
             at = self.array_of(e)
             self.index_type(e)
             return at.elem
+        if isinstance(e, ast.Tuple):
+            ts = [self.typeof(x) for x in e.elts]
+            if not all(t.is_number for t in ts):
+                self.fail(e, 'tuples of non-numbers (nested tuples, arrays)')
+            return T.tuple_of(ts)
         if isinstance(e, ast.Call):
             return self.call_type(e)
         if isinstance(e, (ast.GeneratorExp, ast.ListComp)):
@@ -368,8 +396,8 @@ class Compiler:
             self.fail(e, f'{name}() with keyword arguments')
         args = [self.typeof(a) for a in e.args]
         if name == 'len':
-            if len(args) != 1 or args[0].kind != 'array' or not isinstance(e.args[0], ast.Name):
-                self.fail(e, 'len() of a non-array')
+            if len(args) != 1 or args[0].kind not in ('array', 'tuple') or not isinstance(e.args[0], ast.Name):
+                self.fail(e, 'len() of something other than an array or a tuple')
             return T.INT
         if not args or not all(t.is_number for t in args):
             self.fail(e, f'{name}() of a non-number')
@@ -485,12 +513,21 @@ class Compiler:
             t = self.env[p]
             if t.kind == 'array':
                 params += [f'{t.ctype}v_{p}', f'int64_t v_{p}__n']
+            elif t.kind == 'tuple':
+                params += [f'{et.ctype} v_{p}__{i}' for i, et in enumerate(t.elem)]
             else:
                 params.append(f'{t.ctype} v_{p}')
         params.append('int64_t *sj_io')
         self.mark(self.f)
         head = len(self.lines)
         for name, t in self.env.items():
+            if t.kind == 'tuple':
+                for i, et in enumerate(t.elem):
+                    if name not in self.params:
+                        self.emit(f'{et.ctype} v_{name}__{i} = 0;')
+                    if et.np == 'dyn':
+                        self.emit(f'int v_{name}__{i}__np = 0;')
+                continue
             if name not in self.params:
                 self.emit(f'{t.ctype} v_{name} = 0;')
             if t.np == 'dyn':
@@ -530,15 +567,23 @@ class Compiler:
             return
         self.mark(s)
         if isinstance(s, (ast.Assign, ast.AnnAssign)):
-            target = s.targets[0] if isinstance(s, ast.Assign) else s.target
-            v, vt = self.expr(s.value), self.typeof(s.value)
-            if isinstance(target, ast.Name):
-                self.assign(target.id, v, vt)
-            else:
-                at = self.env[target.value.id]
-                val = self.hold(self.coerce(v[0], vt, at.elem), at.elem)
-                arr, idx = self.element(target)
-                self.emit(f'{arr}[{idx}] = {val};')
+            targets = s.targets if isinstance(s, ast.Assign) else [s.target]
+            vt = self.typeof(s.value)
+            if vt.kind == 'tuple':
+                vals = self.texpr(s.value)
+                for target in targets:
+                    self.assign_tuple(target, vals, vt)
+                return
+            c, f = self.expr(s.value)
+            v = (self.hold(c, vt), self.hold_flag(f)) if len(targets) > 1 else (c, f)
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    self.assign(target.id, v, vt)
+                elif isinstance(target, ast.Subscript):
+                    at = self.env[target.value.id]
+                    val = self.hold(self.coerce(v[0], vt, at.elem), at.elem)
+                    arr, idx = self.element(target)
+                    self.emit(f'{arr}[{idx}] = {val};')
         elif isinstance(s, ast.AugAssign):
             op = ARITH[type(s.op)]
             if isinstance(s.target, ast.Name):
@@ -576,7 +621,18 @@ class Compiler:
             else:
                 self.for_iter(s, d)
         elif isinstance(s, ast.Return):
-            if s.value is not None:
+            if s.value is not None and self.ret.kind == 'tuple':
+                vals = self.texpr(s.value)
+                for i, ((c, f), et, rt) in enumerate(zip(vals, self.typeof(s.value).elem, self.ret.elem)):
+                    val = self.coerce(c, et, rt)
+                    if rt.kind == 'float':
+                        t = self.temp()
+                        self.emit(f'{{ double {t} = {val}; memcpy(&sj_io[{4 + 2 * i}], &{t}, 8); }}')
+                    else:
+                        self.emit(f'sj_io[{4 + 2 * i}] = (int64_t)({val});')
+                    self.emit(f'sj_io[{5 + 2 * i}] = {f};')
+                self.emit('return 0;')
+            elif s.value is not None:
                 v = self.expr(s.value)
                 val = self.coerce(v[0], self.typeof(s.value), self.ret)
                 if self.ret.kind == 'float':
@@ -809,6 +865,44 @@ class Compiler:
             self.emit(f'if ((uint64_t){t1} >= (uint64_t){n}) SJ_FAIL({INDEX_ERROR}, {self.line(sub)}, {t0}, {n});')
         return f'v_{name}', t1
 
+    def tuple_var(self, name):
+        t = self.env[name]
+        return [(f'v_{name}__{i}', f'v_{name}__{i}__np' if et.np == 'dyn' else flag_of(et))
+                for i, et in enumerate(t.elem)]
+
+    def texpr(self, e):
+        """Emit a tuple-valued expression: a list of (value, flag), each computed now."""
+        t = self.typeof(e)
+        if isinstance(e, ast.Tuple):
+            out = []
+            for x, et in zip(e.elts, t.elem):
+                c, f = self.expr(x)
+                out.append((self.hold(c, et), self.hold_flag(f)))
+            return out
+        if isinstance(e, ast.Name):
+            return [(self.hold(c, et), self.hold_flag(f)) for (c, f), et in zip(self.tuple_var(e.id), t.elem)]
+        raise AssertionError(e)
+
+    def assign_tuple(self, target, vals, vt):
+        """Assign a tuple (already computed in full, as Python does) to a name or to targets."""
+        if isinstance(target, ast.Name):
+            t = self.env[target.id]
+            for i, ((c, f), et, tt) in enumerate(zip(vals, vt.elem, t.elem)):
+                self.emit(f'v_{target.id}__{i} = {self.coerce(c, et, tt)};')
+                if tt.np == 'dyn':
+                    self.emit(f'v_{target.id}__{i}__np = {f};')
+            return
+        for x, v, et in zip(target.elts, vals, vt.elem):
+            if isinstance(x, ast.Name):
+                self.assign(x.id, v, et)
+            elif isinstance(x, ast.Subscript):
+                at = self.env[x.value.id]
+                val = self.hold(self.coerce(v[0], et, at.elem), at.elem)
+                arr, idx = self.element(x)
+                self.emit(f'{arr}[{idx}] = {val};')
+            else:
+                self.assign_tuple(x, v, et)
+
     def coerce(self, c, frm, to):
         if frm.ctype == to.ctype:
             return c
@@ -896,6 +990,9 @@ class Compiler:
             self.emit(f'{r} = {self.coerce(c, self.typeof(e.orelse), t)}; {rf} = {f};')
             self.close()
             return r, rf
+        if isinstance(e, ast.Subscript) and self.env.get(getattr(e.value, 'id', None)) is not None \
+                and self.env[e.value.id].kind == 'tuple':
+            return self.tuple_var(e.value.id)[self.tuple_index(e)]
         if isinstance(e, ast.Subscript):
             arr, idx = self.element(e)
             return self.hold(f'{arr}[{idx}]', self.env[e.value.id].elem), '1'
@@ -1000,6 +1097,9 @@ class Compiler:
         if self.is_reduction(e):
             return self.reduction(e)
         if name == 'len':
+            t = self.env[e.args[0].id]
+            if t.kind == 'tuple':
+                return f'{len(t.elem)}LL', '0'
             return f'v_{e.args[0].id}__n', '0'
         ts = [self.typeof(a) for a in e.args]
         if name == 'abs':
@@ -1196,6 +1296,11 @@ def da_block(c, stmts, assigned):
 
 
 def da_stmt(c, s, assigned):
+    if isinstance(s, ast.Assign) and len(s.targets) > 1:
+        da_reads(c, s.value, assigned)
+        for t in s.targets:
+            assigned = da_stmt(c, ast.Assign(targets=[t], value=ast.Constant(0)), assigned)
+        return assigned
     if isinstance(s, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
         da_reads(c, s.value, assigned)
         target = s.targets[0] if isinstance(s, ast.Assign) else s.target
@@ -1203,6 +1308,11 @@ def da_stmt(c, s, assigned):
             da_reads(c, target.slice, assigned)
         elif isinstance(s, ast.AugAssign):
             da_reads(c, target, assigned)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for x in ast.walk(target):
+                if isinstance(x, ast.Subscript):
+                    da_reads(c, x.slice, assigned)
+            return assigned | {x.id for x in ast.walk(target) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store)}
         return assigned | {target.id} if isinstance(target, ast.Name) else assigned
     if isinstance(s, ast.If):
         da_reads(c, s.test, assigned)

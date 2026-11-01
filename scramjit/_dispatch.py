@@ -47,6 +47,11 @@ def _arg_type(x):
         return T.FLOAT
     if t is bool:
         return T.BOOL
+    if t is tuple:
+        elems = [_arg_type(v) for v in x]
+        if not elems or any(e is None or not e.is_number for e in elems):
+            return None
+        return T.tuple_of(elems)
     np = sys.modules.get('numpy')
     if np is not None:
         if t is np.ndarray:
@@ -228,11 +233,13 @@ class Function:
             if t.kind == 'array':
                 cargs.append(x)
                 cargs.append(x.shape[0])
+            elif t.kind == 'tuple':
+                cargs.extend(v.item() if et.np else v for v, et in zip(x, t.elem))
             elif t.np:
                 cargs.append(x.item())
             else:
                 cargs.append(x)
-        io = bytearray(32)
+        io = bytearray(32 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0))
         status = entry.kernel(*cargs, io)
         if status:
             slots = [int.from_bytes(io[i:i + 8], 'little', signed=True) for i in range(0, 32, 8)]
@@ -240,11 +247,19 @@ class Function:
         r = entry.ret
         if r is T.NONE:
             return None
-        np = r.np if r.np != 'dyn' else io[16] != 0     # dynamic: the flag is in slot 2
+        if r.kind == 'tuple':
+            return tuple(self._box(io, 32 + 16 * i, 40 + 16 * i, et) for i, et in enumerate(r.elem))
+        return self._box(io, 0, 16, r)
+
+    def _box(self, io, at, flag_at, r):
+        np = r.np if r.np != 'dyn' else io[flag_at] != 0
+        if np and self._np is None:
+            import numpy
+            self._np = numpy
         if r.kind == 'float':
-            v = struct.unpack_from('<d', io)[0]
+            v = struct.unpack_from('<d', io, at)[0]
             return self._np.float64(v) if np else v
-        v = int.from_bytes(io[0:8], 'little', signed=True)
+        v = int.from_bytes(io[at:at + 8], 'little', signed=True)
         if r.kind == 'bool':
             return self._np.bool_(v) if np else bool(v)
         return self._np.int64(v) if np else v

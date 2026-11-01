@@ -199,3 +199,70 @@ def test_sum_of_floats_needs_a_float_start():
     from scramjit import CompileError
     with pytest.raises(CompileError, match=r'write sum\(\.\.\., 0\.0\)'):
         scram(sum_default_start, fallback=False)(np.ones(3))
+
+
+# ---- tuples
+
+@strict
+def fib(n):
+    a, b = 0, 1
+    for _ in range(n):
+        a, b = b, a + b
+    return a
+
+
+@strict
+def swap_elements(x, i, j):
+    x[i], x[j] = x[j], x[i]
+
+
+@strict
+def minmax(a):
+    lo = hi = 0.0
+    lo, hi = a[0], a[0]
+    for v in a:
+        lo, hi = min(lo, v), max(hi, v)
+    return lo, hi
+
+
+@strict
+def tuple_var(a, k):
+    p = (k, a[0] * 2.0)
+    q = p
+    return q[0] + q[-1] + len(p), p[1]
+
+
+@strict
+def shape_arg(shape, x):
+    h, w = shape
+    return h * w + x
+
+
+def test_tuples():
+    for n in range(0, 40):
+        same(fib, n)
+    x = np.arange(6.0)
+    for i, j in [(0, 5), (2, 2), (-1, 3), (6, 0), (1, -7)]:
+        same(swap_elements, x, i, j)
+    rng = np.random.default_rng(2)
+    for n in (1, 2, 9):
+        same(minmax, rng.random(n))
+        same(minmax, rng.integers(-5, 5, n).astype(np.float64))
+    same(tuple_var, np.array([1.5]), 3)
+    same(tuple_var, np.array([1.5]), np.int64(3))
+    same(shape_arg, (3, 4), 2)
+    same(shape_arg, (3, 4.5), 2)
+
+
+def unpack_wrong(n):
+    a, b, c = (n, n)
+    return a
+
+
+def test_tuple_unpacking_mismatch_falls_back():
+    import warnings
+    from scramjit import FallbackWarning
+    f = scram(unpack_wrong)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', FallbackWarning)
+        same(f, 3)

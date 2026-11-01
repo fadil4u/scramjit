@@ -62,7 +62,21 @@ def join(a, b):
         return a
     if a.is_number and b.is_number and a.kind == b.kind:
         return scalar(a.kind, 'dyn')
+    if a.kind == 'tuple' and b.kind == 'tuple' and len(a.elem) == len(b.elem):
+        elems = [join(x, y) for x, y in zip(a.elem, b.elem)]
+        return None if None in elems else tuple_of(elems)
     return None
+
+
+_TUPLES = {}
+
+
+def tuple_of(elems):
+    """A tuple of numbers: in C, one variable per element (a struct, in effect)."""
+    key = tuple(e.name for e in elems)
+    if key not in _TUPLES:
+        _TUPLES[key] = Type(f'tuple[{", ".join(key)}]', None, 'tuple', elem=list(elems))
+    return _TUPLES[key]
 
 
 _ARRAYS = {}

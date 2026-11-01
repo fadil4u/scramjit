@@ -17,6 +17,11 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
   `SJ_LIBM1` in the prelude), passed to each kernel that uses them, because cimo resolves `sin`
   etc. to its bundled libm. When cimo can link the host libm for math calls: call them directly.
 
+- **Code shaped around cimo's missing CSE:** wraparound indices hoisted to the top of the loop
+  body (`hoist_wraps`), `//` and `%` computed as one division and one remainder into
+  temporaries. Both help any compiler; revisit what else can go once cimo merges repeated
+  expressions (cimo `TODO.md`: "Slower than gcc -O3 on scramjit's kernels").
+
 ## Next
 
 0. **Math in Pyodide:** functions that involve no C library code (`sqrt`, `hypot`, `floor`,

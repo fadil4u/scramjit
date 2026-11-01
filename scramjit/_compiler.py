@@ -101,6 +101,7 @@ class Compiler:
         self.ntemp = 0
         self.uses_libm = False
         self.aliases = {}
+        self.hoisted = {}      # ast.dump of a wraparound index -> its temporary, per loop iteration
         self.owned = []        # temporaries holding a list being built (freed on every exit)
         self.cnames = {}       # comprehension variable -> (C name, flag), shadowing the function's
         self.facts = {}        # loop variable -> (lowest value, array whose len() bounds it, slack)
@@ -630,6 +631,7 @@ class Compiler:
         self.infer()
         da_block(self, self.f.body, set(self.params))
         self.find_aliases()
+        self.facts.update(self.mod_assigned())
         params = []
         for p in self.params:
             t = self.env[p]
@@ -742,8 +744,10 @@ class Compiler:
                     self.emit(f'v_{name}__np[{idx}] = {r[1]};')
         elif isinstance(s, ast.If):
             self.open(f'if ({self.truth(self.expr(s.test)[0], self.typeof(s.test))})')
+            saved = self.with_facts(self.guard_facts(s.test, s.body))
             for b in s.body:
                 self.stmt(b)
+            self.drop_facts(saved)
             if s.orelse:
                 self.close('} else {')
                 self.depth += 1
@@ -804,7 +808,9 @@ class Compiler:
             # copy without those checks; otherwise the checked copy raises where Python would
             extra = self.version_candidates(s, var, fact)
             if extra:
-                cond = ' && '.join(f'{te} <= {self.extent(arr, k)} - ({c})' for (arr, k), c in sorted(extra.items()))
+                cond = ' && '.join(
+                    f'{self.extent(*key[3])} <= {self.extent(key[0], key[1])}' if len(key) > 2 else
+                    f'{te} <= {self.extent(key[0], key[1])} - ({c})' for key, c in sorted(extra.items(), key=str))
                 self.open(f'if ({te} > {ts} && {cond})')
                 self.unit_loop(s, var, ts, te, fact + (extra,))
                 self.close('} else {')
@@ -919,8 +925,11 @@ class Compiler:
         saved = self.facts.get(var)
         if fact:
             self.facts[var] = fact
+        hoisted = self.hoist_wraps(s, var) if fact else []
         for b in s.body:
             self.stmt(b)
+        for key in hoisted:
+            self.hoisted.pop(key, None)
         self.facts.pop(var, None)
         if saved:
             self.facts[var] = saved
@@ -941,6 +950,11 @@ class Compiler:
                 if len(idxs) != self.env[name].ndim:
                     continue
                 for axis, idx in enumerate(idxs):
+                    if isinstance(idx, ast.BinOp) and isinstance(idx.op, ast.Mod):
+                        src = self.len_of(idx.right)          # x % n: in [0, n), n another extent
+                        if src and src != (name, axis) and self.uses_var(idx.left, var):
+                            extra[(name, axis, 'mod', src)] = 0
+                        continue
                     base, off = idx, 0
                     if isinstance(base, ast.BinOp) and isinstance(base.op, (ast.Add, ast.Sub)) \
                             and isinstance(base.right, ast.Constant) and type(base.right.value) is int:
@@ -1027,6 +1041,101 @@ class Compiler:
                     if isinstance(x, ast.Name) and stores.get(x.id) == 1 and k < self.env[v.value.id].ndim:
                         self.aliases[x.id] = (v.value.id, k)
 
+    def guard_facts(self, test, region):
+        """Facts a true test proves about variables not assigned in region (statements, or None for
+        the rest of an expression): v > c, v >= c give a lower bound; v < n - c an upper one."""
+        out = {}
+        tests = test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) else [test]
+        stored = set() if region is None else {n.id for r in region for n in ast.walk(r)
+                                               if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        for t in tests:
+            if not (isinstance(t, ast.Compare) and len(t.ops) == 1):
+                continue
+            left, op, right = t.left, type(t.ops[0]), t.comparators[0]
+            if isinstance(right, ast.Name) and not isinstance(left, ast.Name):
+                left, right = right, left
+                op = {ast.Lt: ast.Gt, ast.LtE: ast.GtE, ast.Gt: ast.Lt, ast.GtE: ast.LtE}.get(op, op)
+            if not isinstance(left, ast.Name) or left.id in stored \
+                    or self.env.get(left.id) not in (T.INT, T.NP_INT64, T.INT_DYN):
+                continue
+            lo, hi, slack = self.facts.get(left.id, (None, None, 0))[:3]
+            if isinstance(right, ast.Constant) and type(right.value) is int and op in (ast.Gt, ast.GtE):
+                c = right.value + (1 if op is ast.Gt else 0)
+                lo = c if lo is None else max(lo, c)
+            elif op in (ast.Lt, ast.LtE):
+                base, k = right, 0
+                if isinstance(base, ast.BinOp) and isinstance(base.op, ast.Sub) and isinstance(base.right, ast.Constant) \
+                        and type(base.right.value) is int:
+                    base, k = base.left, base.right.value
+                src = self.len_of(base)
+                if src:                       # v < n - k: v + k < n;  v <= n - k: v + k - 1 < n
+                    hi, slack = src, k - (1 if op is ast.LtE else 0)
+                else:
+                    continue
+            else:
+                continue
+            out[left.id] = (lo, hi, slack)
+        return out
+
+    def with_facts(self, facts):
+        saved = {k: self.facts.get(k) for k in facts}
+        self.facts.update(facts)
+        return saved
+
+    def drop_facts(self, saved):
+        for k, v in saved.items():
+            if v is None:
+                self.facts.pop(k, None)
+            else:
+                self.facts[k] = v
+
+    def mod_assigned(self):
+        """Variables whose every assignment is x % n for an extent n: always in [0, n)."""
+        out, bad = {}, set()
+        for n in ast.walk(self.f):
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, (ast.AugAssign, ast.For)) else []
+            for t in targets:
+                for x in ast.walk(t):
+                    if not (isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store)):
+                        continue
+                    v = n.value if isinstance(n, ast.Assign) and t is x else None
+                    src = self.len_of(v.right) if isinstance(v, ast.BinOp) and isinstance(v.op, ast.Mod) else None
+                    if src and x.id not in bad and out.get(x.id, src) == src:
+                        out[x.id] = src
+                    else:
+                        bad.add(x.id)
+        return {k: (0, v, 0) for k, v in out.items() if k not in bad and self.env.get(k) in (T.INT, T.NP_INT64, T.INT_DYN)}
+
+    def wrap_expr(self, node, a, b):
+        """(i + c) % n as compares: with 0 <= i < n, i + 1 can only reach n, and i - 1 only -1."""
+        x = node.left
+        off = 0
+        if isinstance(x, ast.BinOp):
+            off = x.right.value if isinstance(x.op, ast.Add) else -x.right.value
+        if off > 0:
+            return f'({a} >= {b} ? {a} - {b} : {a})'
+        if off < 0:
+            return f'({a} < 0 ? {a} + {b} : {a})'
+        return a
+
+    def hoist_wraps(self, s, var):
+        """Compute each distinct (var + c) % n wraparound in the loop once, at the top of the body
+        (pure, and it can't raise: the loop proves n >= 1), as hand-written stencils do."""
+        keys = []
+        for n in ast.walk(ast.Module(body=s.body, type_ignores=[])):
+            if not (isinstance(n, ast.BinOp) and isinstance(n.op, ast.Mod) and self.wrap_mod(n)):
+                continue
+            base = n.left.left if isinstance(n.left, ast.BinOp) else n.left
+            key = ast.dump(n)
+            if base.id != var or key in self.hoisted or not isinstance(n.right, ast.Name) \
+                    and self.shape_index(n.right) is None and self.len_of(n.right) is None:
+                continue
+            a = self.hold(self.coerce(self.expr(n.left)[0], self.typeof(n.left), T.INT), T.INT)
+            b = self.hold(self.coerce(self.expr(n.right)[0], self.typeof(n.right), T.INT), T.INT)
+            self.hoisted[key] = self.hold(self.wrap_expr(n, a, b), T.INT)
+            keys.append(key)
+        return keys
+
     def wrap_mod(self, node):
         """Whether node is (i + c) % n, where a loop proves 0 <= i < n (so n >= 1) and |c| <= 1."""
         if not isinstance(node, ast.BinOp):
@@ -1041,10 +1150,18 @@ class Compiler:
         lo, hi, slack = self.facts[x.id][:3]
         return lo is not None and lo >= 0 and hi is not None and slack >= 0 and self.len_of(node.right) == hi
 
+    def uses_var(self, e, var):
+        return any(isinstance(n, ast.Name) and n.id == var for n in ast.walk(e))
+
     def index_facts(self, name, idx, axis=0):
         """(never negative, always below name's extent on axis) for an index, from loop facts."""
-        if isinstance(idx, ast.BinOp) and isinstance(idx.op, ast.Mod) and self.len_of(idx.right) == (name, axis):
-            return True, True        # x % n is in [0, n) (n == 0 raises ZeroDivisionError first)
+        if isinstance(idx, ast.BinOp) and isinstance(idx.op, ast.Mod):
+            src = self.len_of(idx.right)
+            if src == (name, axis):
+                return True, True    # x % n is in [0, n) (n == 0 raises ZeroDivisionError first)
+            if src and any(len(f) > 3 and (name, axis, 'mod', src) in f[3] for f in self.facts.values()):
+                return True, True    # and a versioning test proved n <= name's extent
+            return False, False
         off = 0
         if isinstance(idx, ast.BinOp) and isinstance(idx.op, (ast.Add, ast.Sub)) \
                 and isinstance(idx.right, ast.Constant) and type(idx.right.value) is int:
@@ -1287,12 +1404,17 @@ class Compiler:
             rf = self.temp()
             self.emit(f'int {rf} = {first[1]};')
             closes = 0
-            for v in e.values[1:]:
+            guards = []
+            for i, v in enumerate(e.values[1:]):
                 test = self.truth(r, t)
                 self.open(f'if ({test if isinstance(e.op, ast.And) else "!(" + test + ")"})')
                 closes += 1
+                if isinstance(e.op, ast.And):         # what earlier operands proved holds here
+                    guards.append(self.with_facts(self.guard_facts(e.values[i], None)))
                 c, f = self.expr(v)
                 self.emit(f'{r} = {self.coerce(c, self.typeof(v), t)}; {rf} = {f};')
+            for g in reversed(guards):
+                self.drop_facts(g)
             for _ in range(closes):
                 self.close()
             return r, rf
@@ -1349,8 +1471,10 @@ class Compiler:
             return f'sj_{op.lower()[:3]}((int64_t){a}, (int64_t){b})', npf
         both_int = at.kind != 'float' and bt.kind != 'float'
         wrap = self.wrap_mod(node) if op == 'Mod' and npf == '0' else None
+        if wrap and ast.dump(node) in self.hoisted:
+            return self.hoisted[ast.dump(node)], npf
         if wrap:                                  # (i + c) % n with 0 <= i < n, |c| <= 1: n >= 1, so
-            return f'({a} < 0 ? {a} + {b} : {a} >= {b} ? {a} - {b} : {a})', npf   # no division
+            return self.wrap_expr(node, a, b), npf    # no division
         if both_int and op in ('FloorDiv', 'Mod') and isinstance(right, ast.Constant) \
                 and type(right.value) is int and right.value > 0 and right.value & (right.value - 1) == 0:
             k = right.value.bit_length() - 1      # x // 2**k is an arithmetic shift, x % 2**k a mask:
@@ -1370,12 +1494,19 @@ class Compiler:
                 return f'({fa} / {fb})', npf
             exact = f'sj_truediv((int64_t){a}, (int64_t){b})'
             return (exact if npf == '0' else f'({npf} ? {fa} / {fb} : {exact})'), npf
+        if not isfloat and op in ('FloorDiv', 'Mod'):
+            # one division and one remainder (cimo doesn't merge repeated expressions), then
+            # Python's floor: adjust when the remainder is nonzero and its sign differs from b's.
+            # b == -1 is set apart (INT64_MIN / -1 traps in C); b == 0 is numpy's 0 here.
+            q, r, adj = self.temp(), self.temp(), self.temp()
+            self.emit(f'int64_t {q} = 0, {r} = 0;')
+            self.emit(f'if ({b} == -1) {q} = sj_neg((int64_t){a}); else if ({b} != 0) {{ {q} = (int64_t){a} / {b}; {r} = (int64_t){a} % {b}; }}')
+            self.emit(f'int {adj} = {r} != 0 && (({r} < 0) != ({b} < 0));')
+            if op == 'FloorDiv':
+                return f'({q} - {adj})', npf
+            return f'({r} + ({adj} ? {b} : 0))', npf
         if op == 'FloorDiv':
-            if not isfloat:
-                return f'({b} == 0 ? 0 : sj_floordiv((int64_t){a}, (int64_t){b}))', npf
             return f'({fb} == 0.0 ? {fa} / {fb} : sj_ffloordiv({fa}, {fb}))', npf
-        if not isfloat:
-            return f'({b} == 0 ? 0 : sj_mod((int64_t){a}, (int64_t){b}))', npf
         return f'({fb} == 0.0 ? fmod({fa}, {fb}) : sj_fmod_py({fa}, {fb}))', npf
 
     def cmp(self, a, at, b, bt, op):

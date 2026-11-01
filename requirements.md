@@ -308,6 +308,10 @@ Planned cimo features; scramjit is their first consumer:
 - `#line` directives honored in diagnostics and debug info.
 - A defined calling convention for numpy buffers and scalars.
 - Low compile latency and a cache key scramjit can use.
+- Code as fast as gcc -O3 on scramjit's kernels. `bench/gcc.py` compiles scramjit's generated
+  C and the hand-written C both ways; on the same C cimo is 1.3x (gray_scott), 1.9x (flood_fill)
+  and 2.3x (viewshed) slower than gcc. Causes found: `rint` is a call (2.5x), the bundled `hypot`
+  is 1.5x glibc's, no common subexpression elimination. Reported in cimo's `TODO.md`.
 - Fused multiply-add contraction controlled per compile (today only the process-wide `CIMO_FMA`
   environment variable); scramjit needs it off, other users of cimo may want it on.
 - The per-loop optimization report (`cimo report`: optimized or not, and why) as data, mapped to
@@ -378,6 +382,14 @@ compare. `bench/kernels.py`, arm64:
 | gray_scott 256x256 | 119 ms | 0.51 ms | 0.20 ms | 233x | 2.5x |
 | flood_fill 512x512 | 244 ms | 4.7 ms | 2.5 ms | 52x | 1.9x |
 | viewshed 96x96 | 119 ms | 13.2 ms | 6.7 ms | 9x | 2.0x |
+
+Against gcc (`bench/gcc.py`): scramjit's generated C compiled by gcc -O3 runs as fast as the
+hand-written C compiled by gcc (gray_scott 0.17 vs 0.17 ms, flood_fill 1.9 vs 1.85 ms,
+viewshed with `parity=False` 3.4 vs 2.5 ms), so what is left is cimo's backend, reported to cimo.
+Getting there took: wraparound indices hoisted once per loop iteration, `x % n` indexes covered
+by loop versioning (`n <= len` tested once), one-sided wraparound compares, facts from guards
+(`if y > 0 and ...` makes `y - 1` nonnegative) and from assignments (every `x = p % w` puts x in
+`[0, w)`), for numpy ints too, and one division per `//` or `%`.
 
 viewshed's gap is parity: CPython-exact `math.hypot` (vector_norm through the host table) and
 math error checks; with `parity=False` it runs in 7.9 ms (15x CPython, 1.2x hand C). gray_scott

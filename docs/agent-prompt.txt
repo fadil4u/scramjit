@@ -1,0 +1,64 @@
+# scramjit
+JIT for Python hot loops, written in pure Python.
+Repo: https://github.com/farizrahman4u/scramjit
+Docs: https://www.scramjit.dev/docs/
+
+## What
+On the first call per argument-type signature, `@scram` generates C for the function and compiles it in-process with cimo, a pure-Python C compiler. No LLVM, C toolchain or binary wheels. Arrays aren't copied. The GIL is released, so threads run in parallel. Source stays plain Python. MIT licensed.
+
+## Install
+pip install numpy "cimo @ git+https://github.com/farizrahman4u/cimo#subdirectory=python" "scramjit @ git+https://github.com/farizrahman4u/scramjit"
+CPython 3.9+ on Linux, macOS and Windows, or Pyodide. numpy is only needed for arrays.
+
+## When
+Use: loops over numbers or arrays that don't vectorize (recurrences, data-dependent branches, DP, flood fill, simulation, byte scans); threads blocked by the GIL; environments that forbid native packages. Measured 11x-540x over CPython.
+Skip: numpy already vectorizes it; the work is strings, dicts or objects; ints may exceed 64 bits; the process is too short to repay about 0.1 s of compiling per signature (a disk cache serves later processes).
+
+## API
+from scramjit import scram, CompileError, FallbackWarning
+
+@scram
+def ema(x, y, a: float):
+    y[0] = x[0]
+    for i in range(1, len(x)):
+        y[i] = a * x[i] + (1 - a) * y[i - 1]
+
+Options, all default True: @scram(boundscheck=, cache=, fallback=, parity=)
+boundscheck=False: no index checks; out of bounds corrupts memory.
+cache=False: nothing written to disk.
+fallback=False: raise CompileError instead of running as Python.
+parity=False: faster; inf/nan instead of ZeroDivisionError and math errors.
+Function members: f.preflight(), f.signatures, f.c(), f.__wrapped__ (the original).
+Annotations int, float, bool are enforced at the call (TypeError).
+
+## Subset
+A function compiles whole, or all of it runs as Python with a FallbackWarning. Results don't change, only speed. Keep each hot loop in its own module-level function.
+Arguments: int, float, bool; contiguous n-D numpy arrays of int8-int64, uint8-uint32, float32, float64. Anything else falls back; convert first with np.asarray(list), np.frombuffer(bytes, np.uint8), np.ascontiguousarray(a).
+Compiles: for, while, if, break, continue, ternary; a[i, j], negative indices, a.shape, a.ndim; tuples; lists of fixed size; comprehensions; range, enumerate, zip, reversed, map, filter, len, abs, min, max, any, all, int, float, round; sum of ints or sum(gen, 0.0); math.*.
+Falls back, with the fix:
+- calling any other function, even @scram, or recursing: inline it
+- global variables: pass as arguments
+- a[1:], a[i][j], a * 2, a.sum(), np.*: index elements with a[i, j]; allocate arrays outside, pass them in
+- arithmetic on elements narrower than 64 bits: int(a[i]) or float(a[i]); comparing and storing them is fine
+- changing a variable's type, s = 0 then s += 0.5: start with s = 0.0
+- sum(floats) without a start: sum(gen, 0.0)
+- x ** 0.5 on a float: math.sqrt(x); int ** variable int: use a loop
+- dict, set, str, print, append, class, self, try, raise, assert, for-else, nested def, lambda outside map/filter, default parameters: move outside the function
+
+## Semantics
+Matches CPython bit for bit: // and % on negatives, negative indices, IndexError, ZeroDivisionError, math. Exception: ints are 64-bit and wrap silently. No sandbox; compiled code has the process's privileges.
+
+## CLI
+scramjit preflight [paths]  # static, imports nothing: state of each @scram function, blocking lines with hints, undecorated loops that would compile; -q, --json, --no-suggest
+scramjit preflight FILE:FUNC  # line by line: state, types, bounds checks
+scramjit preflight --run app.py [args] | --run -m pytest  # real types; compile, native and Python time; report on stderr
+scramjit c FILE:FUNC  # generated C; --runtime for a standalone file
+scramjit cache info|clear|path
+preflight exits 1 if any @scram function runs as Python, so it works in CI. SCRAMJIT_LOG=1 logs each compile and fallback. Every command has --help.
+
+## Workflow
+1. Profile. Move the hot loop into a module-level function of numbers and arrays.
+2. Add @scram; run `scramjit preflight FILE`; apply the hints until it reports compiled.
+3. Run `scramjit preflight --run -m pytest`: static analysis can't see real argument types.
+4. Compare results with f.__wrapped__ and measure from the second call.
+5. Guard the speed: @scram(fallback=False) or preflight in CI.

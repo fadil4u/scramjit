@@ -137,3 +137,6 @@ html{scrollbar-width:thin}
 
 /* the heat line under the top bar: cold intake to hot exhaust */
 .top::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--flow);opacity:.85}
+/* keep clear of the Prompt for Agents corner where the gutter is too narrow */
+@media(max-width:1527px){.top-in{padding-right:64px}}
+@media(max-width:600px){.top-in{padding-right:48px}}

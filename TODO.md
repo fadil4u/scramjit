@@ -8,7 +8,9 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 
 - **Hot helpers are macros** (`scramjit/_runtime.py`: `sj_add`, `sj_floordiv`, `sj_truediv`, ...)
   because cimo compiles `static inline` functions as calls (5.15 vs 3.07 ns per element on
-  `ema`). When cimo inlines small functions: turn them back into functions.
+  `ema`). When cimo inlines small functions: turn them back into functions. **cimo inlines now**
+  (commit `49f08c0`): functions of up to 40 IR instructions, including ones defined later, and
+  `ema` with a helper matches the macro (3.33 ns). Remove the macro workaround.
 - **`CIMO_FMA=0` set before importing cimo** (`scramjit/_dispatch.py`, `tests/conftest.py`), plus
   a warning when it is on, because contraction is process-wide. When cimo takes `fma=` per
   compile: pass it, drop the environment variable and the warning; `parity=False` can then turn
@@ -28,9 +30,14 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 
 ## Next
 
-0. **Math in Pyodide:** functions that involve no C library code (`sqrt`, `hypot`, `floor`,
-   `fmod`, ...) compile there; the others fall back until ported from the libm Pyodide's CPython
-   is built with (emscripten's), and checked in Pyodide.
+0. **All of `math` in Pyodide.** Only the functions with no C library code (`sqrt`, `fabs`, `fmod`,
+   `copysign`, `hypot`, `floor`, `ceil`, `trunc`, `degrees`, `radians`, `isnan`, `isinf`,
+   `isfinite`) compile there. Every other `math` function (`log` and `exp` families, the trig and
+   hyperbolic ones, `atan2`, `pow`, ...) makes the whole function fall back to Python, which costs
+   the entire speedup: the site's beacon and fractal demos had to be written around it. Compile
+   all of them, bit-exact with Pyodide's CPython (its libm is emscripten's), and test each in
+   Pyodide, not only natively. Then remove the workarounds in `docs/lab/` (beacon's `math.sqrt`,
+   the fractal's colouring without `math.log`).
 
 1. **Rest of M2:** narrow dtypes (float32, int32, uint8, ...) with numpy's NEP 50 scalar
    arithmetic, value-range narrowing; `map`/`filter`; nested tuples; lists of several for

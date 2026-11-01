@@ -1,4 +1,4 @@
-"""The live demo's driver, run in Pyodide: terrain, presets, and each pipeline stage's output."""
+"""The live demo's driver, run in Pyodide: each demo's state and work, and each pipeline stage's output."""
 
 import ast
 import json
@@ -14,11 +14,14 @@ from scramjit._runtime import PRELUDE
 
 N = 128
 PRESETS = {
-    'erosion': {'entry': 'erode', 'unit': 'droplets'},
-    'beacon': {'entry': 'viewshed', 'unit': 'sightlines'},     # one per cell: a line of sight
-    'landslides': {'entry': 'slide', 'unit': 'cells'},
+    'erosion': {'entry': 'erode', 'demo': 'terrain'},
+    'beacon': {'entry': 'viewshed', 'demo': 'terrain'},
+    'landslides': {'entry': 'slide', 'demo': 'terrain'},
+    'fractal': {'entry': 'mandelbrot', 'demo': 'fractal'},
+    'sand': {'entry': 'sand', 'demo': 'sand'},
+    'flock': {'entry': 'flock', 'demo': 'flock'},
 }
-S = {'k': 1, 'row': 0, 'angle': 0.0, 'rates': {}}
+S = {'k': 1, 'row': 0, 'angle': 0.0, 'preset': 'erosion', 'demo': None}
 UPLIFT_S = 2.0       # the land rises back toward its first shape with this time constant, in seconds
 
 
@@ -40,13 +43,115 @@ def terrain(seed):
     return h ** 1.8                                    # peaks stand out, valleys open up
 
 
-def reset(seed=7):
-    S['h'] = terrain(seed)
-    S['h0'] = S['h'].copy()
-    S['t'] = None
-    S['vis'] = np.zeros((N, N), np.uint8)
+def reset(seed=7, preset=None):
+    """Fresh state for a preset's demo."""
+    preset = preset or S['preset']
+    demo = PRESETS[preset]['demo']
+    if preset != S['preset']:
+        S['fn'] = None                                # the old kernel doesn't fit: no work until set_code
+    S['preset'], S['demo'], S['row'], S['k'] = preset, demo, 0, 1
     S['rng'] = np.random.default_rng(seed)
-    S['row'] = 0
+    S['t'] = None
+    if demo == 'terrain':
+        S['h'] = terrain(seed)
+        S['h0'] = S['h'].copy()
+        S['vis'] = np.zeros((N, N), np.uint8)
+    elif demo == 'fractal':
+        S['img'] = np.zeros((FRACTAL_N, FRACTAL_N, 4), np.uint8)
+        S['img'][..., 3] = 255
+        S['pal'] = palette()
+        S['dive'] = (seed % len(DIVES)) if seed != 7 else 0
+        S['scale'] = 3.2 / FRACTAL_N
+    elif demo == 'sand':
+        S['cells'] = sand_world()
+        S['sand_rng'] = np.array([seed], np.int64)
+        S['grain'] = (S['rng'].random((SAND_H, SAND_W)) * 18).astype(np.int16)
+    elif demo == 'flock':
+        S['pos'] = S['rng'].random((BOIDS, 2)) * [FLOCK_W, FLOCK_H]
+        a = S['rng'].random(BOIDS) * 2 * np.pi
+        S['vel'] = np.stack([np.cos(a), np.sin(a)], 1) * 2.0
+        S['pointer'] = None
+
+
+# ---- the fractal: a dive into the Mandelbrot set, a frame at a time
+FRACTAL_N = 240
+DIVES = [(-0.743643887037158704752191506114774, 0.131825904205311970493132056385139),   # seahorse valley
+         (-0.10109636384562, 0.95628651080914),
+         (-1.7497591451303665, -0.0000000000000001),
+         (0.360240443437614363236125244449545, -0.641313061064803174860375015179302)]
+
+
+def palette(n=256):
+    """A cyclic gradient: deep blue, scramjit's orange and red, and back."""
+    stops = np.array([[8, 14, 40], [37, 99, 235], [147, 197, 253], [255, 247, 237],
+                      [249, 115, 22], [185, 28, 28], [40, 8, 20], [8, 14, 40]], float)
+    t = np.linspace(0, len(stops) - 1, n, endpoint=False)
+    i = t.astype(int)
+    f = (t - i)[:, None]
+    return (stops[i] * (1 - f) + stops[i + 1] * f).astype(np.uint8)
+
+
+def fractal_maxit():
+    depth = math.log2(3.2 / FRACTAL_N / S['scale'])
+    return int(min(400, 100 + depth * 22))
+
+
+def fractal_target(fx, fy):
+    """Steer the dive: the clicked point (fractions of the view) becomes the centre."""
+    cx, cy = DIVES[S['dive']]
+    nx = cx + (fx - 0.5) * FRACTAL_N * S['scale']
+    ny = cy + (fy - 0.5) * FRACTAL_N * S['scale']
+    DIVES.append((nx, ny))
+    S['dive'] = len(DIVES) - 1
+
+
+# ---- falling sand
+SAND_W, SAND_H = 180, 210
+SAND_COLORS = np.array([[10, 12, 22], [70, 76, 96], [232, 178, 92], [56, 132, 236], [24, 26, 38]], np.int16)
+
+
+def sand_world():
+    c = np.zeros((SAND_H, SAND_W), np.uint8)
+    c[-1, :] = 1
+    for x0 in (8, 78, 148):                           # drains in the floor
+        c[-1, x0:x0 + 24] = 4
+    for k, (x0, y0, x1) in enumerate([(12, 55, 50), (100, 70, 138), (52, 105, 92), (126, 130, 164), (22, 150, 60)]):
+        for x in range(x0, x1):                        # slanted ledges, two cells thick
+            y = y0 + (x - x0) // (4 if k % 2 == 0 else -4)
+            c[y:y + 2, x] = 1
+    return c
+
+
+def paint(x, y, r, kind):
+    """Paint a disc of sand, water or wall, or erase, from the page's pointer."""
+    if S.get('demo') != 'sand':
+        return
+    yy, xx = np.ogrid[:SAND_H, :SAND_W]
+    disc = (yy - y) ** 2 + (xx - x) ** 2 <= r * r
+    disc[-1, :] = False                               # keep the floor and its drains
+    if kind in (2, 3):
+        disc &= S['rng'].random(disc.shape) < 0.5      # a spray, not a block
+        disc &= S['cells'] == 0
+    S['cells'][disc] = kind
+
+
+# ---- the flock
+BOIDS, FLOCK_W, FLOCK_H = 1200, 1200.0, 760.0
+FLOCK_ARGS = (FLOCK_W, FLOCK_H, 42.0, 11.0, 0.06, 0.0035, 2.2)
+
+
+def pointer(x, y):
+    S['pointer'] = None if x is None or x < 0 else (x * FLOCK_W, y * FLOCK_H)
+
+
+def flock_move():
+    """After every boid has steered: scatter from the pointer, then move (numpy: not the demo)."""
+    if S.get('pointer'):
+        d = S['pos'] - S['pointer']
+        d2 = (d ** 2).sum(1, keepdims=True)
+        near = d2 < 140 ** 2
+        S['vel'] += np.where(near, d / np.sqrt(d2 + 1) * 1.2, 0)
+    S['pos'] = (S['pos'] + S['vel']) % [FLOCK_W, FLOCK_H]
 
 
 def outline(node, depth=0, out=None, limit=60):
@@ -144,6 +249,8 @@ def stmt_tree(node, types):
 
 def set_code(preset, src, compiled):
     """Load the editor's code, as Python or through scramjit; return what each stage shows."""
+    if PRESETS[preset]['demo'] != S.get('demo'):
+        reset(preset=preset)
     S['preset'] = preset
     S['k'] = 1
     name = f'<{preset}.py>'
@@ -202,7 +309,8 @@ def wasm_text():
 
 
 def run(f, k, warm=False):
-    """Do k units of the current preset's work with f."""
+    """Do about k units of the current preset's work with f; return the units done. warm: a token
+    call on copies, which makes scramjit compile."""
     p = S['preset']
     if p == 'erosion':
         seeds = S['rng'].random(2 * k)
@@ -219,33 +327,74 @@ def run(f, k, warm=False):
             if r1 >= N:
                 S['angle'] = a + 0.12
         return (r1 - r0) * N                 # cells: one sightline each
-    r0 = S['row'] if not warm else 0     # landslides
-    r1 = min(N, r0 + k)
-    f(S['h'] if not warm else S['h'].copy(), 0.012, 0.25, r0, r1 if not warm else 2)
+    if p == 'landslides':
+        r0 = S['row'] if not warm else 0
+        r1 = min(N, r0 + k)
+        f(S['h'] if not warm else S['h'].copy(), 0.012, 0.25, r0, r1 if not warm else 2)
+        if not warm:
+            S['row'] = 0 if r1 >= N else r1
+        return (r1 - r0) * N                 # cells
+    if p == 'fractal':                       # rows of the frame; a finished frame zooms in
+        cx, cy = DIVES[S['dive']]
+        r0 = S['row'] if not warm else 0
+        r1 = min(FRACTAL_N, r0 + k) if not warm else 1
+        its = f(S['img'] if not warm else S['img'].copy(), S['pal'], cx, cy, S['scale'], fractal_maxit(), r0, r1)
+        if not warm:
+            S['row'] = r1
+            if r1 >= FRACTAL_N:
+                S['row'] = 0
+                S['frame_done'] = True
+                S['scale'] *= 0.955
+                if S['scale'] < 1e-9:        # deep enough: start the next dive
+                    S['dive'] = (S['dive'] + 1) % 4
+                    S['scale'] = 3.2 / FRACTAL_N
+        return int(its)                      # iterations
+    if p == 'sand':                          # whole steps of the world
+        k = min(k, 6 - S.get('sand_steps', 0)) if not warm else 1
+        if warm:
+            f(S['cells'].copy(), S['sand_rng'].copy(), 1)
+        else:
+            f(S['cells'], S['sand_rng'], k)
+            S['sand_steps'] = S.get('sand_steps', 0) + k
+        return k * SAND_H * SAND_W           # cells
+    # flock: a band of boids steers by all the others; a finished pass moves them
+    i0 = S['row'] if not warm else 0
+    i1 = min(BOIDS, i0 + k) if not warm else 1
+    f(S['pos'] if not warm else S['pos'].copy(), S['vel'] if not warm else S['vel'].copy(), i0, i1, *FLOCK_ARGS)
     if not warm:
-        S['row'] = 0 if r1 >= N else r1
-    return (r1 - r0) * N                     # cells
+        S['row'] = i1
+        if i1 >= BOIDS:
+            S['row'] = 0
+            S['frame_done'] = True
+            flock_move()
+    return (i1 - i0) * (BOIDS - 1)            # pairs
 
 
 def step(budget_ms):
-    """Work for about budget_ms; return units done per second. The batch size adapts."""
+    """Work for up to budget_ms; return units done per second. The batch size adapts. A demo whose
+    motion has a natural pace stops early: a frame of the fractal or the flock, six sand steps."""
     if S.get('fn') is None:
         return json.dumps({'rate': 0})
     t = time.perf_counter()
     done = 0
+    S['frame_done'] = False
+    S['sand_steps'] = 0
     while (time.perf_counter() - t) * 1000 < budget_ms:
         k = S['k']
         t1 = time.perf_counter()
         try:
-            done += run(S['fn'], k)
+            n = run(S['fn'], k)
+            done += n
         except Exception as e:  # noqa: BLE001
             S['fn'] = None
             return json.dumps({'rate': 0, 'error': f'{type(e).__name__}: {e}'})
         dt = max(time.perf_counter() - t1, 1e-5) * 1000
-        S['k'] = max(1, min(int(k * min(2.0, (budget_ms / 3) / dt)) or 1, 20000))
+        S['k'] = max(1, min(int(k * min(2.0, (budget_ms / 3) / dt)) or 1, 2_000_000))
+        if S['frame_done'] or S['sand_steps'] >= 6:
+            break
     rate = done / max(time.perf_counter() - t, 1e-6)
     uplift()
-    return json.dumps({'rate': rate, 'unit': PRESETS[S['preset']]['unit']})
+    return json.dumps({'rate': rate, 'paced': S['demo'] in ('fractal', 'sand', 'flock')})
 
 
 def uplift():
@@ -255,16 +404,33 @@ def uplift():
     now = time.perf_counter()
     dt = min(now - S['t'], 0.1) if S['t'] is not None else 0.0
     S['t'] = now
-    if dt > 0 and S.get('preset') != 'beacon':
+    if dt > 0 and S['preset'] in ('erosion', 'landslides'):
         S['h'] += (S['h0'] - S['h']) * (1 - math.exp(-dt / UPLIFT_S))
 
 
-def heights():
-    return S['h'].astype(np.float32)
+def views():
+    """What the page draws, by name: JSON names; view(name) gives each array."""
+    d = S['demo']
+    if d == 'terrain':
+        return json.dumps(['h', 'vis'] if S['preset'] == 'beacon' else ['h'])
+    return json.dumps({'fractal': ['rgba'], 'sand': ['rgba'], 'flock': ['pos', 'vel']}[d])
 
 
-def overlay():
-    return S['vis'] if S.get('preset') == 'beacon' else None
+def view(name):
+    if name == 'h':
+        return S['h'].astype(np.float32)
+    if name == 'vis':
+        return S['vis']
+    if name == 'rgba' and S['demo'] == 'fractal':
+        return S['img']
+    if name == 'rgba':                                  # sand: colours, with a little grain
+        rgb = SAND_COLORS[S['cells']]
+        rgb[..., :3] += np.where((S['cells'] == 2)[..., None], S['grain'][..., None], 0)
+        out = np.empty((SAND_H, SAND_W, 4), np.uint8)
+        out[..., :3] = np.clip(rgb, 0, 255)
+        out[..., 3] = 255
+        return out
+    return S[name].astype(np.float32)
 
 
 reset()

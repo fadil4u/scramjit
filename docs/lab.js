@@ -1,16 +1,31 @@
-// The live demo: Python (in Pyodide) erodes a terrain; turn scramjit on and the same function is
-// compiled to WebAssembly (syntax tree -> types -> C -> cimo) and runs much faster. three.js draws.
+// The live demo: four simulations in plain Python (in Pyodide, in a worker); turn scramjit on and
+// the same function is compiled to WebAssembly (syntax tree -> types -> C -> cimo) and runs much
+// faster. three.js draws the terrain; a 2D canvas draws the fractal, the sand and the flock.
 (function () {
   'use strict';
-  const PRESETS = { erosion: 'Hydraulic erosion', beacon: 'Beacon (viewshed)', landslides: 'Landslides' };
-  const ENTRY = { erosion: 'erode', beacon: 'viewshed', landslides: 'slide' };
-  const UNITS = { erosion: 'droplets/s', beacon: 'sightlines/s', landslides: 'cells/s' };
+  const DEMOS = {
+    terrain: { presets: { erosion: 'Hydraulic erosion', beacon: 'Beacon (viewshed)', landslides: 'Landslides' }, draw: 'terrain', reset: 'New terrain', hint: 'drag to turn the terrain' },
+    fractal: { presets: { fractal: 'Mandelbrot dive' }, draw: 'image', fit: 'cover', smooth: true, reset: 'New dive', hint: 'click to steer the dive' },
+    sand: { presets: { sand: 'Falling sand' }, draw: 'image', fit: 'contain', smooth: false, reset: 'Clear', hint: 'draw on it' },
+    flock: { presets: { flock: 'Boids' }, draw: 'flock', fit: 'cover', reset: 'Scatter', hint: 'move through the flock' },
+  };
+  const PRESETS = Object.assign({}, ...Object.values(DEMOS).map(d => d.presets));
+  const DEMO_OF = {};
+  for (const [d, v] of Object.entries(DEMOS)) for (const p in v.presets) DEMO_OF[p] = d;
+  const ENTRY = { erosion: 'erode', beacon: 'viewshed', landslides: 'slide', fractal: 'mandelbrot', sand: 'sand', flock: 'flock' };
+  const UNITS = { erosion: 'droplets/s', beacon: 'sightlines/s', landslides: 'cells/s', fractal: 'iterations/s', sand: 'cells/s', flock: 'boid pairs/s' };
+  const RESET_ICON = {
+    terrain: '<path d="M2 20 9 8l4 6.5"/><path d="m11 17 5-8 6 11H2"/><path d="m7.4 10.7 1.6 1.3 1.4-1.2"/>',
+    fractal: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1.2"/>',
+    sand: '<path d="M6 3h12M6 21h12M7 3c0 4.5 4 6 5 9 1-3 5-4.5 5-9M7 21c0-4.5 4-6 5-9 1 3 5 4.5 5 9"/>',
+    flock: '<path d="M2 11c2.5-2.5 5-2.5 7 0 2-2.5 4.5-2.5 7 0M10 17c1.6-1.6 3.2-1.6 4.5 0 1.3-1.6 2.9-1.6 4.5 0"/>',
+  };
   const root = document.getElementById('lab-demo');
   if (!root) return;
   const $ = s => root.querySelector(s);
   const RM = matchMedia('(prefers-reduced-motion:reduce)').matches;
 
-  let lab = null, editor = null, viewer = null, preset = 'erosion', compiled = false, running = false;
+  let lab = null, editor = null, viewer = null, demo = 'terrain', preset = 'erosion', compiled = false, running = false;
   let sources = {}, info = {}, stage = 'python', pyRate = {}, rate = 0, editTimer = null, presetsLoaded = null;
   let nudged = false, startedAt = 0;
 
@@ -25,7 +40,7 @@
   function boot() {
     root.classList.add('loading');
     status('Starting…');
-    worker = new Worker('lab/worker.js?v=2');
+    worker = new Worker('lab/worker.js?v=5');
     worker.onmessage = e => {
       const m = e.data;
       if (m.type === 'status') status(m.msg);
@@ -38,9 +53,10 @@
         running = true;
         startedAt = performance.now();
       });
-      else if (m.type === 'frame') frameIn = m;
+      else if (m.type === 'frame') { if (m.preset === preset) frameIn = m; else worker.postMessage({ type: 'ack' }); }
       else if (m.type === 'info' && pending && m.id === pending.id) { const k = pending.done; pending = null; k(m.info); }
       else if (m.type === 'wat') watWaiters.splice(0).forEach(k => k(m.text));
+      else if (m.type === 'loop-error') { console.error('demo worker:', m.msg); info = { state: 'error', error: m.msg }; finish(); }
     };
     worker.onerror = e => { status('Could not start: ' + (e.message || 'worker error')); root.classList.remove('loading'); };
     worker.postMessage({ type: 'boot', base: new URL('.', location.href).href });
@@ -49,6 +65,21 @@
   function sendCode(src, on, done) {
     pending = { id: ++codeId, done };
     worker.postMessage({ type: 'code', id: codeId, preset, src, compiled: on });
+  }
+  // a progress bar while scramjit compiles, paced by the last compile's time
+  let lastCompile = 1600, barTimer = null;
+  function progress(on) {
+    const bar = $('.lab-progress'), fill = bar.firstElementChild;
+    clearTimeout(barTimer);
+    if (on) {
+      bar.classList.add('on');
+      fill.style.transition = 'none'; fill.style.width = '0%'; fill.offsetWidth;
+      fill.style.transition = `width ${lastCompile * 1.1}ms cubic-bezier(.15,.6,.3,1)`;
+      fill.style.width = '92%';
+    } else {
+      fill.style.transition = 'width .18s ease-out'; fill.style.width = '100%';
+      barTimer = setTimeout(() => bar.classList.remove('on'), 260);
+    }
   }
 
   // ---- code and the pipeline. One pane: the Python editor; with scramjit on, tabs for the syntax
@@ -131,6 +162,7 @@
     const src = editor.getValue();
     $('.lab-err').hidden = true;
     if (!compiled) {
+      progress(false);
       sendCode(src, false, r => {
         info = r;
         note('');
@@ -140,9 +172,12 @@
       return;
     }
     note('compiling…', true);                          // the worker compiles; the page keeps moving
+    progress(true);
     sendCode(src, true, r => {
+      progress(false);
       if (!compiled) return;
       info = r;
+      if (info.compile_ms) lastCompile = info.compile_ms;
       const sec = (info.compile_ms / 1000).toFixed(1);
       note(info.state === 'compiled' ? sec + ' s' : '', false, info.state === 'compiled' ? `scramjit and cimo compiled this in ${sec} s, in this page` : '');
       finish();
@@ -161,7 +196,7 @@
   // ---- 3D terrain
   let renderer, scene, camera, mesh, geom, colors, N = 0, az = 0.6, el = 0.62, drag = null;
   function initGL() {
-    const canvas = $('canvas');
+    const canvas = $('.lab-gl');
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(2, devicePixelRatio));
     scene = new THREE.Scene();
@@ -181,10 +216,13 @@
     canvas.addEventListener('pointerup', () => { drag = null; });
   }
   function resize() {
-    const c = $('canvas'), w = c.clientWidth, h = c.clientHeight;
+    const c = $('.lab-right'), w = c.clientWidth, h = c.clientHeight;
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    const k = $('.lab-2d'), dpr = Math.min(2, devicePixelRatio);
+    k.width = Math.round(w * dpr); k.height = Math.round(h * dpr);
+    if (last2d) draw2d(last2d, true);
   }
   function buildMesh(n) {
     if (mesh) {                           // replace the old mesh (the placeholder before Python loads)
@@ -228,6 +266,76 @@
     geom.attributes.color.needsUpdate = true;
     geom.computeVertexNormals();
   }
+  // ---- the 2D demos: an image (the fractal, the sand) or the flock, fitted to the view
+  let last2d = null;
+  const off = document.createElement('canvas'), offc = off.getContext('2d');
+  function fitRect(w, h, mode) {                      // where a w x h picture lands on the canvas
+    const k = $('.lab-2d'), s = (mode === 'cover' ? Math.max : Math.min)(k.width / w, k.height / h);
+    return { s, x: (k.width - w * s) / 2, y: (k.height - h * s) / 2 };
+  }
+  function draw2d(r, redraw) {
+    const k = $('.lab-2d'), ctx = k.getContext('2d'), d = DEMOS[demo];
+    last2d = r;
+    if (d.draw === 'image') {
+      const a = r.arrays.rgba, [h, w] = a.shape;
+      if (off.width !== w || off.height !== h) { off.width = w; off.height = h; }
+      offc.putImageData(new ImageData(new Uint8ClampedArray(a.data.buffer, a.data.byteOffset, a.data.length), w, h), 0, 0);
+      const f = fitRect(w, h, d.fit);
+      ctx.fillStyle = '#080a12'; ctx.fillRect(0, 0, k.width, k.height);
+      ctx.imageSmoothingEnabled = d.smooth;
+      ctx.drawImage(off, f.x, f.y, w * f.s, h * f.s);
+    } else if (d.draw === 'flock') {
+      const pos = r.arrays.pos.data, vel = r.arrays.vel.data, n = pos.length / 2;
+      const f = fitRect(1200, 760, 'cover'), z = Math.max(1, f.s * 1.2);
+      ctx.fillStyle = redraw ? '#080a12' : 'rgba(8,10,18,.28)';   // trails: fade the last frame
+      ctx.fillRect(0, 0, k.width, k.height);
+      const B = 6, paths = Array.from({ length: B }, () => new Path2D());
+      for (let i = 0; i < n; i++) {
+        const x = f.x + pos[2 * i] * f.s, y = f.y + pos[2 * i + 1] * f.s;
+        const vx = vel[2 * i], vy = vel[2 * i + 1], v = Math.hypot(vx, vy) || 1, ux = vx / v, uy = vy / v;
+        const b = Math.min(B - 1, Math.floor((Math.atan2(uy, ux) / Math.PI + 1) / 2 * B));
+        const p = paths[b];
+        p.moveTo(x + ux * 4 * z, y + uy * 4 * z);
+        p.lineTo(x - ux * 3 * z - uy * 2 * z, y - uy * 3 * z + ux * 2 * z);
+        p.lineTo(x - ux * 3 * z + uy * 2 * z, y - uy * 3 * z - ux * 2 * z);
+        p.closePath();
+      }
+      const COL = ['#3b82f6', '#60a5fa', '#c4b5fd', '#fdba74', '#f97316', '#ef4444'];
+      paths.forEach((p, b) => { ctx.fillStyle = COL[b]; ctx.fill(p); });
+    }
+  }
+  // the page's pointer on a 2D demo, in the demo's own coordinates
+  function pointerAt(e) {
+    const k = $('.lab-2d'), rc = k.getBoundingClientRect(), dpr = k.width / rc.width;
+    const px = (e.clientX - rc.left) * dpr, py = (e.clientY - rc.top) * dpr;
+    if (demo === 'sand') { const f = fitRect(180, 210, 'contain'); return { x: (px - f.x) / f.s, y: (py - f.y) / f.s }; }
+    if (demo === 'flock') { const f = fitRect(1200, 760, 'cover'); return { x: (px - f.x) / f.s / 1200, y: (py - f.y) / f.s / 760 }; }
+    const f = fitRect(240, 240, 'cover');
+    return { x: (px - f.x) / f.s / 240, y: (py - f.y) / f.s / 240 };
+  }
+  let tool = 2, painting = false;
+  function init2d() {
+    const k = $('.lab-2d');
+    k.addEventListener('pointerdown', e => {
+      if (!running) return;
+      const p = pointerAt(e);
+      if (demo === 'fractal') worker.postMessage({ type: 'target', x: p.x, y: p.y });
+      if (demo === 'sand') { painting = true; k.setPointerCapture(e.pointerId); worker.postMessage({ type: 'paint', x: p.x, y: p.y, r: tool === 1 ? 2 : 5, kind: tool }); }
+    });
+    k.addEventListener('pointermove', e => {
+      if (!running) return;
+      const p = pointerAt(e);
+      if (demo === 'sand' && painting) worker.postMessage({ type: 'paint', x: p.x, y: p.y, r: tool === 1 ? 2 : 5, kind: tool });
+      if (demo === 'flock') worker.postMessage({ type: 'pointer', x: p.x, y: p.y });
+    });
+    const up = () => { painting = false; if (running && demo === 'flock') worker.postMessage({ type: 'pointer', x: null, y: null }); };
+    k.addEventListener('pointerup', up); k.addEventListener('pointercancel', up); k.addEventListener('pointerleave', up);
+    root.querySelectorAll('.lab-tool').forEach(b => b.addEventListener('click', () => {
+      tool = +b.dataset.kind;
+      root.querySelectorAll('.lab-tool').forEach(c => c.setAttribute('aria-pressed', c === b));
+    }));
+  }
+
   function draw() {
     if (!drag && !RM) az += 0.0015;
     const r = 3.9;
@@ -238,16 +346,20 @@
 
   // ---- the frame loop: one time-boxed step of Python or compiled work, then draw
   function frame() {
-    if (running && frameIn && !document.hidden && inView) {
+    requestAnimationFrame(frame);
+    const visible = inView && !document.hidden;           // out of sight: no work, no drawing
+    if (frameIn && frameIn.preset !== preset) { frameIn = null; worker.postMessage({ type: 'ack' }); }   // from the last demo
+    if (running && frameIn && visible) {
       const r = frameIn;                              // the worker's latest step; ask for the next
       frameIn = null;
       worker.postMessage({ type: 'ack' });
       if (r.error) { info = { state: 'error', error: r.error }; finish(); }
       if (r.compiled === compiled) {
-        rate = rate ? rate * 0.85 + r.rate * 0.15 : r.rate;
+        if (r.rate) rate = rate ? rate * 0.85 + r.rate * 0.15 : r.rate;
         if (!compiled && info.state !== 'error') pyRate[preset] = rate;
       }
-      updateMesh(r.h, r.vis);
+      if (DEMOS[demo].draw === 'terrain') updateMesh(r.arrays.h.data, r.arrays.vis ? r.arrays.vis.data : null);
+      else draw2d(r, false);
       const n = `${Math.round(rate).toLocaleString()} ${UNITS[preset]}`;
       const x = pyRate[preset] ? ` · ${Math.round(rate / pyRate[preset])}× Python` : '';
       $('.lab-rate').innerHTML = info.state === 'compiled' ? `Compiled by scramjit · ${n}${x}`
@@ -255,12 +367,11 @@
         : `Plain Python · ${n}`;
       if (!compiled && !nudged && performance.now() - startedAt > 4000) { root.classList.add('nudge'); nudged = true; }
     }
-    if (renderer) draw();
-    requestAnimationFrame(frame);
+    if (renderer && visible && DEMOS[demo].draw === 'terrain') draw();
   }
   let inView = true;
   const tellActive = () => { if (worker) worker.postMessage({ type: 'active', on: inView && !document.hidden }); };
-  new IntersectionObserver(es => { inView = es[0].isIntersecting; tellActive(); }).observe(root);
+  new IntersectionObserver(es => { inView = es[es.length - 1].isIntersecting; tellActive(); }).observe(root);   // the newest entry: a batch can hold several
   document.addEventListener('visibilitychange', tellActive);
 
   // ---- controls
@@ -273,6 +384,33 @@
       const t = root.querySelectorAll('.lab-tname');
       t[0].textContent = preset + '.py'; t[1].textContent = ENTRY[preset] + '.c'; t[2].textContent = ENTRY[preset] + '.wat';
     };
+    const sel = $('.lab-preset');
+    // a demo tab: its presets, its canvas, its controls; the running demo switches over
+    const setDemo = d => {
+      demo = d;
+      const v = DEMOS[d];
+      root.querySelectorAll('.lab-demo').forEach(b => { b.classList.toggle('open', b.dataset.d === d); b.setAttribute('aria-selected', b.dataset.d === d); });
+      sel.innerHTML = '';
+      for (const [k, t] of Object.entries(v.presets)) sel.add(new Option(t, k));
+      sel.hidden = Object.keys(v.presets).length < 2;
+      $('.lab-demo-name').textContent = Object.values(v.presets)[0];
+      $('.lab-demo-name').hidden = !sel.hidden;
+      $('.lab-reset').innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${RESET_ICON[d]}</svg>${v.reset}`;
+      $('.lab-gl').hidden = v.draw !== 'terrain';
+      $('.lab-2d').hidden = v.draw === 'terrain';
+      $('.lab-2d').dataset.d = d;
+      root.dataset.demo = d;
+      last2d = null;
+      const k = $('.lab-2d'); k.getContext('2d').clearRect(0, 0, k.width, k.height);
+      if (!running) $('.lab-rate').textContent = v.hint;
+      setPreset(Object.keys(v.presets)[0]);
+    };
+    const setPreset = p => {
+      preset = p; rate = 0; sel.value = p; names();
+      if (sources[p]) editor.setValue(sources[p]);
+      if (running) { worker.postMessage({ type: 'reset', preset: p }); clearTimeout(editTimer); setCode(compiled); }
+    };
+    root.querySelectorAll('.lab-demo').forEach(b => b.addEventListener('click', () => { if (b.dataset.d !== demo) setDemo(b.dataset.d); }));
     presetsLoaded = Promise.all(Object.keys(PRESETS).map(async p => { sources[p] = await text('lab/' + p + '.py'); }))
       .then(() => { if (!running) editor.setValue(sources[preset]); })
       .catch(e => editor.setValue('# could not load the presets: ' + e.message));
@@ -291,13 +429,7 @@
     editor.on('blur', () => { if (root.classList.contains('typing')) { root.classList.remove('typing'); requestAnimationFrame(() => { resize(); editor.refresh(); }); } });
     if (window.visualViewport) visualViewport.addEventListener('resize', fit);
     editor.on('change', () => { clearTimeout(editTimer); if (running) editTimer = setTimeout(setCode, 700); });
-    const sel = $('.lab-preset');
-    for (const [k, v] of Object.entries(PRESETS)) sel.add(new Option(v, k));
-    sel.addEventListener('change', () => {
-      preset = sel.value; rate = 0; names();
-      if (sources[preset]) editor.setValue(sources[preset]);
-      if (running) { worker.postMessage({ type: 'reset' }); clearTimeout(editTimer); setCode(compiled); }
-    });
+    sel.addEventListener('change', () => setPreset(sel.value));
     const setMode = on => {
       if (on === compiled) return;
       compiled = on; rate = 0;
@@ -330,6 +462,8 @@
     document.addEventListener('keydown', e => { if (e.key === 'Escape' && root.classList.contains('is-full') && !document.fullscreenElement) setFull(false); });
     $('.lab-start').addEventListener('click', boot);
     initGL();
+    init2d();
+    setDemo('terrain');
     // a still terrain before Python loads
     const n = 64, h = new Float32Array(n * n);
     for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {

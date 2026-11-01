@@ -407,7 +407,12 @@ second, so the demo adds clock-based uplift toward the starting terrain (2 s tim
 gentler droplets: the terrain shows the balance, and more work per second carves deeper.
 Compiling takes 1.5 to 3 s and blocks the thread it runs on, so the demo runs Pyodide in a
 Web Worker (`docs/lab/worker.js`): the page only draws and handles input, and gets each frame's
-heights as a transferred buffer.
+arrays as transferred buffers. A running compile can't be cancelled: interrupting Pyodide needs
+SharedArrayBuffer, so cross-origin isolation headers, which GitHub Pages can't send. Queued edits
+collapse into one compile of the newest code instead, and stale results are dropped. The demo now
+has four tabs (terrain, Mandelbrot dive, falling sand, flocking); in this setup they run about
+45x, 90x, 180x and 240x faster than Pyodide's CPython. A native run doesn't prove a kernel compiles
+in Pyodide (see TODO on `math`): test there. Work and drawing stop while the demo is out of view.
 
 **M2: builtins, lists, narrowing.** Lowering rules for `enumerate`, `zip`, `map`, `filter`,
 comprehensions and the reductions; fixed-size lists as arrays; narrow types from annotations,

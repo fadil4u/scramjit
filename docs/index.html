@@ -520,6 +520,7 @@ for (int64_t i = 0; i &lt; a_len; i++)
     <tr><td>Float order</td><td>as written</td><td>may reassociate</td><td><span class="pill py">as written</span> no FMA unless opted in</td></tr>
     <tr><td>Integers</td><td>unbounded</td><td>fixed width</td><td><code>int64</code> unless narrowed; wraps</td></tr>
     <tr><td>Bounds checks</td><td>always</td><td>never</td><td><span class="pill py">Python's rule</span> <code>IndexError</code>; opt out with <code>boundscheck=False</code></td></tr>
+    <tr><td><code>math</code> functions</td><td>platform libm or its own code</td><td>whatever libm is linked</td><td><span class="pill py">bit for bit</span> the same code CPython runs, on every platform</td></tr>
     <tr><td>Division by 0</td><td>raises</td><td><code>inf</code> or a crash</td><td><span class="pill py">Python's rule</span> <code>ZeroDivisionError</code></td></tr>
   </table></div>
   <p class="note">Code outside the subset runs as plain Python, with a <code>FallbackWarning</code> naming the line; <code>@scram(fallback=False)</code> makes it an error.</p>

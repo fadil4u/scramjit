@@ -10,6 +10,7 @@ A compiled function returns what CPython returns for the same function undecorat
 | Bounds checks | always | never | on, raising `IndexError`; `boundscheck=False` drops them |
 | Division by zero | raises `ZeroDivisionError` | `inf`, `nan` or a crash | raises `ZeroDivisionError` |
 | Float evaluation order | left to right, as written | compiler may reassociate | as written: no reassociation, no FMA contraction unless opted in |
+| `math` functions | the platform's C library, or CPython's own code | the C library at hand | the same code CPython runs, bit for bit, on every platform including Pyodide |
 
 ## Why integers wrap
 

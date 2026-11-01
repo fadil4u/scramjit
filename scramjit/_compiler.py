@@ -22,7 +22,8 @@ from . import _types as T
 from ._errors import Unsupported
 import sys
 
-from ._runtime import INDEX_ERROR, LIBM, OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION
+from ._runtime import (INDEX_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, OVERFLOW_ERROR, VALUE_ERROR,
+                       ZERO_DIVISION)
 
 BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'sum', 'any', 'all')
 MATH_CONSTANTS = {'pi': math.pi, 'e': math.e, 'tau': math.tau, 'inf': math.inf, 'nan': math.nan}
@@ -99,6 +100,7 @@ class Compiler:
         self.depth = 1
         self.ntemp = 0
         self.uses_libm = False
+        self.owned = []        # temporaries holding a list being built (freed on every exit)
         self.cnames = {}       # comprehension variable -> (C name, flag), shadowing the function's
         self.facts = {}        # loop variable -> (lowest value, array whose len() bounds it, slack)
 
@@ -130,6 +132,27 @@ class Compiler:
         if self.ret is not T.NONE and not ends_with_return(self.f.body):
             self.fail(self.f, 'can fall off the end (returning None) and also return a value')
 
+    def is_list_ctor(self, v):
+        return isinstance(v, (ast.List, ast.ListComp)) or (
+            isinstance(v, ast.BinOp) and isinstance(v.op, ast.Mult)
+            and (isinstance(v.left, ast.List) or isinstance(v.right, ast.List)))
+
+    def list_type(self, v):
+        if isinstance(v, ast.ListComp):
+            if len(v.generators) != 1:
+                self.fail(v, 'a list comprehension with several for clauses')
+            return T.list_of(self.comp_types(v))
+        lit, k = (v, None) if isinstance(v, ast.List) else \
+            ((v.left, v.right) if isinstance(v.left, ast.List) else (v.right, v.left))
+        if k is not None and self.typeof(k).kind not in ('int', 'bool'):
+            self.fail(v, 'a list repeated by a non-integer')
+        if not lit.elts:
+            self.fail(v, 'an empty list (its element type is unknown)')
+        ts = [self.typeof(x) for x in lit.elts]
+        if not all(t.is_number for t in ts):
+            self.fail(v, 'a list of non-numbers')
+        return T.list_of(self.join_all(v, ts, 'a list'))
+
     def assign_type(self, node, name, t):
         if t.kind == 'array':
             self.fail(node, f'{name}: arrays can only be parameters')
@@ -151,6 +174,11 @@ class Compiler:
 
     def infer_stmt(self, s, docstring_ok=False):
         if isinstance(s, ast.Assign):
+            if self.is_list_ctor(s.value):
+                if len(s.targets) != 1 or not isinstance(s.targets[0], ast.Name):
+                    self.fail(s, 'a list assigned to something other than one name')
+                self.assign_type(s, s.targets[0].id, self.list_type(s.value))
+                return
             vt = self.typeof(s.value)
             for target in s.targets:          # a = b = value: value once, targets left to right
                 self.infer_target(target, vt, s)
@@ -174,6 +202,11 @@ class Compiler:
             if s.orelse:
                 self.fail(s, 'for ... else')
             self.bind_types(s.target, self.elem_struct(self.iterable(s.iter)), s)
+            lists = {n.id for n in ast.walk(s.iter) if isinstance(n, ast.Name)
+                     and self.env.get(n.id) is not None and self.env[n.id].kind == 'list'}
+            for n in ast.walk(ast.Module(body=s.body, type_ignores=[])):
+                if isinstance(n, ast.Name) and n.id in lists and isinstance(n.ctx, ast.Store):
+                    self.fail(n, f'rebinds {n.id} inside a loop over it (Python keeps iterating the old list)')
             self.infer_block(s.body)
         elif isinstance(s, ast.Return):
             self.returns.append((s, self.typeof(s.value) if s.value is not None else T.NONE))
@@ -192,9 +225,15 @@ class Compiler:
             self.assign_type(s, target.id, t)
         elif isinstance(target, ast.Subscript):
             at = self.array_of(target)
+            self.index_type(target)
+            if at.kind == 'list':             # a list element takes the stored value's type
+                e = T.join(at.elem, t) if t.is_number else None
+                if e is None:
+                    self.fail(s, f'stores {t.name} into a {at.name}')
+                self.env[target.value.id] = T.list_of(e)
+                return
             if not at.writable:
                 self.fail(s, 'writes a read-only array')
-            self.index_type(target)
             if not t.is_number or (at.elem.kind == 'int' and t.kind == 'float'):
                 self.fail(s, f'stores {t.name} into a {at.name} array')
         elif isinstance(target, (ast.Tuple, ast.List)):
@@ -223,7 +262,7 @@ class Compiler:
     # ---- iterables: range(), arrays, enumerate(), zip(), reversed(), nested. Each lowers to one
     # counted loop that reads elements by index; no iterator exists at run time.
     def iterable(self, it):
-        if isinstance(it, ast.Name) and it.id in self.env and self.env[it.id].kind == 'array':
+        if isinstance(it, ast.Name) and it.id in self.env and self.env[it.id].kind in ('array', 'list'):
             return ('array', it.id)
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Name):
             name = it.func.id
@@ -280,8 +319,8 @@ class Compiler:
 
     def array_of(self, sub):
         if not isinstance(sub.value, ast.Name) or sub.value.id not in self.env \
-                or self.env[sub.value.id].kind != 'array':
-            self.fail(sub, 'indexing something other than an array parameter')
+                or self.env[sub.value.id].kind not in ('array', 'list'):
+            self.fail(sub, 'indexing something other than an array parameter or a list')
         return self.env[sub.value.id]
 
     def tuple_index(self, sub):
@@ -340,6 +379,9 @@ class Compiler:
             self.fail(e, f'a {type(v).__name__} constant')
         if isinstance(e, ast.Name):
             if e.id in self.env:
+                if self.env[e.id].kind == 'list':
+                    self.fail(e, f'{e.id} is a list: lists can only be indexed, iterated over and passed to '
+                              'len() (no aliases, returns or other uses yet)')
                 return self.env[e.id]
             self.fail(e, f'uses the global or undefined name {e.id!r}')
         if isinstance(e, ast.Attribute):
@@ -446,11 +488,12 @@ class Compiler:
             return self.reduction_type(e)
         if e.keywords:
             self.fail(e, f'{name}() with keyword arguments')
-        args = [self.typeof(a) for a in e.args]
         if name == 'len':
-            if len(args) != 1 or args[0].kind not in ('array', 'tuple') or not isinstance(e.args[0], ast.Name):
-                self.fail(e, 'len() of something other than an array or a tuple')
+            a = e.args[0] if len(e.args) == 1 else None
+            if not (isinstance(a, ast.Name) and a.id in self.env and self.env[a.id].kind in ('array', 'list', 'tuple')):
+                self.fail(e, 'len() of something other than an array, a list or a tuple')
             return T.INT
+        args = [self.typeof(a) for a in e.args]
         if not args or not all(t.is_number for t in args):
             self.fail(e, f'{name}() of a non-number')
         if name == 'abs':
@@ -572,6 +615,11 @@ class Compiler:
         self.mark(self.f)
         head = len(self.lines)
         for name, t in self.env.items():
+            if t.kind == 'list':
+                self.emit(f'{t.elem.ctype} *v_{name} = NULL; int64_t v_{name}__n = 0;')
+                if t.elem.np == 'dyn':
+                    self.emit(f'int *v_{name}__np = NULL;')
+                continue
             if t.kind == 'tuple':
                 for i, et in enumerate(t.elem):
                     if name not in self.params:
@@ -584,10 +632,20 @@ class Compiler:
             if t.np == 'dyn':
                 self.emit(f'int v_{name}__np = 0;')
         self.emit('int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;')
+        decl_at = len(self.lines)
         for s in self.f.body:
             self.stmt(s)
+        frees = [f'free(v_{n});' for n, t in self.env.items() if t.kind == 'list'] + \
+                [f'free(v_{n}__np);' for n, t in self.env.items() if t.kind == 'list' and t.elem.np == 'dyn'] + \
+                [f'free({o});' for o, _ in self.owned]
+        self.lines[decl_at:decl_at] = ['    ' + f'{ct} *{o} = NULL;' for o, ct in self.owned]
+        self.lines.append('sj_done:')
+        if frees:
+            self.emit(' '.join(frees))
         self.emit('return 0;')
         self.lines.append('sj_fail:')
+        if frees:
+            self.emit(' '.join(frees))
         self.emit('sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;')
         self.emit('return sj_st;')
         if self.uses_libm:
@@ -620,6 +678,9 @@ class Compiler:
         if isinstance(s, ast.Expr):           # a docstring
             return
         self.mark(s)
+        if isinstance(s, ast.Assign) and self.is_list_ctor(s.value):
+            self.make_list(s.targets[0].id, s.value, s)
+            return
         if isinstance(s, (ast.Assign, ast.AnnAssign)):
             targets = s.targets if isinstance(s, ast.Assign) else [s.target]
             vt = self.typeof(s.value)
@@ -634,10 +695,7 @@ class Compiler:
                 if isinstance(target, ast.Name):
                     self.assign(target.id, v, vt)
                 elif isinstance(target, ast.Subscript):
-                    at = self.env[target.value.id]
-                    val = self.hold(self.coerce(v[0], vt, at.elem), at.elem)
-                    arr, idx = self.element(target)
-                    self.emit(f'{arr}[{idx}] = {val};')
+                    self.store_elem(target, v, vt)
         elif isinstance(s, ast.AugAssign):
             op = ARITH[type(s.op)]
             if isinstance(s.target, ast.Name):
@@ -648,10 +706,13 @@ class Compiler:
                 self.assign(name, self.arith(op, cur, ct, s.value, s), rt)
             else:
                 arr, idx = self.element(s.target)     # checked once, before the right side
-                at = self.env[s.target.value.id]
+                name = s.target.value.id
+                at = self.env[name]
                 rt = self.binop_type(at.elem, self.typeof(s.value), op, s)
-                r = self.arith(op, (self.hold(f'{arr}[{idx}]', at.elem), '1'), at.elem, s.value, s)
+                r = self.arith(op, (self.hold(f'{arr}[{idx}]', at.elem), self.elem_flag(name, idx)), at.elem, s.value, s)
                 self.emit(f'{arr}[{idx}] = {self.coerce(r[0], rt, at.elem)};')
+                if at.kind == 'list' and at.elem.np == 'dyn':
+                    self.emit(f'v_{name}__np[{idx}] = {r[1]};')
         elif isinstance(s, ast.If):
             self.open(f'if ({self.truth(self.expr(s.test)[0], self.typeof(s.test))})')
             for b in s.body:
@@ -685,7 +746,7 @@ class Compiler:
                     else:
                         self.emit(f'sj_io[{4 + 2 * i}] = (int64_t)({val});')
                     self.emit(f'sj_io[{5 + 2 * i}] = {f};')
-                self.emit('return 0;')
+                self.emit('goto sj_done;')
             elif s.value is not None:
                 v = self.expr(s.value)
                 val = self.coerce(v[0], self.typeof(s.value), self.ret)
@@ -696,7 +757,7 @@ class Compiler:
                     self.emit(f'sj_io[0] = (int64_t)({val});')
                 if self.ret.np == 'dyn':
                     self.emit(f'sj_io[2] = {v[1]};')
-            self.emit('return 0;')
+            self.emit('goto sj_done;')
         elif isinstance(s, ast.Break):
             self.emit('break;')
         elif isinstance(s, ast.Continue):
@@ -742,7 +803,7 @@ class Compiler:
         kind = d[0]
         if kind == 'array':
             name, t = d[1], self.env[d[1]].elem
-            return f'(uint64_t)v_{name}__n', lambda k: (f'v_{name}[{k}]', t, '1')
+            return f'(uint64_t)v_{name}__n', lambda k: (f'v_{name}[{k}]', t, self.elem_flag(name, k))
         if kind == 'range':
             args = [self.coerce(self.expr(a)[0], self.typeof(a), T.INT) for a in d[1].args]
             start, stop = ('0LL', args[0]) if len(args) == 1 else (args[0], args[1])
@@ -770,7 +831,8 @@ class Compiler:
         inner = d[1]                                  # reversed
         if inner[0] == 'array':
             name, t = inner[1], self.env[inner[1]].elem
-            return f'(uint64_t)v_{name}__n', lambda k: (f'v_{name}[v_{name}__n - 1 - (int64_t){k}]', t, '1')
+            return f'(uint64_t)v_{name}__n', lambda k: (f'v_{name}[v_{name}__n - 1 - (int64_t){k}]', t,
+                                                        self.elem_flag(name, f'(v_{name}__n - 1 - (int64_t){k})'))
         n, _ = self.iter_prep(inner)
         ts, tp, tn = self.range_parts
         return n, lambda k: (f'(int64_t)((uint64_t){ts} + ({tn} - 1 - {k}) * (uint64_t){tp})', T.INT, '0')
@@ -881,6 +943,10 @@ class Compiler:
         if hi is None and isinstance(stop, ast.BinOp) and isinstance(stop.op, ast.Sub) \
                 and isinstance(stop.right, ast.Constant) and type(stop.right.value) is int and stop.right.value >= 0:
             hi, slack = self.len_of(stop.left), stop.right.value
+        if hi and self.env[hi].kind == 'list' and any(
+                isinstance(n, ast.Name) and n.id == hi and isinstance(n.ctx, ast.Store)
+                for n in ast.walk(ast.Module(body=s.body, type_ignores=[]))):
+            hi = None                          # a list rebound in the loop can change length
         return (lo, hi, slack) if lo is not None or hi else None
 
     def len_of(self, e):
@@ -904,9 +970,11 @@ class Compiler:
         nonneg = lo is not None and lo + off >= 0
         return nonneg, nonneg and ((hi == name and off <= slack) or off <= versioned.get(name, -1 << 62))
 
-    def element(self, sub):
-        """Index an array: Python's negative indices, numpy's IndexError. Returns (array, index)."""
+    def element(self, sub, store=False):
+        """Index an array or a list: Python's negative indices; numpy's IndexError for arrays,
+        Python's for lists. Returns (C array, index)."""
         name = sub.value.id
+        is_list = self.env[name].kind == 'list'
         raw = self.coerce(self.expr(sub.slice)[0], self.typeof(sub.slice), T.INT)
         n = f'v_{name}__n'
         nonneg, inbounds = self.index_facts(name, sub.slice)
@@ -915,9 +983,94 @@ class Compiler:
             self.emit(f'int64_t {t0} = {raw}, {t1} = {t0};')
         else:
             self.emit(f'int64_t {t0} = {raw}, {t1} = {t0} < 0 ? {t0} + {n} : {t0};')
-        if self.boundscheck and not inbounds:
+        if is_list and not inbounds:    # Python's lists always check (boundscheck is about arrays)
+            self.emit(f'if ((uint64_t){t1} >= (uint64_t){n}) SJ_FAIL({LIST_INDEX_ERROR}, {self.line(sub)}, {1 if store else 0}, 0);')
+        elif self.boundscheck and not inbounds:
             self.emit(f'if ((uint64_t){t1} >= (uint64_t){n}) SJ_FAIL({INDEX_ERROR}, {self.line(sub)}, {t0}, {n});')
         return f'v_{name}', t1
+
+    def elem_flag(self, name, idx):
+        t = self.env[name]
+        if t.kind == 'array':
+            return '1'
+        return f'v_{name}__np[{idx}]' if t.elem.np == 'dyn' else flag_of(t.elem)
+
+    def store_elem(self, target, v, vt):
+        """target[i] = v (already computed): the index is evaluated and checked now."""
+        name = target.value.id
+        et = self.env[name].elem
+        val = self.hold(self.coerce(v[0], vt, et), et)
+        flag = self.hold_flag(v[1])
+        arr, idx = self.element(target, store=True)
+        self.emit(f'{arr}[{idx}] = {val};')
+        if self.env[name].kind == 'list' and et.np == 'dyn':
+            self.emit(f'v_{name}__np[{idx}] = {flag};')
+
+    def make_list(self, name, v, s):
+        """Build a list into a temporary (so an error midway leaves the old list bound, as in
+        Python), then free the old one and bind the new."""
+        lt = self.env[name]
+        et = lt.elem
+        dyn = et.np == 'dyn'
+        line = self.line(s)
+        p, pf, n = self.temp(), self.temp(), self.temp()
+        self.owned.append((p, et.ctype))
+        if dyn:
+            self.owned.append((pf, 'int'))
+
+        def alloc(count):
+            self.emit(f'int64_t {n} = 0;')
+            self.emit(f'{p} = malloc(sizeof({et.ctype}) * (size_t)({count} > 0 ? {count} : 1));')
+            self.emit(f'if (!{p}) SJ_FAIL({MEMORY_ERROR}, {line}, 0, 0);')
+            if dyn:
+                self.emit(f'{pf} = malloc(sizeof(int) * (size_t)({count} > 0 ? {count} : 1));')
+                self.emit(f'if (!{pf}) SJ_FAIL({MEMORY_ERROR}, {line}, 0, 0);')
+
+        def push(c, f, t):
+            self.emit(f'{p}[{n}] = {self.coerce(c, t, et)};' + (f' {pf}[{n}] = {f};' if dyn else '') + f' {n}++;')
+        if isinstance(v, ast.ListComp):              # its single iterable gives the capacity
+            d = self.iterable(v.generators[0].iter)
+            saved, saved_c = {}, {}
+            cnt, elem = self.iter_prep(d)
+            alloc(cnt)
+            k = self.temp()
+            self.open(f'for (uint64_t {k} = 0; {k} < {cnt}; {k}++)')
+            try:
+                self.comp_bind_values(v.generators[0].target, elem(k), saved, saved_c)
+                for c in v.generators[0].ifs:
+                    self.emit(f'if (!({self.truth(self.expr(c)[0], self.typeof(c))})) continue;')
+                c, f = self.expr(v.elt)
+                push(c, f, self.typeof(v.elt))
+            finally:
+                self.close()
+                self.restore(saved, saved_c)
+        else:
+            lit, k = (v, None) if isinstance(v, ast.List) else \
+                ((v.left, v.right) if isinstance(v.left, ast.List) else (v.right, v.left))
+            kc = None
+            if k is not None and k is v.left:          # k * [..]: k first, as Python evaluates it
+                kc = self.hold(self.coerce(self.expr(k)[0], self.typeof(k), T.INT), T.INT)
+            vals = []
+            for x in lit.elts:
+                c, f = self.expr(x)
+                vals.append((self.hold(c, self.typeof(x)), self.hold_flag(f), self.typeof(x)))
+            if k is not None and kc is None:
+                kc = self.hold(self.coerce(self.expr(k)[0], self.typeof(k), T.INT), T.INT)
+            if k is None:
+                alloc(str(len(vals)))
+                for c, f, t in vals:
+                    push(c, f, t)
+            else:
+                reps = self.hold(f'({kc} > 0 ? {kc} : 0)', T.INT)
+                alloc(f'{reps} * {len(vals)}')
+                r = self.temp()
+                self.open(f'for (int64_t {r} = 0; {r} < {reps}; {r}++)')
+                for c, f, t in vals:
+                    push(c, f, t)
+                self.close()
+        self.emit(f'free(v_{name}); v_{name} = {p}; v_{name}__n = {n}; {p} = NULL;')
+        if dyn:
+            self.emit(f'free(v_{name}__np); v_{name}__np = {pf}; {pf} = NULL;')
 
     def tuple_var(self, name):
         t = self.env[name]
@@ -950,10 +1103,7 @@ class Compiler:
             if isinstance(x, ast.Name):
                 self.assign(x.id, v, et)
             elif isinstance(x, ast.Subscript):
-                at = self.env[x.value.id]
-                val = self.hold(self.coerce(v[0], et, at.elem), at.elem)
-                arr, idx = self.element(x)
-                self.emit(f'{arr}[{idx}] = {val};')
+                self.store_elem(x, v, et)
             else:
                 self.assign_tuple(x, v, et)
 
@@ -1049,7 +1199,8 @@ class Compiler:
             return self.tuple_var(e.value.id)[self.tuple_index(e)]
         if isinstance(e, ast.Subscript):
             arr, idx = self.element(e)
-            return self.hold(f'{arr}[{idx}]', self.env[e.value.id].elem), '1'
+            name = e.value.id
+            return self.hold(f'{arr}[{idx}]', self.env[name].elem), self.hold_flag(self.elem_flag(name, idx))
         if isinstance(e, ast.Call):
             return self.call(e)
         raise AssertionError(e)

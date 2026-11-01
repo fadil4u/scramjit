@@ -324,3 +324,96 @@ def test_math_imported_names():
     f = scram(ns['g'], fallback=False)
     for x in (4.0, 2.0, -1.0, 0.0):
         same(f, x)
+
+
+# ---- lists that never change size
+
+@strict
+def blur3(src, dst):
+    w = [0.25, 0.5, 0.25]
+    for i in range(1, len(src) - 1):
+        dst[i] = w[0] * src[i - 1] + w[1] * src[i] + w[2] * src[i + 1]
+    return len(w)
+
+
+@strict
+def lis(a):
+    """Longest increasing subsequence, O(n^2) DP over a list."""
+    best = [1] * len(a)
+    for i in range(len(a)):
+        for j in range(i):
+            if a[j] < a[i] and best[j] + 1 > best[i]:
+                best[i] = best[j] + 1
+    return max(best, default=0)
+
+
+@strict
+def squares(a, t):
+    sq = [v * v for v in a if v > t]
+    s = 0.0
+    for i, v in enumerate(sq):
+        s += v * (i + 1)
+    return s + len(sq)
+
+
+@strict
+def list_mixes_kinds(a):
+    acc = [0.0] * 3
+    acc[0] = a[0]          # an element becomes np.float64; the others stay Python floats
+    acc[1] += 1.5
+    return acc[0] / 0.0 if a[0] > 10 else acc[1] + acc[2] + acc[0]
+
+
+@strict
+def list_errors(n, i, j):
+    w = [n] * n
+    w[i] = 5
+    return w[j]
+
+
+@strict
+def rebuild(n):
+    w = [0] * 2
+    for k in range(n):
+        w = [k, k + 1, k + 2]
+    return w[-1] + len(w)
+
+
+@strict
+def rev_list(a):
+    w = [v + 1.0 for v in a]
+    s = 0.0
+    for v in reversed(w):
+        s = s * 0.5 + v
+    return s + sum(w, 0.0) + min(w) + max(x for x in w)
+
+
+def test_lists():
+    rng = np.random.default_rng(23)
+    for n in (0, 1, 3, 12):
+        a = rng.random(n)
+        same(blur3, a, np.zeros(n))
+        same(lis, rng.integers(0, 10, n).astype(np.int64))
+        same(squares, a, 0.3)
+        same(rebuild, n)
+        if n:
+            same(list_mixes_kinds, a)
+            same(list_mixes_kinds, a * 100)
+            same(rev_list, a)
+    for n, i, j in [(3, 0, 2), (3, -1, -3), (3, 3, 0), (3, 0, 5), (0, 0, 0), (2, -3, 0)]:
+        same(list_errors, n, i, j)
+
+
+def aliases_a_list(n):
+    w = [1, 2]
+    v = w
+    v[0] = n
+    return w[0]
+
+
+def test_list_aliasing_falls_back():
+    import warnings
+    from scramjit import FallbackWarning
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', FallbackWarning)
+        same(scram(aliases_a_list), 9)

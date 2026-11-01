@@ -5,7 +5,9 @@ Calling convention: `int f(args..., int64_t *sj_io)`. The int is 0 or a status b
 details (IndexError: the index and the size; others: a message number).
 """
 
-INDEX_ERROR, ZERO_DIVISION, VALUE_ERROR, OVERFLOW_ERROR = 1, 2, 3, 4
+INDEX_ERROR, ZERO_DIVISION, VALUE_ERROR, OVERFLOW_ERROR, LIST_INDEX_ERROR, MEMORY_ERROR = 1, 2, 3, 4, 5, 6
+
+LIST_INDEX_MESSAGES = ['list index out of range', 'list assignment index out of range']
 
 ZERO_DIVISION_MESSAGES = [
     'division by zero',                       # int / int
@@ -45,11 +47,16 @@ def exception(status, io):
         return ValueError(VALUE_ERROR_MESSAGES[io[2]])
     if status == OVERFLOW_ERROR:
         return OverflowError(OVERFLOW_ERROR_MESSAGES[io[2]])
+    if status == LIST_INDEX_ERROR:
+        return IndexError(LIST_INDEX_MESSAGES[io[2]])
+    if status == MEMORY_ERROR:
+        return MemoryError()
     return SystemError(f'scramjit: unknown status {status}')
 
 
 PRELUDE = r'''
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 

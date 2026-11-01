@@ -62,6 +62,9 @@ def join(a, b):
         return a
     if a.is_number and b.is_number and a.kind == b.kind:
         return scalar(a.kind, 'dyn')
+    if a.kind == 'list' and b.kind == 'list':
+        e = join(a.elem, b.elem)
+        return None if e is None else list_of(e)
     if a.kind == 'tuple' and b.kind == 'tuple' and len(a.elem) == len(b.elem):
         elems = [join(x, y) for x, y in zip(a.elem, b.elem)]
         return None if None in elems else tuple_of(elems)
@@ -108,3 +111,14 @@ def arith_result(a, b, op):
 
 def compare_result(a, b):
     return scalar('bool', join_np(a.np, b.np))
+
+
+_LISTS = {}
+
+
+def list_of(elem):
+    """A list of numbers that never changes size: a heap array (and a numpy flag per element if
+    some elements may be numpy scalars)."""
+    if elem.name not in _LISTS:
+        _LISTS[elem.name] = Type(f'list[{elem.name}]', elem.ctype + ' *', 'list', elem=elem)
+    return _LISTS[elem.name]

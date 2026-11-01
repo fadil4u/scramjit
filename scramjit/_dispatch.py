@@ -76,11 +76,11 @@ def _arg_type(x):
     np = sys.modules.get('numpy')
     if np is not None:
         if t is np.ndarray:
-            if x.ndim == 1 and x.flags.c_contiguous:
-                if x.dtype == np.float64:
-                    return T.array(T.NP_FLOAT64, x.flags.writeable)
-                if x.dtype == np.int64:
-                    return T.array(T.NP_INT64, x.flags.writeable)
+            if x.ndim >= 1 and x.flags.c_contiguous and x.dtype.isnative:
+                name = x.dtype.name
+                elem = T.NP_FLOAT64 if name == 'float64' else T.NP_INT64 if name == 'int64' else T.NARROW.get(name)
+                if elem is not None:
+                    return T.array(elem, x.flags.writeable, x.ndim)
             return None
         if t is np.float64:
             return T.NP_FLOAT64
@@ -254,7 +254,7 @@ class Function:
         for x, t in zip(args, entry.types):
             if t.kind == 'array':
                 cargs.append(x)
-                cargs.append(x.shape[0])
+                cargs.extend(x.shape)
             elif t.kind == 'tuple':
                 cargs.extend(v.item() if et.np else v for v, et in zip(x, t.elem))
             elif t.np:
@@ -263,10 +263,10 @@ class Function:
                 cargs.append(x)
         if entry.libm is not None:
             cargs.append(entry.libm)
-        io = bytearray(32 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0))
+        io = bytearray(40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0))
         status = entry.kernel(*cargs, io)
         if status:
-            slots = [int.from_bytes(io[i:i + 8], 'little', signed=True) for i in range(0, 32, 8)]
+            slots = [int.from_bytes(io[i:i + 8], 'little', signed=True) for i in range(0, 40, 8)]
             _raise_at(exception(status, slots), self._filename, slots[1], self.__name__)
         r = entry.ret
         if r is T.NONE:
@@ -282,8 +282,9 @@ class Function:
             self._np = numpy
         if r.kind == 'float':
             v = struct.unpack_from('<d', io, at)[0]
-            return self._np.float64(v) if np else v
-        v = int.from_bytes(io[at:at + 8], 'little', signed=True)
-        if r.kind == 'bool':
-            return self._np.bool_(v) if np else bool(v)
-        return self._np.int64(v) if np else v
+        else:
+            v = int.from_bytes(io[at:at + 8], 'little', signed=True)
+        if np:
+            name = r.name[3:] if r.np is True else {'int': 'int64', 'float': 'float64', 'bool': 'bool_'}[r.kind]
+            return getattr(self._np, 'bool_' if name == 'bool' else name)(v)
+        return bool(v) if r.kind == 'bool' else v

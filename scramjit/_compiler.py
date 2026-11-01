@@ -22,10 +22,10 @@ from . import _types as T
 from ._errors import Unsupported
 import sys
 
-from ._runtime import (INDEX_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, OVERFLOW_ERROR, VALUE_ERROR,
-                       ZERO_DIVISION)
+from ._runtime import (INDEX_ERROR, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
+                       OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION)
 
-BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'sum', 'any', 'all')
+BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'round', 'sum', 'any', 'all')
 MATH_CONSTANTS = {'pi': math.pi, 'e': math.e, 'tau': math.tau, 'inf': math.inf, 'nan': math.nan}
 INT64_MIN, INT64_MAX = -(1 << 63), (1 << 63) - 1
 ARITH = {ast.Add: 'Add', ast.Sub: 'Sub', ast.Mult: 'Mult', ast.Div: 'Div', ast.FloorDiv: 'FloorDiv',
@@ -100,6 +100,7 @@ class Compiler:
         self.depth = 1
         self.ntemp = 0
         self.uses_libm = False
+        self.aliases = {}
         self.owned = []        # temporaries holding a list being built (freed on every exit)
         self.cnames = {}       # comprehension variable -> (C name, flag), shadowing the function's
         self.facts = {}        # loop variable -> (lowest value, array whose len() bounds it, slack)
@@ -263,6 +264,8 @@ class Compiler:
     # counted loop that reads elements by index; no iterator exists at run time.
     def iterable(self, it):
         if isinstance(it, ast.Name) and it.id in self.env and self.env[it.id].kind in ('array', 'list'):
+            if self.env[it.id].kind == 'array' and self.env[it.id].ndim != 1:
+                self.fail(it, 'iterating over a multi-dimensional array (rows are views, not compiled yet)')
             return ('array', it.id)
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Name):
             name = it.func.id
@@ -336,12 +339,21 @@ class Compiler:
             self.fail(sub, 'a tuple index out of range')
         return i % len(t.elem)
 
+    def indices(self, sub):
+        t = self.env[sub.value.id]
+        nd = t.ndim if t.kind == 'array' else 1
+        idx = sub.slice.elts if isinstance(sub.slice, ast.Tuple) else [sub.slice]
+        if len(idx) != nd:
+            self.fail(sub, f'{len(idx)} indices into {t.name} (slices and views are not compiled yet)')
+        return idx
+
     def index_type(self, sub):
-        if isinstance(sub.slice, (ast.Slice, ast.Tuple)):
-            self.fail(sub, 'slices and multi-dimensional indexing')
-        t = self.typeof(sub.slice)
-        if t.kind != 'int':
-            self.fail(sub, f'an index of type {t.name}')
+        for k in self.indices(sub):
+            if isinstance(k, ast.Slice):
+                self.fail(sub, 'slices (views are not compiled yet)')
+            t = self.typeof(k)
+            if t.kind != 'int':
+                self.fail(sub, f'an index of type {t.name}')
 
     def binop_type(self, a, b, op, node):
         if not (a.is_number and b.is_number):
@@ -388,7 +400,13 @@ class Compiler:
             if isinstance(e.value, ast.Name) and e.value.id not in self.env \
                     and self.globals.get(e.value.id) is math and e.attr in MATH_CONSTANTS:
                 return T.FLOAT
-            self.fail(e, 'attribute access')
+            if isinstance(e.value, ast.Name) and e.value.id in self.env and self.env[e.value.id].kind == 'array':
+                t = self.env[e.value.id]
+                if e.attr == 'shape':
+                    return T.tuple_of([T.INT] * t.ndim)
+                if e.attr in ('ndim', 'size'):
+                    return T.INT
+            self.fail(e, f'the attribute .{e.attr}')
         if isinstance(e, ast.BinOp):
             op = ARITH.get(type(e.op))
             if op is None:
@@ -426,6 +444,10 @@ class Compiler:
                 self.fail(e, f'a conditional expression of type {t.name}')
             return t
         if isinstance(e, ast.Subscript):
+            if self.is_shape(e.value):
+                if self.shape_index(e) is None:
+                    self.fail(e, 'a.shape indexed with something other than a constant in range')
+                return T.INT
             if isinstance(e.value, ast.Name) and e.value.id in self.env and self.env[e.value.id].kind == 'tuple':
                 return self.env[e.value.id].elem[self.tuple_index(e)]
             at = self.array_of(e)
@@ -506,6 +528,10 @@ class Compiler:
             return self.join_all(e, args, f'{name}()')
         if len(args) != 1:
             self.fail(e, f'{name}() with {len(args)} arguments')
+        if name == 'round':
+            if args[0].kind != 'float' and args[0].np is not False:
+                self.fail(e, 'round() of a numpy int')
+            return T.INT
         return T.INT if name == 'int' else T.FLOAT
 
     # ---- reductions: sum, min, max, any, all over an iterable or a comprehension, fused into
@@ -603,11 +629,12 @@ class Compiler:
     def generate(self):
         self.infer()
         da_block(self, self.f.body, set(self.params))
+        self.find_aliases()
         params = []
         for p in self.params:
             t = self.env[p]
             if t.kind == 'array':
-                params += [f'{t.ctype}v_{p}', f'int64_t v_{p}__n']
+                params += [f'{t.ctype}v_{p}', f'int64_t v_{p}__n'] + [f'int64_t v_{p}__n{k}' for k in range(1, t.ndim)]
             elif t.kind == 'tuple':
                 params += [f'{et.ctype} v_{p}__{i}' for i, et in enumerate(t.elem)]
             else:
@@ -777,7 +804,7 @@ class Compiler:
             # copy without those checks; otherwise the checked copy raises where Python would
             extra = self.version_candidates(s, var, fact)
             if extra:
-                cond = ' && '.join(f'{te} <= v_{arr}__n - ({c})' for arr, c in sorted(extra.items()))
+                cond = ' && '.join(f'{te} <= {self.extent(arr, k)} - ({c})' for (arr, k), c in sorted(extra.items()))
                 self.open(f'if ({te} > {ts} && {cond})')
                 self.unit_loop(s, var, ts, te, fact + (extra,))
                 self.close('} else {')
@@ -877,7 +904,7 @@ class Compiler:
         inner = d[1]
         if inner[0] == 'zip':
             inner = inner[1][0]
-        hi = inner[1] if inner[0] == 'array' and lo == 0 else None
+        hi = (inner[1], 0) if inner[0] == 'array' and lo == 0 else None
         return var, (lo, hi, 0)
 
     def unit_loop(self, s, var, ts, te, fact):
@@ -900,24 +927,30 @@ class Compiler:
         self.close()
 
     def version_candidates(self, s, var, fact):
-        """Arrays indexed as var + c in the loop, nonnegative but not proven below len(): the
-        largest c for each."""
+        """Indexes var + c on some axis of an array, nonnegative but not proven below that axis's
+        extent: the largest c for each (array, axis)."""
         self.facts[var] = fact
         extra = {}
         try:
             for n in ast.walk(ast.Module(body=s.body, type_ignores=[])):
-                if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name) \
-                        and n.value.id in self.env and self.env[n.value.id].kind == 'array':
-                    idx, off = n.slice, 0
-                    if isinstance(idx, ast.BinOp) and isinstance(idx.op, (ast.Add, ast.Sub)) \
-                            and isinstance(idx.right, ast.Constant) and type(idx.right.value) is int:
-                        off = idx.right.value if isinstance(idx.op, ast.Add) else -idx.right.value
-                        idx = idx.left
-                    if not (isinstance(idx, ast.Name) and idx.id == var):
+                if not (isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)
+                        and n.value.id in self.env and self.env[n.value.id].kind == 'array'):
+                    continue
+                name = n.value.id
+                idxs = n.slice.elts if isinstance(n.slice, ast.Tuple) else [n.slice]
+                if len(idxs) != self.env[name].ndim:
+                    continue
+                for axis, idx in enumerate(idxs):
+                    base, off = idx, 0
+                    if isinstance(base, ast.BinOp) and isinstance(base.op, (ast.Add, ast.Sub)) \
+                            and isinstance(base.right, ast.Constant) and type(base.right.value) is int:
+                        off = base.right.value if isinstance(base.op, ast.Add) else -base.right.value
+                        base = base.left
+                    if not (isinstance(base, ast.Name) and base.id == var):
                         continue
-                    nonneg, inbounds = self.index_facts(n.value.id, n.slice)
+                    nonneg, inbounds = self.index_facts(name, idx, axis)
                     if nonneg and not inbounds:
-                        extra[n.value.id] = max(off, extra.get(n.value.id, off))
+                        extra[(name, axis)] = max(off, extra.get((name, axis), off))
         finally:
             self.facts.pop(var, None)
         return extra
@@ -943,20 +976,75 @@ class Compiler:
         if hi is None and isinstance(stop, ast.BinOp) and isinstance(stop.op, ast.Sub) \
                 and isinstance(stop.right, ast.Constant) and type(stop.right.value) is int and stop.right.value >= 0:
             hi, slack = self.len_of(stop.left), stop.right.value
-        if hi and self.env[hi].kind == 'list' and any(
-                isinstance(n, ast.Name) and n.id == hi and isinstance(n.ctx, ast.Store)
+        if hi and self.env[hi[0]].kind == 'list' and any(
+                isinstance(n, ast.Name) and n.id == hi[0] and isinstance(n.ctx, ast.Store)
                 for n in ast.walk(ast.Module(body=s.body, type_ignores=[]))):
             hi = None                          # a list rebound in the loop can change length
         return (lo, hi, slack) if lo is not None or hi else None
 
     def len_of(self, e):
+        """(array, axis) if e is that axis's extent: len(a), a.shape[k], or a variable assigned
+        from one of those exactly once (h, w = a.shape)."""
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and self.is_builtin(e.func.id, 'len') \
-                and len(e.args) == 1 and isinstance(e.args[0], ast.Name):
-            return e.args[0].id
+                and len(e.args) == 1 and isinstance(e.args[0], ast.Name) and e.args[0].id in self.env \
+                and self.env[e.args[0].id].kind in ('array', 'list'):
+            return e.args[0].id, 0
+        if isinstance(e, ast.Name):
+            return self.aliases.get(e.id)
+        k = self.shape_index(e)
+        return k
+
+    def shape_index(self, e):
+        """(array, k) for a.shape[k] on an array parameter."""
+        if isinstance(e, ast.Subscript) and self.is_shape(e.value) and isinstance(e.slice, ast.Constant) \
+                and type(e.slice.value) is int:
+            nd = self.env[e.value.value.id].ndim
+            if -nd <= e.slice.value < nd:
+                return e.value.value.id, e.slice.value % nd
         return None
 
-    def index_facts(self, name, idx):
-        """(never negative, always below len(name)) for an index expression, from loop facts."""
+    def is_shape(self, e):
+        return isinstance(e, ast.Attribute) and e.attr == 'shape' and isinstance(e.value, ast.Name) \
+            and e.value.id in self.env and self.env[e.value.id].kind == 'array'
+
+    def find_aliases(self):
+        """Variables assigned exactly once, from an extent: they stand for it in range facts."""
+        stores = {}
+        for n in ast.walk(self.f):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                stores[n.id] = stores.get(n.id, 0) + 1
+        self.aliases = {}
+        for n in ast.walk(self.f):
+            if not isinstance(n, ast.Assign) or len(n.targets) != 1:
+                continue
+            t, v = n.targets[0], n.value
+            if isinstance(t, ast.Name) and stores.get(t.id) == 1:
+                a = self.len_of(v) if not isinstance(v, ast.Name) else None
+                if a:
+                    self.aliases[t.id] = a
+            elif isinstance(t, ast.Tuple) and self.is_shape(v):
+                for k, x in enumerate(t.elts):
+                    if isinstance(x, ast.Name) and stores.get(x.id) == 1 and k < self.env[v.value.id].ndim:
+                        self.aliases[x.id] = (v.value.id, k)
+
+    def wrap_mod(self, node):
+        """Whether node is (i + c) % n, where a loop proves 0 <= i < n (so n >= 1) and |c| <= 1."""
+        if not isinstance(node, ast.BinOp):
+            return False
+        x, off = node.left, 0
+        if isinstance(x, ast.BinOp) and isinstance(x.op, (ast.Add, ast.Sub)) \
+                and isinstance(x.right, ast.Constant) and type(x.right.value) is int:
+            off = x.right.value if isinstance(x.op, ast.Add) else -x.right.value
+            x = x.left
+        if abs(off) > 1 or not isinstance(x, ast.Name) or x.id not in self.facts:
+            return False
+        lo, hi, slack = self.facts[x.id][:3]
+        return lo is not None and lo >= 0 and hi is not None and slack >= 0 and self.len_of(node.right) == hi
+
+    def index_facts(self, name, idx, axis=0):
+        """(never negative, always below name's extent on axis) for an index, from loop facts."""
+        if isinstance(idx, ast.BinOp) and isinstance(idx.op, ast.Mod) and self.len_of(idx.right) == (name, axis):
+            return True, True        # x % n is in [0, n) (n == 0 raises ZeroDivisionError first)
         off = 0
         if isinstance(idx, ast.BinOp) and isinstance(idx.op, (ast.Add, ast.Sub)) \
                 and isinstance(idx.right, ast.Constant) and type(idx.right.value) is int:
@@ -968,26 +1056,33 @@ class Compiler:
         lo, hi, slack = fact[:3]
         versioned = fact[3] if len(fact) > 3 else {}
         nonneg = lo is not None and lo + off >= 0
-        return nonneg, nonneg and ((hi == name and off <= slack) or off <= versioned.get(name, -1 << 62))
+        return nonneg, nonneg and ((hi == (name, axis) and off <= slack) or off <= versioned.get((name, axis), -1 << 62))
 
     def element(self, sub, store=False):
-        """Index an array or a list: Python's negative indices; numpy's IndexError for arrays,
-        Python's for lists. Returns (C array, index)."""
+        """Index an array or a list: Python's negative indices on every axis; numpy's IndexError
+        (naming the axis) for arrays, Python's for lists. Returns (C array, linear index)."""
         name = sub.value.id
         is_list = self.env[name].kind == 'list'
-        raw = self.coerce(self.expr(sub.slice)[0], self.typeof(sub.slice), T.INT)
-        n = f'v_{name}__n'
-        nonneg, inbounds = self.index_facts(name, sub.slice)
-        t0, t1 = self.temp(), self.temp()
-        if nonneg:                      # proven: no negative-index adjustment
-            self.emit(f'int64_t {t0} = {raw}, {t1} = {t0};')
-        else:
-            self.emit(f'int64_t {t0} = {raw}, {t1} = {t0} < 0 ? {t0} + {n} : {t0};')
-        if is_list and not inbounds:    # Python's lists always check (boundscheck is about arrays)
-            self.emit(f'if ((uint64_t){t1} >= (uint64_t){n}) SJ_FAIL({LIST_INDEX_ERROR}, {self.line(sub)}, {1 if store else 0}, 0);')
-        elif self.boundscheck and not inbounds:
-            self.emit(f'if ((uint64_t){t1} >= (uint64_t){n}) SJ_FAIL({INDEX_ERROR}, {self.line(sub)}, {t0}, {n});')
-        return f'v_{name}', t1
+        idxs = self.indices(sub)
+        raws = [self.coerce(self.expr(k)[0], self.typeof(k), T.INT) for k in idxs]
+        raws = [self.hold(r, T.INT) for r in raws]            # all indices first, in order
+        lin = None
+        for axis, (k, raw) in enumerate(zip(idxs, raws)):
+            n = self.extent(name, axis)
+            nonneg, inbounds = self.index_facts(name, k, axis)
+            t = self.temp()
+            if nonneg:                  # proven: no negative-index adjustment
+                self.emit(f'int64_t {t} = {raw};')
+            else:
+                self.emit(f'int64_t {t} = {raw} < 0 ? {raw} + {n} : {raw};')
+            if is_list and not inbounds:    # Python's lists always check
+                self.emit(f'if ((uint64_t){t} >= (uint64_t){n}) SJ_FAIL({LIST_INDEX_ERROR}, {self.line(sub)}, {1 if store else 0}, 0);')
+            elif not is_list and self.boundscheck and not inbounds:
+                self.emit(f'if ((uint64_t){t} >= (uint64_t){n}) {{ sj_io[4] = {axis}; SJ_FAIL({INDEX_ERROR}, {self.line(sub)}, {raw}, {n}); }}')
+            lin = t if lin is None else f'({lin} * {n} + {t})'
+        if len(idxs) > 1:
+            lin = self.hold(lin, T.INT)
+        return f'v_{name}', lin
 
     def elem_flag(self, name, idx):
         t = self.env[name]
@@ -999,9 +1094,19 @@ class Compiler:
         """target[i] = v (already computed): the index is evaluated and checked now."""
         name = target.value.id
         et = self.env[name].elem
-        val = self.hold(self.coerce(v[0], vt, et), et)
+        dtype = et.name[3:]
         flag = self.hold_flag(v[1])
-        arr, idx = self.element(target, store=True)
+        arr, idx = self.element(target, store=True)       # numpy checks the index first
+        if dtype in T.INT_RANGE and vt.kind in ('int', 'bool') and vt.np is not True:
+            # numpy (NEP 50): a Python int that doesn't fit the dtype raises OverflowError; numpy
+            # scalars are cast (and wrap)
+            lo, hi = T.INT_RANGE[dtype]
+            iv = self.hold(self.coerce(v[0], vt, T.INT), T.INT)
+            cond = f'{iv} < {c_int(lo)} || {iv} > {c_int(hi)}'
+            if vt.np == 'dyn':
+                cond = f'!{v[1]} && ({cond})'
+            self.emit(f'if ({cond}) SJ_FAIL({INT_BOUNDS_ERROR}, {self.line(target)}, {iv}, {NARROW_INT_DTYPES.index(dtype)});')
+        val = self.hold(self.coerce(v[0], vt, et), et)
         self.emit(f'{arr}[{idx}] = {val};')
         if self.env[name].kind == 'list' and et.np == 'dyn':
             self.emit(f'v_{name}__np[{idx}] = {flag};')
@@ -1088,7 +1193,12 @@ class Compiler:
             return out
         if isinstance(e, ast.Name):
             return [(self.hold(c, et), self.hold_flag(f)) for (c, f), et in zip(self.tuple_var(e.id), t.elem)]
+        if self.is_shape(e):
+            return [(self.extent(e.value.id, k), '0') for k in range(len(t.elem))]
         raise AssertionError(e)
+
+    def extent(self, name, k):
+        return f'v_{name}__n' if k == 0 else f'v_{name}__n{k}'
 
     def assign_tuple(self, target, vals, vt):
         """Assign a tuple (already computed in full, as Python does) to a name or to targets."""
@@ -1147,6 +1257,11 @@ class Compiler:
             t = self.env[e.id]
             return f'v_{e.id}', (f'v_{e.id}__np' if t.np == 'dyn' else flag_of(t))
         if isinstance(e, ast.Attribute):
+            if e.attr in ('ndim', 'size') and isinstance(e.value, ast.Name) and e.value.id in self.env:
+                t = self.env[e.value.id]
+                if e.attr == 'ndim':
+                    return f'{t.ndim}LL', '0'
+                return '(' + ' * '.join(self.extent(e.value.id, k) for k in range(t.ndim)) + ')', '0'
             return c_float(MATH_CONSTANTS[e.attr]), '0'
         if isinstance(e, ast.BinOp):
             lt = self.typeof(e.left)
@@ -1194,6 +1309,9 @@ class Compiler:
             self.emit(f'{r} = {self.coerce(c, self.typeof(e.orelse), t)}; {rf} = {f};')
             self.close()
             return r, rf
+        if isinstance(e, ast.Subscript) and self.is_shape(e.value):
+            arr, k = self.shape_index(e)
+            return self.extent(arr, k), '0'
         if isinstance(e, ast.Subscript) and self.env.get(getattr(e.value, 'id', None)) is not None \
                 and self.env[e.value.id].kind == 'tuple':
             return self.tuple_var(e.value.id)[self.tuple_index(e)]
@@ -1230,6 +1348,9 @@ class Compiler:
                 return f'({fa} {sym} {fb})', npf
             return f'sj_{op.lower()[:3]}((int64_t){a}, (int64_t){b})', npf
         both_int = at.kind != 'float' and bt.kind != 'float'
+        wrap = self.wrap_mod(node) if op == 'Mod' and npf == '0' else None
+        if wrap:                                  # (i + c) % n with 0 <= i < n, |c| <= 1: n >= 1, so
+            return f'({a} < 0 ? {a} + {b} : {a} >= {b} ? {a} - {b} : {a})', npf   # no division
         if both_int and op in ('FloorDiv', 'Mod') and isinstance(right, ast.Constant) \
                 and type(right.value) is int and right.value > 0 and right.value & (right.value - 1) == 0:
             k = right.value.bit_length() - 1      # x // 2**k is an arithmetic shift, x % 2**k a mask:
@@ -1330,6 +1451,8 @@ class Compiler:
             return self.coerce(c, t, T.FLOAT), '0'
         if t.kind != 'float':
             return self.coerce(c, t, T.INT), '0'
+        if name == 'round':                 # halves to even: C's rint in the default rounding mode
+            c = f'rint((double)({c}))'
         v = self.hold(c, T.FLOAT)
         self.emit(f'if ({v} != {v}) SJ_FAIL({VALUE_ERROR}, {line}, 0, 0);')
         self.emit(f'if (isinf({v})) SJ_FAIL({OVERFLOW_ERROR}, {line}, 0, 0);')

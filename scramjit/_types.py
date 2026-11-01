@@ -7,7 +7,7 @@ So every scalar type records whether it is a Python number or a numpy scalar.
 
 
 class Type:
-    __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable')
+    __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable', 'ndim')
 
     def __init__(self, name, ctype, kind, np=False, elem=None, writable=True):
         self.name = name          # how signatures print it
@@ -16,6 +16,7 @@ class Type:
         self.np = np              # a numpy scalar rather than a Python number
         self.elem = elem          # arrays: the element type (a numpy scalar type)
         self.writable = writable  # arrays
+        self.ndim = 0             # arrays: dimensions
 
     def __repr__(self):
         return self.name
@@ -37,6 +38,24 @@ INT_DYN = Type('int | np.int64', 'int64_t', 'int', np='dyn')
 FLOAT_DYN = Type('float | np.float64', 'double', 'float', np='dyn')
 BOOL_DYN = Type('bool | np.bool', 'int', 'bool', np='dyn')
 NONE = Type('None', 'void', 'none')
+
+# numpy scalars of the narrow dtypes: values read from such arrays. Loaded, compared and stored;
+# arithmetic on them follows numpy's NEP 50 rules, not compiled yet.
+NARROW = {
+    'float32': Type('np.float32', 'float', 'float', np=True),
+    'int32': Type('np.int32', 'int32_t', 'int', np=True),
+    'int16': Type('np.int16', 'int16_t', 'int', np=True),
+    'int8': Type('np.int8', 'int8_t', 'int', np=True),
+    'uint32': Type('np.uint32', 'uint32_t', 'int', np=True),
+    'uint16': Type('np.uint16', 'uint16_t', 'int', np=True),
+    'uint8': Type('np.uint8', 'uint8_t', 'int', np=True),
+}
+INT_RANGE = {'int32': (-(1 << 31), (1 << 31) - 1), 'int16': (-(1 << 15), (1 << 15) - 1), 'int8': (-128, 127),
+             'uint32': (0, (1 << 32) - 1), 'uint16': (0, 65535), 'uint8': (0, 255)}
+
+
+def is_narrow(t):
+    return t.np is True and t.name not in ('np.int64', 'np.float64', 'np.bool')
 
 _BY_KIND = {('int', False): INT, ('int', True): NP_INT64, ('int', 'dyn'): INT_DYN,
             ('float', False): FLOAT, ('float', True): NP_FLOAT64, ('float', 'dyn'): FLOAT_DYN,
@@ -60,6 +79,8 @@ def join(a, b):
     """The type of a variable that is assigned values of types a and b, or None."""
     if a is b:
         return a
+    if a.is_number and b.is_number and (is_narrow(a) or is_narrow(b)):
+        return None
     if a.is_number and b.is_number and a.kind == b.kind:
         return scalar(a.kind, 'dyn')
     if a.kind == 'list' and b.kind == 'list':
@@ -85,13 +106,15 @@ def tuple_of(elems):
 _ARRAYS = {}
 
 
-def array(elem, writable=True):
-    key = (elem.name, writable)
+def array(elem, writable=True, ndim=1):
+    key = (elem.name, writable, ndim)
     if key not in _ARRAYS:
-        name = {'np.int64': 'int64', 'np.float64': 'float64'}[elem.name] + '[:]'
+        name = elem.name[3:] + '[' + ', '.join([':'] * ndim) + ']'
         if not writable:
             name += ' (read-only)'
-        _ARRAYS[key] = Type(name, elem.ctype + ' *', 'array', elem=elem, writable=writable)
+        t = Type(name, elem.ctype + ' *', 'array', elem=elem, writable=writable)
+        t.ndim = ndim
+        _ARRAYS[key] = t
     return _ARRAYS[key]
 
 
@@ -101,7 +124,7 @@ def arith_result(a, b, op):
     Returns None when the combination isn't compiled (numpy bools in arithmetic, where numpy's
     rules differ from Python's).
     """
-    if (a.np and a.kind == 'bool') or (b.np and b.kind == 'bool'):
+    if (a.np and a.kind == 'bool') or (b.np and b.kind == 'bool') or is_narrow(a) or is_narrow(b):
         return None
     np = join_np(a.np, b.np)
     if a.kind == 'float' or b.kind == 'float' or op == 'Div':

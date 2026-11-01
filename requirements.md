@@ -360,8 +360,27 @@ with Python's list errors; `math` functions bit-exact, calling the host libm CPy
 wrapped in `mathmodule.c`'s logic. Findings: `sum()` of floats with the default int start
 returns the int 0 when empty, so it falls back with a hint to write `sum(..., 0.0)`; numpy ints
 have no `__floor__`, so `math.floor(np.int64(x))` goes through float (precision lost above 2**53)
-and `math.trunc` of one raises. Not yet: narrow dtypes (NEP 50), value-range narrowing, and the
-acceptance check on the M0 kernels, which needs 2-D arrays (M3).
+and `math.trunc` of one raises. Not yet: arithmetic on narrow dtypes (NEP 50), value-range
+narrowing, `map`/`filter`.
+
+**M0 kernels compiled (2026-11-01).** With C-contiguous n-D arrays (numpy's per-axis IndexError),
+`a.shape`/`ndim`/`size`, narrow dtypes loaded, compared and stored (a Python int that doesn't
+fit raises numpy's NEP 50 OverflowError, checked after the index, as numpy does; numpy ints
+cast and wrap) and `round()`, the three M0 kernels compile unchanged and match CPython bit for
+bit, errors included (`tests/test_kernels.py`); their generated C has no iterator or boxing
+code. Range facts now name (array, axis): extents read from `a.shape` into variables assigned
+once bound loops, `x % n` indexes in bounds, and `(i ± 1) % n` inside such a loop lowers to a
+compare. `bench/kernels.py`, arm64:
+
+| kernel | CPython | scramjit | hand C | vs CPython | vs hand C |
+|---|---|---|---|---|---|
+| gray_scott 256x256 | 119 ms | 0.51 ms | 0.20 ms | 233x | 2.5x |
+| flood_fill 512x512 | 244 ms | 4.7 ms | 2.5 ms | 52x | 1.9x |
+| viewshed 96x96 | 119 ms | 13.2 ms | 6.7 ms | 9x | 2.0x |
+
+viewshed's gap is CPython-exact `math.hypot` (vector_norm through the host table) against the
+hand C's plain `hypot`; gray_scott's is the wraparound compare repeated per access where the
+hand C computes it once per row.
 
 **M2: builtins, lists, narrowing.** Lowering rules for `enumerate`, `zip`, `map`, `filter`,
 comprehensions and the reductions; fixed-size lists as arrays; narrow types from annotations,

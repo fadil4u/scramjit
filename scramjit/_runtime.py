@@ -1,11 +1,14 @@
 """The C emitted ahead of every compiled function, and the exceptions its status codes stand for.
 
 Calling convention: `int f(args..., int64_t *sj_io)`. The int is 0 or a status below. sj_io has
-4 slots: [0] the return value's bits, [1] the Python line of a raised exception, [2] and [3]
-details (IndexError: the index and the size; others: a message number).
+at least 5 slots: [0] the return value's bits, [1] the Python line of a raised exception, [2],
+[3] and [4] details (IndexError: the index, the size and the axis; others: a message number).
+Tuples return through slots 4 onward.
 """
 
-INDEX_ERROR, ZERO_DIVISION, VALUE_ERROR, OVERFLOW_ERROR, LIST_INDEX_ERROR, MEMORY_ERROR = 1, 2, 3, 4, 5, 6
+INDEX_ERROR, ZERO_DIVISION, VALUE_ERROR, OVERFLOW_ERROR, LIST_INDEX_ERROR, MEMORY_ERROR, INT_BOUNDS_ERROR = \
+    1, 2, 3, 4, 5, 6, 7
+NARROW_INT_DTYPES = ['int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
 
 LIST_INDEX_MESSAGES = ['list index out of range', 'list assignment index out of range']
 
@@ -40,7 +43,7 @@ LIBM = ['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'asinh', 'acosh', 'atanh', 
 def exception(status, io):
     """The Python exception for a nonzero status and the sj_io slots."""
     if status == INDEX_ERROR:
-        return IndexError(f'index {io[2]} is out of bounds for axis 0 with size {io[3]}')
+        return IndexError(f'index {io[2]} is out of bounds for axis {io[4]} with size {io[3]}')
     if status == ZERO_DIVISION:
         return ZeroDivisionError(ZERO_DIVISION_MESSAGES[io[2]])
     if status == VALUE_ERROR:
@@ -51,6 +54,8 @@ def exception(status, io):
         return IndexError(LIST_INDEX_MESSAGES[io[2]])
     if status == MEMORY_ERROR:
         return MemoryError()
+    if status == INT_BOUNDS_ERROR:      # numpy (NEP 50): a Python int stored into a narrower dtype
+        return OverflowError(f'Python integer {io[2]} out of bounds for {NARROW_INT_DTYPES[io[3]]}')
     return SystemError(f'scramjit: unknown status {status}')
 
 

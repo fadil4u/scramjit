@@ -1,31 +1,50 @@
 """Copy what the site's live demo loads into Pyodide: cimo as one file, scramjit's package, and
 cimo's WebAssembly disassembler (docs/nn/wat.py in cimo).
 Run after changing scramjit (or to pick up a newer cimo):  python3 tools/sync_site.py
-cimo is taken from the environment, or from ../cimo/python next to this repository.
+cimo is the last commit of ../cimo next to this repository, never its uncommitted work; without a
+checkout, whatever cimo the environment has.
 """
 
+import io
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, '..')
 OUT = os.path.join(ROOT, 'docs', 'py')
 
 
+def committed_cimo(tmp):
+    """cimo's last commit, exported: a checkout's uncommitted work must not reach the site. None if
+    there is no checkout next to this repository."""
+    repo = os.path.join(ROOT, '..', 'cimo')
+    if not os.path.isdir(os.path.join(repo, '.git')):
+        return None
+    archive = subprocess.run(['git', '-C', repo, 'archive', 'HEAD', 'python', 'docs/nn/wat.py'], check=True, capture_output=True).stdout
+    tarfile.open(fileobj=io.BytesIO(archive)).extractall(tmp)
+    return tmp
+
+
 def main():
+    with tempfile.TemporaryDirectory() as tmp:
+        sync(committed_cimo(tmp))
+
+
+def sync(cimo_root):
     os.makedirs(os.path.join(OUT, 'scramjit'), exist_ok=True)
     for f in os.listdir(os.path.join(ROOT, 'scramjit')):
         if f.endswith('.py'):
             shutil.copy(os.path.join(ROOT, 'scramjit', f), os.path.join(OUT, 'scramjit', f))
     env = dict(os.environ)
-    cimo_src = os.path.join(ROOT, '..', 'cimo', 'python')
-    if os.path.isdir(cimo_src):
-        env['PYTHONPATH'] = cimo_src + os.pathsep + env.get('PYTHONPATH', '')
+    if cimo_root:
+        env['PYTHONPATH'] = os.path.join(cimo_root, 'python')
     subprocess.run([sys.executable, '-m', 'cimo', 'onefile', '-o', os.path.join(OUT, 'cimo.py')], check=True, env=env)
-    wat = os.path.join(ROOT, '..', 'cimo', 'docs', 'nn', 'wat.py')    # cimo's WebAssembly disassembler
-    if os.path.exists(wat):
+    wat = os.path.join(cimo_root or '', 'docs', 'nn', 'wat.py')       # cimo's WebAssembly disassembler
+    if cimo_root and os.path.exists(wat):
         shutil.copy(wat, os.path.join(ROOT, 'docs', 'lab', 'wat.py'))
     print('synced', sorted(os.listdir(os.path.join(OUT, 'scramjit'))), 'and cimo.py',
           os.path.getsize(os.path.join(OUT, 'cimo.py')) // 1024, 'KB')

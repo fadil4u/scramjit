@@ -74,14 +74,14 @@ hand-written C is compiled by cimo too.
 
 | Kernel | CPython | scramjit | Hand-written C | Speedup |
 |:---|---:|---:|---:|---:|
-| Gray-Scott reaction-diffusion, 256×256 | 127 ms | 0.22 ms | 0.20 ms | 570x |
-| Flood fill, 512×512 | 258 ms | 2.8 ms | 2.3 ms | 94x |
-| Viewshed, 96×96 | 122 ms | 10.8 ms | 5.8 ms | 11x |
+| Gray-Scott reaction-diffusion, 256×256 | 120 ms | 0.22 ms | 0.20 ms | 540x |
+| Flood fill, 512×512 | 248 ms | 3.6 ms | 2.3 ms | 69x |
+| Viewshed, 96×96 | 117 ms | 10.8 ms | 5.8 ms | 11x |
 | Exponential moving average, per element | 272 ns | 3.11 ns | 3.09 ns | 88x |
 | Edit distance, per cell | 468 ns | 4.33 ns | | 108x |
 | Collatz, per step | 41 ns | 2.39 ns | | 17x |
 
-Viewshed pays for exact `math` semantics; with `parity=False` it takes 7.0 ms. On Gray-Scott and
+Viewshed pays for exact `math` semantics; with `parity=False` it takes 7.3 ms. On Gray-Scott and
 flood fill, scramjit's C compiled by `gcc -O3` matches hand-written C compiled the same way, so the
 remaining gap there is cimo's backend ([`bench/gcc.py`](bench/gcc.py)). Four threads ran four calls
 3.5x faster than running them one after another.

@@ -396,6 +396,13 @@ math error checks; with `parity=False` it runs in 7.9 ms (15x CPython, 1.2x hand
 and flood_fill are the same speed either way: their gaps are code generation (gray_scott's
 wraparound compare repeated per access where the hand C computes it once per row).
 
+**First run in Pyodide (2026-11-01).** The site's live demo (`docs/lab/`, three kernels:
+hydraulic erosion, a viewshed beacon, thermal landslides) loads Pyodide, numpy, cimo
+(`cimo onefile`) and scramjit in the page and compiles with full parity: erosion runs 170 to
+200x faster than Pyodide's CPython (about 2,400 against 400,000 droplets per second), compiling
+in about 2.5 s. `tools/sync_site.py` refreshes the copies the site loads. Exact `math.hypot`
+is slow in WebAssembly (cimo's `fma` is software there), so the beacon uses `math.sqrt`.
+
 **M2: builtins, lists, narrowing.** Lowering rules for `enumerate`, `zip`, `map`, `filter`,
 comprehensions and the reductions; fixed-size lists as arrays; narrow types from annotations,
 dtypes and range analysis. Done when each rule has differential tests, the generated C for

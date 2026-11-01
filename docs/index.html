@@ -157,6 +157,45 @@ section.s{padding:76px 0 8px}
 .car-ctl button:hover{border-color:var(--hot200);color:var(--ink)}
 @media (prefers-reduced-motion:reduce){.frame{transition:opacity .3s ease,visibility 0s linear .3s;transform:none!important}}
 @media(max-width:600px){.car-bar{font-size:12.5px}}
+/* live demo */
+.lab{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);margin-top:28px;background:var(--code);border:1px solid var(--codeline);border-radius:14px;overflow:hidden}
+.lab-left{display:flex;flex-direction:column;min-width:0;border-right:1px solid #232838}
+.lab-bar{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #232838;background:var(--code2)}
+.lab-bar select,.lab-reset{font:500 12.5px var(--font);color:#c9d1e2;background:#1b2030;border:1px solid #2a3042;border-radius:7px;padding:6px 9px;cursor:pointer}
+.lab-reset{margin-left:auto}
+.lab-switch{display:inline-flex;align-items:center;gap:9px;font:600 12.5px var(--mono);color:#aab3c8;background:#1b2030;border:1px solid #2a3042;border-radius:999px;padding:5px 12px 5px 5px;cursor:pointer;transition:.25s}
+.lab-knob{position:relative;width:30px;height:16px;border-radius:9px;background:#2d3448;transition:.25s}
+.lab-knob::after{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#7f89a3;transition:.25s}
+.lab-switch[aria-pressed=true]{color:#fff;border-color:#f9731688;box-shadow:0 0 18px -6px rgba(249,115,22,.7)}
+.lab-switch[aria-pressed=true] .lab-knob{background:var(--flow)}
+.lab-switch[aria-pressed=true] .lab-knob::after{left:16px;background:#fff}
+.lab-code{height:300px;min-height:0}
+.lab-code .CodeMirror{height:100%;background:transparent;color:#c9d1d9;font:12px/1.6 var(--mono)}
+.cm-s-sj .CodeMirror-gutters{background:transparent;border-right:0}.cm-s-sj .CodeMirror-linenumber{color:#3a4258}
+.cm-s-sj .CodeMirror-cursor{border-left:2px solid #ffb072}
+.cm-s-sj .CodeMirror-selected,.cm-s-sj.CodeMirror-focused .CodeMirror-selected{background:#2a2f45}
+.cm-s-sj .cm-keyword{color:#ff7b72}.cm-s-sj .cm-builtin{color:#ffa657}.cm-s-sj .cm-number{color:#79c0ff}.cm-s-sj .cm-string{color:#a5d6ff}
+.cm-s-sj .cm-comment{color:#6e7681}.cm-s-sj .cm-def{color:#d2a8ff}.cm-s-sj .cm-variable-2{color:#c9d1d9}.cm-s-sj .cm-operator{color:#c9d1d9}
+.lab-err{margin:0 12px 8px;padding:7px 10px;border-radius:6px;font:12px var(--mono);color:#fecdd3;background:rgba(190,18,60,.2);white-space:pre-wrap}
+.lab-pipe{display:flex;align-items:center;gap:4px;padding:10px 12px;border-top:1px solid #232838;overflow-x:auto;scrollbar-width:none}
+.lab-pipe::-webkit-scrollbar{display:none}
+.lab-pipe i{font-style:normal;color:#3d4559;font-size:12px}
+.lab-chip{flex:none;font:inherit;border:1px solid #2a3042;background:#151925;border-radius:7px;padding:4px 9px;cursor:pointer;transition:background .3s,border-color .3s,box-shadow .3s}
+.lab-chip b{font:600 11.5px var(--mono);color:#6f7891;transition:color .3s}
+.lab-chip.lit{border-color:#3b5bdb;background:#16213d}.lab-chip.lit b{color:#cfe0ff}
+.fast .lab-chip.lit:nth-of-type(n+3){border-color:#c2410c;background:#2a1712}.fast .lab-chip.lit:nth-of-type(n+3) b{color:#ffd2ad}
+.lab-chip.open{box-shadow:0 0 0 2px rgba(249,115,22,.55)}
+.lab-panel{border-top:1px solid #232838}
+.lab-panel pre{margin:0;height:170px;overflow:auto;padding:10px 14px;font:11.5px/1.55 var(--mono);color:#b9c2d6;white-space:pre;scrollbar-width:thin}
+.lab-right{position:relative;min-height:520px;background:radial-gradient(ellipse at 50% 30%,#141a2c,#080a12 70%)}
+.lab-right canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:grab}
+.lab-cover{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;background:rgba(8,10,18,.55)}
+.lab-status{max-width:34ch;font-size:13px;color:#aab3c8}
+.lab.running .lab-cover{display:none}.lab.loading .lab-start{opacity:.5;pointer-events:none}
+.lab-stats{position:absolute;left:14px;bottom:12px;display:flex;align-items:center;gap:8px;font:500 12.5px var(--mono);color:#c9d1e2;background:rgba(8,10,18,.6);padding:6px 10px;border-radius:7px}
+.lab-dot{width:8px;height:8px;border-radius:50%;background:#3b82f6}.fast .lab-dot{background:#f97316;box-shadow:0 0 10px #f97316}
+@media(max-width:960px){.lab{grid-template-columns:minmax(0,1fr)}.lab-left{border-right:0;border-bottom:1px solid #232838}.lab-right{min-height:380px}.lab-code{height:260px}}
+@media(max-width:600px){.lab-right{min-height:320px}.lab-bar{flex-wrap:wrap}.lab-panel pre{height:150px}}
 /* cards */
 .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-top:28px}
 .card{position:relative;background:var(--white);border:1px solid var(--line);border-radius:12px;padding:20px 20px 22px;transition:border-color .12s,transform .12s,box-shadow .12s;overflow:hidden}
@@ -251,6 +290,7 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
   <a class="logo" href="#top" aria-label="scramjit home"><svg viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2563eb"/><stop offset=".6" stop-color="#f97316"/><stop offset="1" stop-color="#dc2626"/></linearGradient></defs><rect width="32" height="32" rx="8" fill="url(#lg)"/><path d="M5.5 9.5L13 14h6l7.5-4.5M5.5 22.5L13 18h6l7.5 4.5" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="16" r="1.7" fill="#fff"/></svg>scramjit</a>
   <ul class="topnav">
     <li class="hide-sm"><a href="#usage">Usage</a></li>
+    <li class="hide-sm"><a href="#lab">Live demo</a></li>
     <li class="hide-sm"><a href="#why">Motivation</a></li>
     <li class="hide-sm"><a href="#how">How it works</a></li>
     <li class="hide-sm"><a href="#visibility">Visibility</a></li>
@@ -430,6 +470,37 @@ void mandel_rows(int32_t *out, int64_t h, int64_t w,
     </div>
   </div>
   <p class="doclink"><a href="docs/?p=first-function">Docs: your first function →</a></p>
+</div></section>
+
+<section class="s" id="lab"><div class="wrap">
+  <span class="k">Live demo</span>
+  <h2>Watch Python get fast</h2>
+  <p class="lede">A terrain eroding under thousands of raindrops, written in plain Python and running in this page in Pyodide. Flip scramjit on: the same function is parsed, typed, turned into C and compiled to WebAssembly by cimo, all in Python, in your browser.</p>
+  <div class="lab" id="lab-demo">
+    <div class="lab-left">
+      <div class="lab-bar">
+        <select class="lab-preset" aria-label="Preset"></select>
+        <button type="button" class="lab-switch" aria-pressed="false"><span class="lab-knob"></span>scramjit</button>
+        <button type="button" class="lab-reset">New terrain</button>
+      </div>
+      <div class="lab-code"><textarea aria-label="Python code"></textarea></div>
+      <div class="lab-err" role="status" hidden></div>
+      <div class="lab-pipe">
+        <button type="button" class="lab-chip lit" data-s="python"><b>Python</b></button><i>→</i>
+        <button type="button" class="lab-chip" data-s="ast"><b>Syntax tree</b></button><i>→</i>
+        <button type="button" class="lab-chip" data-s="types"><b>Types</b></button><i>→</i>
+        <button type="button" class="lab-chip" data-s="c"><b>C</b></button><i>→</i>
+        <button type="button" class="lab-chip" data-s="wasm"><b>WebAssembly</b></button>
+      </div>
+      <div class="lab-panel"><pre>Plain Python. Pyodide runs it in the browser, one bytecode at a time.</pre></div>
+    </div>
+    <div class="lab-right">
+      <canvas aria-label="A 3D terrain shaped by the code on the left"></canvas>
+      <div class="lab-cover"><button type="button" class="btn btn-p lab-start">Run it live</button><p class="lab-status">Loads Pyodide (7 MB), numpy, cimo and scramjit. Everything runs in this page.</p></div>
+      <div class="lab-stats"><span class="lab-dot"></span><span class="lab-rate">drag to turn the terrain</span></div>
+    </div>
+  </div>
+  <p class="note">Edit the code and it reloads as you type. Write something scramjit can't compile and the C panel shows why it runs as Python instead.</p>
 </div></section>
 
 <section class="s" id="why"><div class="wrap">
@@ -724,5 +795,10 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
 })();
 </script>
 <script src="flow.js?v=a3bfdc4a" defer></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="lab.js?v=1" defer></script>
 </body>
 </html>

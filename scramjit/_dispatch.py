@@ -132,9 +132,10 @@ PYTHON = _Python()
 
 
 class Compiled:
-    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm')
+    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals')
 
-    def __init__(self, kernel, ret, types_, source, libm):
+    def __init__(self, kernel, ret, types_, source, libm, locals_=None):
+        self.locals = locals_ or {}           # variable -> inferred type name
         self.kernel = kernel
         self.ret = ret
         self.types = types_
@@ -247,7 +248,8 @@ class Function:
         if any(t.np for t in key) or c.ret.np:
             import numpy
             self._np = numpy
-        return Compiled(kernel, c.ret, key, source, _libm_table() if c.uses_libm else None)
+        return Compiled(kernel, c.ret, key, source, _libm_table() if c.uses_libm else None,
+                        {k: t.name for k, t in c.env.items()})
 
     def _run(self, entry, args):
         cargs = []

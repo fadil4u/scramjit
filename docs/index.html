@@ -456,8 +456,8 @@ for (int64_t i = 0; i &lt; a_len; i++)
 
 <section class="s" id="semantics"><div class="wrap">
   <span class="k">Semantics</span>
-  <h2>Python's answers, at C's speed</h2>
-  <p class="lede">Where Python and C disagree, scramjit picks explicitly and tests the choice against CPython, including on randomly generated programs.</p>
+  <h2>Same results as CPython</h2>
+  <p class="lede">Where Python and C disagree, scramjit does what Python does, except that integers are 64-bit. Every compiled function is tested against CPython running it undecorated, including on randomly generated programs.</p>
   <div class="tblw"><table class="tbl">
     <tr><th>Topic</th><th>Python</th><th>C</th><th>scramjit</th></tr>
     <tr><td><code>//</code> and <code>%</code></td><td>round toward −∞</td><td>truncate toward 0</td><td><span class="pill py">Python's rule</span></td></tr>

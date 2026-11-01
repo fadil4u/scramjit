@@ -405,8 +405,21 @@
       if (!running) $('.lab-rate').textContent = v.hint;
       setPreset(Object.keys(v.presets)[0]);
     };
+    // every demo starts as plain Python, so its slow speed comes first; the switch and the nudge return
+    const startSlow = () => {
+      compiled = false;
+      $('.lab-sj').setAttribute('aria-checked', false);
+      $('.lab-state').textContent = 'off';
+      root.classList.remove('sj', 'fast', 'nudge');
+      nudged = false;
+      startedAt = performance.now();
+      const m = $('.lab-mode');
+      m.style.animation = 'none'; m.offsetWidth; m.style.animation = '';
+      showStage('python');
+    };
     const setPreset = p => {
       preset = p; rate = 0; sel.value = p; names();
+      startSlow();
       if (sources[p]) editor.setValue(sources[p]);
       if (running) { worker.postMessage({ type: 'reset', preset: p }); clearTimeout(editTimer); setCode(compiled); }
     };

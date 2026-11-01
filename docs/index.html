@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>scramjit · a pure-Python JIT for Python's hot loops</title>
+<meta name="description" content="scramjit compiles the loops the Python interpreter is slowest at to native code at runtime, through cimo, and runs them without the GIL: no LLVM, no C compiler, no binary wheels. Runs wherever Python runs, including Pyodide.">
+<meta name="theme-color" content="#080a12">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%232563eb'/%3E%3Cstop offset='.6' stop-color='%23f97316'/%3E%3Cstop offset='1' stop-color='%23dc2626'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M5.5 9.5L13 14h6l7.5-4.5M5.5 22.5L13 18h6l7.5 4.5' fill='none' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='16' r='1.7' fill='%23fff'/%3E%3C/svg%3E">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="scramjit">
+<meta property="og:title" content="scramjit · decorate a Python function, get native speed">
+<meta property="og:description" content="A pure-Python JIT for loops that don't vectorize, built on cimo. No LLVM, no C compiler, no binary wheels, no GIL; runs in CPython and Pyodide.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#f6f6f9;--white:#fff;--ink:#0f172a;--ink2:#334155;--ink3:#5b687c;--ink4:#94a3b8;--line:#e2e8f0;--line2:#eef2f7;
+--cold:#2563eb;--cold2:#60a5fa;--coldD:#1d4ed8;--cold50:#eff5ff;--cold100:#dbe7ff;--cold200:#bfd3fe;
+--hot:#f97316;--hotD:#c2410c;--hotDD:#9a3412;--hot50:#fff4eb;--hot100:#ffe3cc;--hot200:#fdc493;--fire:#dc2626;
+--flow:linear-gradient(90deg,#2563eb,#f97316 62%,#dc2626);--flowT:linear-gradient(90deg,#7aa7ff,#ffb072 55%,#ff6b6b);
+--ok:#059669;--bad:#be123c;--night:#080a12;--nightline:#171b29;--code:#0b0f1a;--code2:#151821;--codeline:#1f2535;
+--font:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:'DM Mono',ui-monospace,monospace;color-scheme:light}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%;scroll-padding-top:72px}
+body{background:var(--bg);color:var(--ink2);font-family:var(--font);font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden;font-feature-settings:"ss01","cv11"}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:1180px;margin:0 auto;padding:0 24px}
+@media(max-width:600px){.wrap{padding:0 16px}}
+h1,h2,h3{color:var(--ink);letter-spacing:-.025em;line-height:1.15;font-weight:700}
+h2{font-size:clamp(26px,3vw,34px);font-weight:800;letter-spacing:-.03em}
+h3{font-size:17px}
+.k{display:inline-block;font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-bottom:12px;background:var(--flow);-webkit-background-clip:text;background-clip:text;color:transparent}
+.lede{font-size:17px;color:var(--ink2);max-width:64ch;margin-top:12px}
+code{font-family:var(--mono);font-size:.88em;color:var(--ink);background:var(--white);border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+p a,.lede a,li a,td a{color:var(--cold);font-weight:500}p a:hover,li a:hover,td a:hover{color:var(--coldD)}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:11px 18px;border-radius:8px;font-weight:600;font-size:14px;border:1px solid transparent;cursor:pointer;font-family:var(--font);white-space:nowrap;transition:.15s}
+.btn-p{background:var(--hotD);color:#fff}.btn-p:hover{background:var(--hotDD)}
+.btn-s{background:var(--white);color:var(--ink);border-color:var(--line)}.btn-s:hover{border-color:var(--hot200)}
+.btn-d{background:rgba(255,255,255,.06);color:#e6edf3;border-color:#2a3042}.btn-d:hover{border-color:#f9731688;background:rgba(255,255,255,.1)}
+.skip{position:absolute;left:12px;top:-60px;z-index:100;background:var(--hotD);color:#fff;padding:8px 12px;border-radius:8px;font-weight:600}.skip:focus{top:12px}
+a:focus-visible,button:focus-visible{outline:2px solid var(--hot);outline-offset:2px}
+/* top nav */
+.top{position:sticky;top:0;z-index:50;background:rgba(246,246,249,.9);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.top::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--flow);transform-origin:left;transform:scaleX(var(--p,0));opacity:.9}
+.top-in{display:flex;align-items:center;justify-content:space-between;height:62px;gap:16px}
+.logo{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px;color:var(--ink);font-family:var(--mono);letter-spacing:-.02em}
+.logo svg{width:28px;height:28px}
+.topnav{display:flex;gap:4px;list-style:none;align-items:center}
+.topnav a{display:block;padding:7px 11px;border-radius:7px;font-size:14px;font-weight:500;color:var(--ink2)}
+.topnav a:hover{color:var(--ink);background:var(--white)}
+.topnav .navcta{margin-left:8px}
+.topnav a.btn-s{padding:8px 14px;color:var(--ink)}
+@media(max-width:860px){.topnav .hide-sm{display:none}}
+/* banner */
+.banner{position:relative;background:var(--night);color:#c9d1d9;overflow:hidden;height:clamp(560px,calc(100vh - 62px),740px)}
+.flow{position:absolute;inset:0}
+.flow canvas{display:block;width:100%;height:100%}
+.flow-shade{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 52% 70% at 8% 45%,rgba(8,10,18,.95) 0,rgba(8,10,18,.8) 50%,rgba(8,10,18,0) 100%),linear-gradient(0deg,rgba(8,10,18,.7),rgba(8,10,18,0) 16%)}
+.banner-in{position:relative;height:100%;display:flex;align-items:center;pointer-events:none}
+.banner-copy{pointer-events:auto;max-width:540px;margin-top:-40px}
+.badge{display:inline-flex;align-items:center;gap:8px;margin-bottom:18px;padding:4px 10px 4px 8px;border:1px solid #2a3042;border-radius:999px;font:500 12px var(--mono);color:#aeb7cc;background:rgba(255,255,255,.03)}
+.badge i{width:7px;height:7px;border-radius:50%;background:var(--hot);box-shadow:0 0 0 3px rgba(249,115,22,.2);animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{50%{box-shadow:0 0 0 6px rgba(249,115,22,0)}}
+.banner h1{color:#fff;font-size:clamp(32px,3.6vw,50px);font-weight:800;letter-spacing:-.035em;line-height:1.06;max-width:12em}
+.banner h1 em{font-style:normal;background:var(--flowT);-webkit-background-clip:text;background-clip:text;color:transparent}
+.banner .lede{color:#b3bdd2;margin-top:18px;font-size:17px;max-width:50ch}
+.hero-cta{display:flex;gap:10px;flex-wrap:wrap;margin-top:26px}
+.pip{display:inline-flex;align-items:center;gap:10px;background:var(--code);color:#e6edf3;border-radius:8px;padding:0 6px 0 14px;height:44px;font-family:var(--mono);font-size:14px;border:1px solid var(--codeline)}
+.pip span::before{content:"$ ";color:#6e7681}
+.pip button{display:grid;place-items:center;width:32px;height:32px;background:#1f2433;border:0;color:#c9d1d9;padding:0;border-radius:6px;cursor:pointer}
+.pip button svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.pip button .i-done,.pip button.done .i-copy{display:none}.pip button.done .i-done{display:block}.pip button.done{color:#7ee2b8}
+.pip button:hover{background:#2b3245;color:#fff}
+.hero-note{margin-top:14px;font-size:13px;color:#7d879e;max-width:46ch}
+.hero-note a{color:#ffb072}.hero-note a:hover{color:#ffd2ad}
+@media(max-width:900px){
+.banner{height:auto;display:flex;flex-direction:column}
+.banner-in{order:1;display:block}
+.banner-copy{margin:0;max-width:none;padding:40px 0 8px}
+.flow{order:2;position:relative;height:300px;flex:none}
+.flow-shade{background:linear-gradient(180deg,rgba(8,10,18,1),rgba(8,10,18,0) 22%,rgba(8,10,18,0) 80%,rgba(8,10,18,1))}
+}
+@media(max-width:600px){.banner-copy{padding:30px 0 4px}.banner .lede{font-size:15.5px}.flow{height:240px}}
+/* proof strip */
+.proof{background:var(--night);border-top:1px solid var(--nightline);color:#c9d1d9}
+.proof-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+.pf{padding:30px 26px 32px;min-width:0}
+.pf:first-child{padding-left:0}.pf+.pf{border-left:1px solid var(--nightline)}
+.pf>b{display:block;font-size:40px;font-weight:800;letter-spacing:-.035em;line-height:1;background:var(--flowT);background-size:400% 100%;-webkit-background-clip:text;background-clip:text;color:transparent}
+.pf:nth-child(1)>b{background-position:0 0}.pf:nth-child(2)>b{background-position:33% 0}.pf:nth-child(3)>b{background-position:66% 0}.pf:nth-child(4)>b{background-position:100% 0}
+.pf p{margin-top:8px;font-size:13.5px;line-height:1.45;color:#8e98b0}
+.pf code{display:inline-block;margin-top:14px;background:none;border:1px solid var(--codeline);color:#c9d1e2;padding:3px 8px;border-radius:6px;font-size:11.5px}
+@media(max-width:900px){.proof-row{grid-template-columns:1fr 1fr}.pf{padding:24px 16px}.pf:nth-child(odd){padding-left:0}.pf:nth-child(3){border-left:0}.pf:nth-child(n+3){border-top:1px solid var(--nightline)}}
+@media(max-width:480px){.proof-row{grid-template-columns:1fr}.pf{padding:22px 0!important;border-left:0!important}.pf+.pf{border-top:1px solid var(--nightline)}}
+/* sections */
+section.s{padding:76px 0 8px}
+@media(max-width:600px){section.s{padding:52px 0 4px}}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px;margin-top:28px;align-items:start}
+.split.usage{grid-template-columns:minmax(0,.85fr) minmax(0,1.15fr);align-items:center;margin-top:0}
+@media(max-width:960px){.split,.split.usage{grid-template-columns:minmax(0,1fr)}}
+.pts{list-style:none;display:flex;flex-direction:column;gap:12px}
+.pts li{position:relative;padding-left:20px;font-size:15px;color:var(--ink3)}
+.pts li::before{content:"";position:absolute;left:0;top:.62em;width:8px;height:8px;border-radius:2px;background:var(--flow);transform:rotate(45deg)}
+.pts b{color:var(--ink);font-weight:600}
+.note{font-size:13px;color:var(--ink3);margin-top:12px}
+.doclink{margin-top:18px;font-size:14px;font-weight:500}.doclink a{color:var(--cold)}.doclink a:hover{color:var(--coldD)}
+/* code panels */
+.code{background:var(--code);border:1px solid var(--codeline);border-radius:12px;overflow:hidden;color:#c9d1d9;min-width:0}
+.code .bar{height:36px;display:flex;align-items:center;gap:10px;padding:0 8px 0 12px;border-bottom:1px solid #232838;background:var(--code2);font-family:var(--mono);font-size:11.5px;color:#8e94a3}
+.code .dots{display:flex;gap:5px}.code .dots i{width:9px;height:9px;border-radius:50%;background:#2d3243}
+.code pre{margin:0;padding:14px 16px;font-family:var(--mono);font-size:13px;line-height:1.6;overflow-x:auto;white-space:pre;tab-size:4;scrollbar-width:none}
+.code pre::-webkit-scrollbar{display:none}
+@media(max-width:600px){.code pre{font-size:11.5px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere}}
+.t-kw{color:#ff7b72}.t-ty{color:#79c0ff}.t-fn{color:#d2a8ff}.t-str{color:#a5d6ff}.t-num{color:#79c0ff}.t-cm{color:#6e7681}.t-pp{color:#ff7b72}.t-dec{color:#ffa94d}.t-err{color:#fda4af}
+.code .fname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tabs{display:flex;flex:none;gap:2px;margin-left:auto;background:#0b0f1a;border:1px solid #232838;border-radius:7px;padding:2px}
+.tabs button{white-space:nowrap;border:0;background:none;color:#8e94a3;font:500 11.5px var(--mono);padding:4px 10px;border-radius:5px;cursor:pointer}
+.tabs button[aria-selected=true]{color:#fff;background:#232838}
+.tabs button[aria-selected=true].hot{background:linear-gradient(90deg,#9a3412,#b91c1c)}
+.code .panes{display:grid}
+.code .panes>pre{grid-area:1/1;transition:opacity .35s ease}
+.code .panes>pre[hidden]{display:block;visibility:hidden;opacity:0}
+.code .foot{display:flex;align-items:center;gap:8px;padding:8px 14px;border-top:1px solid #232838;font:500 11.5px var(--mono);color:#6f7891}
+.code .foot i{width:7px;height:7px;border-radius:50%;background:var(--hot)}
+/* cards */
+.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-top:28px}
+.card{position:relative;background:var(--white);border:1px solid var(--line);border-radius:12px;padding:20px 20px 22px;transition:border-color .12s,transform .12s,box-shadow .12s;overflow:hidden}
+.card::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--flow);background-size:400% 100%;opacity:.85}
+.card:nth-child(1)::before{background-position:0 0}.card:nth-child(2)::before{background-position:33% 0}.card:nth-child(3)::before{background-position:66% 0}.card:nth-child(4)::before{background-position:100% 0}
+@media(hover:hover){.card:hover{transform:translateY(-3px);border-color:var(--hot200);box-shadow:0 10px 22px -12px rgba(16,24,40,.28)}}
+.card .ic{width:36px;height:36px;border-radius:9px;display:grid;place-items:center;margin-bottom:14px;background:var(--cold50);color:var(--cold)}
+.card:nth-child(3) .ic{background:var(--hot50);color:var(--hotD)}.card:nth-child(4) .ic{background:#fff1f1;color:var(--fire)}
+.card:nth-child(2) .ic{background:#f3f0ff;color:#6d4fd8}
+.card .ic svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.card .tag{font-family:var(--mono);font-size:11px;color:var(--ink3);display:block;margin-bottom:6px}
+.card p{font-size:14.5px;color:var(--ink3);margin-top:6px;line-height:1.5}
+@media(max-width:1000px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.cards{grid-template-columns:minmax(0,1fr)}}
+.not{margin-top:18px;font-size:14px;color:var(--ink3)}.not b{color:var(--ink);font-weight:600}
+/* fit */
+.fit{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:14px;margin-top:28px}
+.fit-c{border-radius:14px;padding:22px 22px 24px;border:1px solid var(--line);background:var(--white)}
+.fit-c.best{background:linear-gradient(135deg,#0b0f1a,#1a1220 60%,#2a1214);border-color:#2a2233;color:#b3bdd2}
+.fit-c.best h3{color:#fff;font-size:20px}
+.fit-c p{font-size:15px;margin-top:8px;line-height:1.55}.fit-c.also p{color:var(--ink3)}
+.fit-c.also h3{font-size:20px}
+.fit-t{display:inline-block;font:600 11px var(--mono);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;color:var(--cold)}
+.fit-c.best .fit-t{background:var(--flowT);-webkit-background-clip:text;background-clip:text;color:transparent}
+.fit-eg{display:flex;flex-wrap:wrap;gap:6px;margin-top:16px}
+.fit-eg code{background:rgba(255,255,255,.05);border-color:#33293a;color:#ffc9a3;font-size:12px}
+h3.where{margin-top:44px;font-size:20px}
+.where+.lede+.cards{margin-top:20px}
+@media(max-width:860px){.fit{grid-template-columns:minmax(0,1fr)}}
+/* pipeline */
+.pipe{position:relative;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-top:32px}
+.pipe::before{content:"";position:absolute;left:4%;right:4%;top:19px;height:3px;border-radius:2px;background:var(--flow)}
+.stage{position:relative;min-width:0}
+.stage .dot{position:relative;width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:var(--white);border:2px solid var(--c);color:var(--c);font:600 13px var(--mono);margin-bottom:14px}
+.stage b{display:block;color:var(--ink);font-size:14.5px;font-weight:600}
+.stage p{font-size:13.5px;color:var(--ink3);margin-top:4px;line-height:1.45}
+.stage code{font-size:.82em}
+@media(max-width:960px){.pipe{grid-template-columns:minmax(0,1fr);gap:0;margin-top:26px}.pipe::before{left:19px;right:auto;top:20px;bottom:20px;width:3px;height:auto;background:linear-gradient(180deg,#2563eb,#f97316 62%,#dc2626)}.stage{display:grid;grid-template-columns:40px minmax(0,1fr);column-gap:16px;padding-bottom:18px}.stage .dot{grid-row:span 2;margin:0}}
+.lower{margin-top:44px}
+.arrow{display:grid;place-items:center;color:var(--hot);font-size:22px}
+.lower .split{grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:14px;align-items:stretch;margin-top:18px}
+.lower .code{display:flex;flex-direction:column}.lower .code pre{flex:1}
+@media(max-width:960px){.lower .split{grid-template-columns:minmax(0,1fr)}.arrow{transform:rotate(90deg)}}
+/* semantics table */
+.tblw{overflow-x:auto;scrollbar-width:none;margin-top:26px;border-radius:12px}
+.tbl{width:100%;border-collapse:collapse;background:var(--white);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:14.5px}
+.tbl th{text-align:left;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ink3);background:#fafbfe;padding:11px 15px;border-bottom:1px solid var(--line)}
+.tbl td{padding:11px 15px;border-top:1px solid var(--line2);vertical-align:top}
+.tbl tr:nth-child(2) td{border-top:0}
+.tbl td:first-child{color:var(--ink);font-weight:500;white-space:nowrap}
+.pill{display:inline-block;font:500 11px var(--mono);padding:2px 7px;border-radius:999px;white-space:nowrap}
+.pill.py{background:var(--cold50);color:var(--coldD)}.pill.open{background:var(--hot50);color:var(--hotD);border:1px dashed var(--hot200)}
+@media(max-width:700px){.tbl{min-width:640px}}
+/* roadmap */
+.road{position:relative;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-top:30px}
+.ms{position:relative;background:var(--white);border:1px solid var(--line);border-radius:12px;padding:18px 18px 20px}
+.ms .m{display:flex;align-items:center;justify-content:space-between;font:600 13px var(--mono);color:var(--c)}
+.ms .st{font:500 11px var(--mono);color:var(--ink4)}
+.ms.now{border-color:var(--hot200);box-shadow:0 10px 26px -18px rgba(194,65,12,.55)}
+.ms.now .st{color:var(--hotD)}
+.ms h3{margin-top:8px;font-size:16px}
+.ms p{font-size:13.5px;color:var(--ink3);margin-top:6px;line-height:1.5}
+.ms .done{margin-top:10px;padding-top:10px;border-top:1px solid var(--line2);font-size:12.5px;color:var(--ink3)}
+.ms .done b{color:var(--ink);font-weight:600}
+.heat{height:4px;border-radius:2px;margin-top:12px;background:var(--line2);overflow:hidden}
+.heat i{display:block;height:100%;width:var(--w);background:var(--flow);background-size:calc(100% / var(--f)) 100%}
+@media(max-width:1000px){.road{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.road{grid-template-columns:minmax(0,1fr)}}
+/* end + footer */
+.end{padding:88px 0 92px;text-align:center}
+.end .hero-cta{justify-content:center}
+.end .lede{margin:12px auto 0}
+footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;color:var(--ink3)}
+.foot{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.foot-links{display:flex;gap:18px}.foot-links a:hover{color:var(--ink)}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.badge i{animation:none}.code .panes>pre{transition:none}}
+</style>
+</head>
+<body>
+<header class="top"><a class="skip" href="#main">Skip to content</a><div class="wrap top-in">
+  <a class="logo" href="#top" aria-label="scramjit home"><svg viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2563eb"/><stop offset=".6" stop-color="#f97316"/><stop offset="1" stop-color="#dc2626"/></linearGradient></defs><rect width="32" height="32" rx="8" fill="url(#lg)"/><path d="M5.5 9.5L13 14h6l7.5-4.5M5.5 22.5L13 18h6l7.5 4.5" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="16" r="1.7" fill="#fff"/></svg>scramjit</a>
+  <ul class="topnav">
+    <li class="hide-sm"><a href="#usage">Usage</a></li>
+    <li class="hide-sm"><a href="#why">Motivation</a></li>
+    <li class="hide-sm"><a href="#how">How it works</a></li>
+    <li class="hide-sm"><a href="#semantics">Semantics</a></li>
+    <li class="hide-sm"><a href="#roadmap">Roadmap</a></li>
+    <li><a href="docs/">Docs</a></li>
+    <li class="navcta"><a class="btn btn-s" href="https://github.com/farizrahman4u/scramjit">GitHub</a></li>
+  </ul>
+</div></header>
+
+<main id="main" tabindex="-1">
+<section class="banner" id="top">
+  <div class="flow"><canvas aria-label="Air flowing through a scramjet engine: cold at the inlet, burning in the combustor, hot at the nozzle"></canvas><div class="flow-shade"></div></div>
+  <div class="wrap banner-in">
+    <div class="banner-copy">
+      <span class="badge"><i></i>In design · MIT</span>
+      <h1>Decorate a Python function, get <em>native speed</em>.</h1>
+      <p class="lede">scramjit is a JIT written in pure Python, for the loops the interpreter is slowest at. It turns your hot loop into C, compiles it with <a href="https://www.cimo.dev" style="color:#9fbcff">cimo</a> in your process and runs it without the GIL: no LLVM, no C compiler, no binary wheels. It runs wherever Python runs, including the browser.</p>
+      <div class="hero-cta">
+        <div class="pip"><span>pip install scramjit</span><button type="button" data-copy="pip install scramjit" aria-label="Copy" title="Copy"><svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg><svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button></div>
+        <a class="btn btn-d" href="docs/">Read the docs</a>
+      </div>
+      <p class="hero-note">The package on PyPI is a placeholder that reserves the name. The first release that compiles is milestone M1; see the <a href="#roadmap">roadmap</a>.</p>
+    </div>
+  </div>
+</section>
+
+<section class="proof" aria-label="scramjit by design"><div class="wrap proof-row">
+  <div class="pf"><b>1</b><p>decorator: the whole user-facing API</p><code>@scramjit.jit</code></div>
+  <div class="pf"><b>0</b><p>native dependencies: standard library plus cimo, both pure Python</p><code>import scramjit</code></div>
+  <div class="pf"><b>0</b><p>Python objects in generated code: arguments are unboxed at the call</p><code>double *, int64_t</code></div>
+  <div class="pf"><b>3.9+</b><p>CPython, plus Pyodide, JupyterLite, marimo and PyScript</p><code>micropip.install("scramjit")</code></div>
+</div></section>
+
+<section class="s" id="usage"><div class="wrap">
+  <div class="split usage">
+    <div>
+      <span class="k">Usage</span>
+      <h2>Plain Python in, C out</h2>
+      <p class="lede">On the first call scramjit reads the argument types, generates C specialized to them, compiles it with cimo and caches it. Later calls with the same types run native code directly.</p>
+      <ul class="pts" style="margin-top:22px">
+        <li><b>Still Python.</b> Without the decorator the function runs unchanged in CPython, debuggable and testable as Python.</li>
+        <li><b>Never changes results.</b> Every compiled function is tested against CPython running it undecorated.</li>
+        <li><b>No GIL while it runs.</b> Threads calling a compiled function run in parallel.</li>
+        <li><b>Arrays in place.</b> numpy arrays are passed by pointer, shape and strides, never copied.</li>
+      </ul>
+    </div>
+    <div class="code" id="xform">
+      <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="fname">ema.py</span>
+        <div class="tabs" role="tablist" aria-label="Source or generated C"><button type="button" role="tab" aria-selected="true" data-pane="0">Python</button><button type="button" role="tab" aria-selected="false" data-pane="1" class="hot">generated C</button></div></div>
+      <div class="panes">
+<pre data-lang="py" data-name="ema.py">import numpy as np
+import scramjit
+
+@scramjit.jit
+def ema(x, y, a: float):
+    y[0] = x[0]
+    for i in range(1, len(x)):
+        y[i] = a * x[i] + (1 - a) * y[i - 1]
+
+x = np.random.rand(1_000_000)
+y = np.empty_like(x)
+ema(x, y, 0.1)   # compiled here, native from now on</pre>
+<pre data-lang="c" data-name="ema · float64[:], float64[:], float" hidden>#line 5 "ema.py"
+void ema(const double *x, int64_t x_len,
+         double *y, int64_t y_len, double a)
+{
+    y[0] = x[0];
+    for (int64_t i = 1; i &lt; x_len; i++)
+        y[i] = a * x[i] + (1 - a) * y[i - 1];
+}</pre>
+      </div>
+      <div class="foot"><i></i>Illustrative: the exact C, including bounds checks, is being designed.</div>
+    </div>
+  </div>
+  <p class="doclink"><a href="docs/?p=first-function">Docs: your first function →</a></p>
+</div></section>
+
+<section class="s" id="why"><div class="wrap">
+  <span class="k">Motivation</span>
+  <h2>Where the interpreter is the bottleneck</h2>
+  <p class="lede">numpy is fast when the work fits one array expression. Much real code doesn't: each step depends on the last, or on a branch, or on what was found so far. In CPython every iteration of that loop pays the interpreter, and threads take turns on the GIL.</p>
+  <div class="fit">
+    <div class="fit-c best"><span class="fit-t">Where it shines</span><h3>Loops that don't vectorize</h3><p>Recurrences, data-dependent branches, flood fills, dynamic programming, simulations, scans over byte buffers. Compiled, they run as C, with the GIL released so threads run in parallel.</p>
+      <div class="fit-eg"><code>y[i] = f(y[i-1])</code><code>if grid[j][i] == seed:</code><code>while queue:</code><code>best = min(best, d[k] + w)</code></div></div>
+    <div class="fit-c also"><span class="fit-t">Also a fit</span><h3>Vectorizable code, pure-Python only</h3><p>Array math written as plain loops, for places that allow only pure Python or have no numpy. scramjit makes the loop fast without a binary dependency.</p></div>
+  </div>
+  <h3 class="where">Wherever Python runs</h3>
+  <p class="lede" style="font-size:15.5px;margin-top:6px">Python JITs today bring LLVM or need a C toolchain on the target. scramjit and its compiler are plain Python files, so they go where those can't.</p>
+  <div class="cards">
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01M9 13l-2 2 2 2M15 13l2 2-2 2"/></svg></div><span class="tag">first</span><h3>Python in the browser</h3><p>Pyodide, JupyterLite, marimo and PyScript. Existing Python compilers don't run there.</p></div>
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg></div><span class="tag">plugins</span><h3>Embedded Pythons</h3><p>QGIS, Blender, Houdini, Maya, Nuke, FreeCAD, KiCad: hosts where compiled dependencies are banned or painful.</p></div>
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/><circle cx="12" cy="12" r="3"/></svg></div><span class="tag">day one</span><h3>New platforms</h3><p>New CPython releases, free-threaded builds and Windows on arm64, before other JITs get there.</p></div>
+    <div class="card"><div class="ic"><svg viewBox="0 0 24 24"><path d="M4 7l8-4 8 4v10l-8 4-8-4z"/><path d="M4 7l8 4 8-4M12 11v10"/></svg></div><span class="tag">libraries</span><h3>Pure-Python packages</h3><p>Fast hot paths with no wheel matrix to build, test and release.</p></div>
+  </div>
+  <p class="not"><b>Not for:</b> machine learning (use PyTorch or JAX), code that is already one vectorized numpy or pandas expression where numpy runs, or anyone already happy with an existing JIT on a standard desktop or server.</p>
+</div></section>
+
+<section class="s" id="how"><div class="wrap">
+  <span class="k">How it works</span>
+  <h2>Cold source in, hot code out</h2>
+  <p class="lede">Like the engine it is named after, scramjit has no moving parts of its own: the compiler is cimo, and scramjit is the intake that shapes Python into C cimo optimizes well.</p>
+  <div class="pipe">
+    <div class="stage" style="--c:#2563eb"><span class="dot">1</span><b>Parse</b><p>The function's source, with the standard <code>ast</code> module.</p></div>
+    <div class="stage" style="--c:#5f6fd0"><span class="dot">2</span><b>Infer types</b><p>Over the whole function, from the call's argument types and annotations.</p></div>
+    <div class="stage" style="--c:#a26a8a"><span class="dot">3</span><b>Typed IR</b><p>Every value has a concrete C type. No <code>PyObject</code> anywhere.</p></div>
+    <div class="stage" style="--c:#e8702a"><span class="dot">4</span><b>Lower</b><p>Builtins become loops, lists become arrays, types narrow where proven safe.</p></div>
+    <div class="stage" style="--c:#f05a22"><span class="dot">5</span><b>Emit C</b><p>Readable C, with <code>#line</code> pointing back at your Python.</p></div>
+    <div class="stage" style="--c:#dc2626"><span class="dot">6</span><b>cimo</b><p>Machine code in the process, or WebAssembly in Pyodide.</p></div>
+  </div>
+  <div class="lower">
+    <h3>Builtins are lowering rules, not functions</h3>
+    <p class="lede" style="font-size:15.5px">No builtin exists at runtime. <code>range</code>, <code>zip</code>, <code>enumerate</code>, comprehensions and generator expressions fuse into one loop, and a result is materialized only when stored.</p>
+    <div class="split">
+      <div class="code"><div class="bar"><span class="dots"><i></i><i></i><i></i></span>python</div>
+<pre data-lang="py">total = sum(x * x for x in a if x &gt; 0)</pre></div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div class="code"><div class="bar"><span class="dots"><i></i><i></i><i></i></span>c</div>
+<pre data-lang="c">double total = 0;
+for (int64_t i = 0; i &lt; a_len; i++)
+    if (a[i] &gt; 0)
+        total += a[i] * a[i];</pre></div>
+    </div>
+  </div>
+  <p class="doclink"><a href="docs/?p=how-it-works">Docs: how it works →</a> · <a href="docs/?p=loops-and-builtins">loops and builtins →</a></p>
+</div></section>
+
+<section class="s" id="semantics"><div class="wrap">
+  <span class="k">Semantics</span>
+  <h2>Python's answers, at C's speed</h2>
+  <p class="lede">Where Python and C disagree, scramjit picks explicitly and tests the choice against CPython, including on randomly generated programs.</p>
+  <div class="tblw"><table class="tbl">
+    <tr><th>Topic</th><th>Python</th><th>C</th><th>scramjit</th></tr>
+    <tr><td><code>//</code> and <code>%</code></td><td>round toward −∞</td><td>truncate toward 0</td><td><span class="pill py">Python's rule</span></td></tr>
+    <tr><td>Negative indices</td><td>count from the end</td><td>out of bounds</td><td><span class="pill py">Python's rule</span></td></tr>
+    <tr><td>Float order</td><td>as written</td><td>may reassociate</td><td><span class="pill py">as written</span> no FMA unless opted in</td></tr>
+    <tr><td>Integers</td><td>unbounded</td><td>fixed width</td><td><code>int64</code> unless narrowed, wraps; checked mode <span class="pill open">open</span></td></tr>
+    <tr><td>Bounds checks</td><td>always</td><td>never</td><td><span class="pill open">open</span> default on with opt-out, or off</td></tr>
+    <tr><td>Float ÷ 0</td><td>raises</td><td><code>inf</code></td><td><span class="pill open">open</span></td></tr>
+  </table></div>
+  <p class="note">Anything outside the subset is a compile error pointing at the Python line. There is no silent fallback to running on Python objects.</p>
+  <p class="doclink"><a href="docs/?p=semantics">Docs: semantics →</a></p>
+</div></section>
+
+<section class="s" id="roadmap"><div class="wrap">
+  <span class="k">Roadmap</span>
+  <h2>From cold start to full burn</h2>
+  <p class="lede">Each milestone has acceptance criteria in the <a href="https://github.com/farizrahman4u/scramjit/blob/main/requirements.md#milestones-and-acceptance-criteria">spec</a>. Until cimo's auto-vectorizer lands, the claim is C speed for scalar loops.</p>
+  <div class="road">
+    <div class="ms now" style="--c:#2563eb"><div class="m">M0<span class="st">in progress</span></div><h3>Subset and prior art</h3><p>cimo's demo kernels written as plain Python, with the C scramjit should emit for each.</p><div class="done"><b>Done when</b> every kernel fits the subset, or the subset is amended with the reason.</div><div class="heat"><i style="--w:25%;--f:.25"></i></div></div>
+    <div class="ms" style="--c:#8a6bb0"><div class="m">M1<span class="st">next</span></div><h3>Scalars, 1-D arrays, <code>range</code></h3><p><code>if</code>, <code>while</code>, annotations as contracts, <code>int64</code>/<code>float64</code>, in-memory cache.</p><div class="done"><b>Done when</b> those kernels match CPython on random inputs and are benchmarked.</div><div class="heat"><i style="--w:50%;--f:.5"></i></div></div>
+    <div class="ms" style="--c:#e8702a"><div class="m">M2<span class="st">planned</span></div><h3>Builtins, lists, narrowing</h3><p><code>enumerate</code>, <code>zip</code>, comprehensions, reductions; fixed-size lists; narrow types.</p><div class="done"><b>Done when</b> the generated C has no iterator or boxing code.</div><div class="heat"><i style="--w:75%;--f:.75"></i></div></div>
+    <div class="ms" style="--c:#dc2626"><div class="m">M3<span class="st">planned</span></div><h3>n-D, errors, disk cache, Pyodide</h3><p>All kernels in CPython and the browser; errors point at the Python line.</p><div class="done"><b>Done when</b> a second process reuses the disk cache.</div><div class="heat"><i style="--w:100%;--f:1"></i></div></div>
+  </div>
+  <p class="doclink"><a href="docs/?p=roadmap">Docs: roadmap →</a></p>
+</div></section>
+
+<section class="end"><div class="wrap">
+  <h2>Contributing</h2>
+  <p class="lede">scramjit is designed in the open. Read the spec, try the kernels, and open an issue with the loop you want fast.</p>
+  <div class="hero-cta">
+    <a class="btn btn-p" href="https://github.com/farizrahman4u/scramjit">GitHub</a>
+    <a class="btn btn-s" href="https://github.com/farizrahman4u/scramjit/blob/main/requirements.md">Design spec</a>
+    <a class="btn btn-s" href="docs/">Docs</a>
+  </div>
+</div></section>
+</main>
+
+<footer class="site"><div class="wrap foot">
+  <span>scramjit · MIT. Built on <a href="https://www.cimo.dev">cimo</a>.</span>
+  <nav class="foot-links" aria-label="Footer"><a href="docs/">Docs</a><a href="https://github.com/farizrahman4u/scramjit">GitHub</a><a href="https://github.com/farizrahman4u/scramjit/blob/main/requirements.md">Design spec</a><a href="https://github.com/farizrahman4u/scramjit/blob/main/LICENSE">License</a></nav>
+</div></footer>
+
+<script>
+// Copy buttons
+document.querySelectorAll('[data-copy]').forEach(function (b) {
+  b.addEventListener('click', function () {
+    var done = function () { b.classList.add('done'); b.setAttribute('aria-label', 'Copied'); setTimeout(function () { b.classList.remove('done'); b.setAttribute('aria-label', 'Copy'); }, 1400); };
+    if (navigator.clipboard) navigator.clipboard.writeText(b.dataset.copy).then(done, function () {});
+  });
+});
+// Highlighter for the small Python and C samples on this page.
+(function () {
+  var esc = function (t) { return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+  var RX = {
+    py: [/(#[^\n]*)|(^@[\w.]+)|("[^"\n]*")|\b(import|from|as|def|return|for|in|if|else|while|not|and|or|None|True|False)\b|\b(int|float|bool)\b|\b(\d[\d_]*(?:\.\d+)?)\b|\b([A-Za-z_]\w*)(?=\()/gm, ['cm', 'dec', 'str', 'kw', 'ty', 'num', 'fn']],
+    c: [/(\/\/[^\n]*)|(^#[^\n]*)|("[^"\n]*")|\b(for|if|else|while|return|const|restrict|static)\b|\b(void|double|float|int|int64_t|uint8_t|size_t)\b|\b(\d+(?:\.\d+)?)\b|\b([A-Za-z_]\w*)(?=\()/gm, ['cm', 'pp', 'str', 'kw', 'ty', 'num', 'fn']]
+  };
+  document.querySelectorAll('pre[data-lang]').forEach(function (pre) {
+    var r = RX[pre.dataset.lang]; if (!r) return;
+    var text = pre.textContent, out = '', last = 0;
+    text.replace(r[0], function (m) {
+      var g = [].slice.call(arguments, 1, 1 + r[1].length), at = arguments[arguments.length - 2];
+      out += esc(text.slice(last, at));
+      var k = g.findIndex(function (x) { return x !== undefined; });
+      out += '<span class="t-' + r[1][k] + '">' + esc(m) + '</span>';
+      last = at + m.length; return m;
+    });
+    pre.innerHTML = out + esc(text.slice(last));
+  });
+})();
+// Python / generated C tabs; flips on its own once while in view, then waits for the reader.
+(function () {
+  var box = document.getElementById('xform'); if (!box) return;
+  var tabs = box.querySelectorAll('.tabs button'), panes = box.querySelectorAll('.panes > pre'), name = box.querySelector('.fname'), touched = false;
+  function show(i) {
+    tabs.forEach(function (t, k) { t.setAttribute('aria-selected', k === i); });
+    panes.forEach(function (p, k) { p.hidden = k !== i; });
+    name.textContent = panes[i].dataset.name;
+  }
+  tabs.forEach(function (t, i) { t.addEventListener('click', function () { touched = true; show(i); }); });
+  if (matchMedia('(prefers-reduced-motion:reduce)').matches || !('IntersectionObserver' in window)) return;
+  new IntersectionObserver(function (es, ob) {
+    if (!es[0].isIntersecting) return;
+    ob.disconnect();
+    setTimeout(function () { if (!touched) show(1); }, 2600);
+  }, { threshold: 0.6 }).observe(box);
+})();
+// The heat line under the top bar fills as you scroll down the page.
+(function () {
+  var top = document.querySelector('.top'), q = false;
+  function draw() { q = false; var H = document.documentElement.scrollHeight - innerHeight; top.style.setProperty('--p', H > 0 ? Math.min(1, scrollY / H) : 0); }
+  addEventListener('scroll', function () { if (!q) { q = true; requestAnimationFrame(draw); } }, { passive: true });
+  draw();
+})();
+</script>
+<script src="flow.js?v=a3bfdc4a" defer></script>
+</body>
+</html>

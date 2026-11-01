@@ -1,6 +1,6 @@
 # Introduction
 
-scramjit is a just-in-time compiler for numeric Python, written in pure Python. Put a decorator on a function with a hot loop; on the first call scramjit translates it to C, compiles that with [cimo](https://www.cimo.dev) inside your process, and from then on the call runs native code.
+scramjit is a just-in-time compiler for Python, written in pure Python, for the loops the interpreter is slowest at. Put a decorator on a function with a hot loop; on the first call scramjit translates it to C, compiles that with [cimo](https://www.cimo.dev) inside your process, and from then on the call runs native code, without holding the GIL.
 
 ```python
 import numpy as np
@@ -21,7 +21,19 @@ There is no LLVM, no C compiler and no binary wheel involved: scramjit and cimo 
 > [!PLANNED]
 > scramjit is in design. Nothing on these pages is built yet: they describe the design in the [spec](https://github.com/farizrahman4u/scramjit/blob/main/requirements.md), and will turn into usage docs as each [milestone](roadmap.md) lands. Decisions the spec still lists as open are marked **open**.
 
-## When to use it
+## Where it shines
+
+Code that doesn't vectorize and is held back by the interpreter and the GIL:
+
+- **Recurrences,** where each step depends on the one before (filters, integrators, running statistics).
+- **Data-dependent branches and searches:** flood fills, path finding, dynamic programming, scans over byte buffers.
+- **Simulations** that step state forward one cell, particle or agent at a time.
+
+numpy is fast when the work fits one array expression; these don't. In CPython every iteration pays the interpreter, and threads take turns on the GIL. Compiled, the loop runs as C, and the GIL is released while it runs, so Python threads calling it run in parallel.
+
+**Also a fit:** vectorizable array math written as plain loops, where only pure Python is allowed or numpy isn't available.
+
+## Wherever Python runs
 
 - **Python in the browser.** Pyodide, JupyterLite, marimo and PyScript have no Python compiler today, so a slow loop has no fix.
 - **Plugins in embedded Pythons.** QGIS, Blender, Houdini, Maya, Nuke, FreeCAD and KiCad make compiled dependencies banned or painful.
@@ -30,8 +42,8 @@ There is no LLVM, no C compiler and no binary wheel involved: scramjit and cimo 
 
 ## When not to
 
-- Code that is already vectorized numpy or pandas: it is already running native loops.
 - Machine learning: use PyTorch or JAX.
+- Code that is already one vectorized numpy or pandas expression, where numpy runs: it is already running native loops.
 - If an existing JIT already works for you on a standard desktop or server, it has a head start, notably SIMD vectorization.
 
 ## It is still Python

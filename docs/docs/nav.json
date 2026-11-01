@@ -10,7 +10,7 @@
       ]
     },
     {
-      "title": "Writing compiled functions",
+      "title": "Writing functions",
       "walk": true,
       "pages": [
         ["types", "Types and annotations"],

@@ -7,6 +7,10 @@
 
 On each call the decorator reads the argument types: Python type, dtype, number of dimensions and layout. If it has no compiled version for that signature yet, it generates C specialized to it, compiles it with cimo and caches it.
 
+## The GIL
+
+Compiled code releases the GIL while it runs, so several Python threads calling compiled functions run in parallel. Compiling itself is Python code and holds the GIL like any other.
+
 ## Two caches
 
 - **In memory,** for the life of the process.

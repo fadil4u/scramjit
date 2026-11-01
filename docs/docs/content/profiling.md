@@ -2,17 +2,15 @@
 
 Code scramjit can't compile runs as Python, so nothing breaks, but speed can go missing quietly. Preflight shows the state of every decorated function, which lines run as Python and why, what compiling cost, and what to change.
 
-Every function is in one of three states, shown with the same colors everywhere:
+Every function is in one of three states:
 
 | | State | Means |
 | --- | --- | --- |
-| 🟢 | **compiled** | the whole function runs as native code |
-| 🟡 | **partly compiled** | some loops run native, the rest as Python |
-| 🔴 | **Python** | nothing compiled |
+| ✓ | **compiled** | the whole function runs as native code |
+| ~ | **partly compiled** | some loops run native, the rest as Python (needs loop lifting, not built yet) |
+| ✗ | **runs as Python** | nothing compiled |
 
-Partly compiled needs loop lifting, which isn't built yet. For now a function is compiled or Python, and the partly compiled examples on this page show what it will look like.
-
-`scramjit` is a command installed with the package; `python -m scramjit` works the same.
+`scramjit` is a command installed with the package; `python -m scramjit` works the same. Every command has `--help`, and `scramjit completion bash` (or `zsh`, `fish`) prints a shell completion script. Colors follow `--color`, `SCRAMJIT_COLOR`, `NO_COLOR` and `FORCE_COLOR`.
 
 ## Preflight, before you run
 
@@ -20,20 +18,26 @@ Partly compiled needs loop lifting, which isn't built yet. For now a function is
 $ scramjit preflight src/
 ```
 
-reads every `@scram` function under the path, without importing or running anything, and reports its state and, line by line, what stays in Python and why:
+reads every `@scram` function under the path (the current directory if you give none), without importing or running anything, and reports its state and, for each line that stops it, the construct, the reason and what to do about it:
 
 ```text
 src/sim.py
-  🟢 flood        compiled
-  🟢 ema          compiled
-  🟡 step         partly compiled
-       8  loop stays in Python: line 11 grows a list
-src/report.py
-  🔴 summarize    Python
-      18  iterates a dict
+  ✓ ema        compiled
+  ✓ grid       compiled
+  ✗ summarize  runs as Python
+      22 │     names = {}
+         │             ^^ dicts aren't compiled
+         │ hint: if the keys are small integers, use an array indexed by key; otherwise do this
+         │       outside the compiled function
+      24 │         names[i] = str(a[i])
+         │                    ^^^^^^^^^ calls str()
+         │ hint: keep text and printing out of the function: return numbers and format them
+         │       after the call
 
-2 compiled · 1 partly · 1 Python
+2 compiled, 1 runs as Python
 ```
+
+A line that only fails because an earlier one did isn't listed. `-q` shows only what doesn't compile, and `--json` prints the report for tools.
 
 Annotations are used. Unannotated arguments are assumed to be numbers or arrays, so a fallback caused by the types of an actual call (a `str`, say) needs `--run`.
 
@@ -44,24 +48,25 @@ $ scramjit preflight --run simulate.py --steps 2000
 $ scramjit preflight --run -m pytest tests/
 ```
 
-runs the script, or a module such as your test suite, and reports what actually happened, with the real argument types:
+runs the script, or a module such as your test suite, and reports what actually happened, with the real argument types. The program keeps stdout; the report goes to stderr:
 
 ```text
-scramjit · 4.21 s run · 61% native
-   function   calls  compile  native  python
-🟢 flood        120  0.14 s   0.22 s       –
-🟢 ema ×2         2  0.07 s   0.02 s       –
-🟡 step       2,000  disk     2.35 s  1.52 s
+scramjit 4.21 s run  ████████████░░░░░░░░ 61% native
+    function      calls  compile   native   python
+  ✓ flood           120   0.14 s   0.22 s        –
+  ✓ ema ×2            2   0.07 s   0.02 s        –
+  ✗ summarize     2,000        –        –   1.52 s
 
-hints
-  step, line 11: events.append keeps the loop on line 8 in Python;
-    collect the events after it with np.flatnonzero(y > 1.0)
-  ema: a arrives as int and float; annotate a: float
+ema: a arrives as float and int, so it compiles once per type
+  hint: annotate it, such as a: float, or convert once before calling
+summarize, line 22: dicts aren't compiled
+  hint: if the keys are small integers, use an array indexed by key; otherwise do this outside
+        the compiled function
 
-failed: step is partly compiled
+summarize runs as Python
 ```
 
-- **native** and **python** are the time each function spent in compiled code and in code that fell back. The native share at the top is native time over the whole run; the rest is your own Python and fallbacks.
+- **native** and **python** are the time each function spent in compiled code and in code that fell back. The native share at the top is native time over the whole run; the rest is your own Python and everything else.
 - **compile** is the time spent compiling; it's much shorter when the code came from the [disk cache](caching.md). **×2** means two signatures.
 - Functions that weren't called don't appear; run the static mode for those.
 
@@ -80,18 +85,17 @@ $ scramjit preflight --run -m pytest
 `f.preflight()` prints the function with each line marked native or Python, and what the compiler decided. It works in any REPL or notebook:
 
 ```text
->>> step.preflight()
-step(float64[:], float64[:], list)
-partly compiled · sim.py · compiled in 38 ms
-─────────────────────────────────────────────
- 6 🟢 for i in range(len(x)):         native, lifted
- 7 🟢     x[i] = x[i] * 0.99 + 0.01   bounds proven
- 8 🔴 for i in range(1, len(x)):      Python: line 11
- 9 🔴     y[i] = 0.9 * y[i - 1] + 0.1 * x[i]
-10 🔴     if y[i] > 1.0:
-11 🔴         events.append(i)        grows a list
-─────────────────────────────────────────────
-hint  collect the events after the loop with np.flatnonzero(y > 1.0)
+>>> ema.preflight()
+ema(float64[:], float64[:], float)
+✓ compiled · sim.py · compiled in 38 ms
+────────────────────────────────────────────────────────────
+   5 │   @scram
+   6 │   def ema(x, y, a: float):
+   7 │ ✓     y[0] = x[0]                               2 bounds checks kept
+   8 │ ✓     for i in range(1, len(x)):
+   9 │ ✓         y[i] = a * x[i] + (1 - a) * y[i - 1]  bounds hoisted out of the loop
+────────────────────────────────────────────────────────────
+types: x: float64[:], y: float64[:], a: float, i: int
 ```
 
 It reports:
@@ -108,12 +112,12 @@ Pass a signature to report on only that one: `f.preflight(f.signatures[0])`.
 Give preflight a function instead of a directory:
 
 ```console
-$ scramjit preflight src/sim.py:step                   # static: one assumed signature
-$ scramjit preflight src/sim.py:step --run app.py      # every signature compiled during the run
-$ scramjit preflight pkg.sim:step                      # a dotted module path works too
+$ scramjit preflight src/sim.py:ema                    # static: one assumed signature
+$ scramjit preflight src/sim.py:ema --run app.py       # every signature compiled during the run
+$ scramjit preflight pkg.sim:ema                       # a dotted module path works too
 ```
 
-It prints the same report as `step.preflight()`. Without `--run`, argument types come from annotations, and unannotated arguments are assumed to be numbers or arrays. With `--run`, the report covers each signature the function was actually compiled for. Put the function before `--run`: everything after `--run` is the program and its arguments.
+It prints the same report as `ema.preflight()`. Without `--run`, argument types come from annotations, and unannotated arguments are assumed to be numbers or arrays. With `--run`, the report covers each signature the function was actually compiled for. Put the function before `--run`: everything after `--run` is the program and its arguments.
 
 ## Specializations and the generated C
 
@@ -123,7 +127,7 @@ It prints the same report as `step.preflight()`. Without `--run`, argument types
 >>> print(ema.c(ema.signatures[0]))
 ```
 
-`f.c()` returns the C scramjit generated, with `#line` directives pointing back at your Python. Without an argument it uses the most recent signature.
+`f.c()` returns the C scramjit generated, with `#line` directives pointing back at your Python. Without an argument it uses the most recent signature. From the command line, without running anything: `scramjit c src/sim.py:ema` (add `--runtime` for a file you can compile on its own).
 
 ## Log compiles and fallbacks
 

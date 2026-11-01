@@ -12,4 +12,5 @@ class Unsupported(Exception):
     def __init__(self, node, reason):
         super().__init__(reason)
         self.lineno = getattr(node, 'lineno', None)
+        self.node = node
         self.reason = reason

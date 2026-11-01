@@ -18,7 +18,7 @@ classifiers = [
 ]
 
 [project.scripts]
-scramjit = "scramjit._preflight:main"
+scramjit = "scramjit.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest", "numpy"]

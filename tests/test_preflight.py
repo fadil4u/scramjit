@@ -1,5 +1,6 @@
 """The preflight report, the command line, the disk cache across processes, and the log."""
 
+import json
 import os
 import subprocess
 import sys
@@ -69,7 +70,8 @@ print('args', sys.argv[1:])
 
 
 def run(args, cwd, **env):
-    e = dict(os.environ, PYTHONPATH=os.pathsep.join([ROOT, CIMO]), PYTHONWARNINGS='ignore', PYTHONIOENCODING='utf-8', **env)
+    e = {k: v for k, v in os.environ.items() if k not in ('FORCE_COLOR', 'NO_COLOR', 'SCRAMJIT_COLOR')}
+    e.update(PYTHONPATH=os.pathsep.join([ROOT, CIMO]), PYTHONWARNINGS='ignore', PYTHONIOENCODING='utf-8', **env)
     return subprocess.run([sys.executable, *args], cwd=cwd, env=e, capture_output=True, text=True, timeout=120, encoding='utf-8')
 
 
@@ -83,16 +85,26 @@ def proj(tmp_path):
 def test_static_report(proj):
     r = run(['-m', 'scramjit', 'preflight', 'sim.py'], proj)
     assert r.returncode == 1, r.stderr
-    assert '🟢 ema' in r.stdout and '🟢 grid' in r.stdout and '🔴 summarize' in r.stdout
-    assert 'the Dict expression' in r.stdout and 'calls str()' in r.stdout
+    assert '✓ ema' in r.stdout and '✓ grid' in r.stdout and '✗ summarize' in r.stdout
+    assert "dicts aren't compiled" in r.stdout and 'calls str()' in r.stdout
     assert 'plain' not in r.stdout
-    assert '4 compiled · 1 Python' in r.stdout
+    assert '4 compiled, 1 runs as Python' in r.stdout
+    # the line that only fails because an earlier one did isn't blamed
+    assert 'len() of something' not in r.stdout
+
+
+def test_carets_and_hints(proj):
+    out = run(['-m', 'scramjit', 'preflight', 'sim.py'], proj).stdout.splitlines()
+    i = next(k for k, ln in enumerate(out) if 'names[i] = str(a[i])' in ln)
+    src, under = out[i], out[i + 1]
+    assert src.index('str(a[i])') == under.index('^') and under.count('^') == len('str(a[i])')
+    assert 'hint:' in out[i + 2] and 'return numbers' in out[i + 2]
 
 
 def test_static_imports_nothing(tmp_path):
     (tmp_path / 'boom.py').write_text('raise SystemExit("imported!")\nfrom scramjit import scram\n@scram\ndef f(a: int):\n    return a + 1\n')
     r = run(['-m', 'scramjit', 'preflight', str(tmp_path)], tmp_path)
-    assert r.returncode == 0 and '🟢 f' in r.stdout, r.stdout + r.stderr
+    assert r.returncode == 0 and '✓ f' in r.stdout, r.stdout + r.stderr
 
 
 def test_exit_zero_when_all_compiled(tmp_path):
@@ -101,10 +113,103 @@ def test_exit_zero_when_all_compiled(tmp_path):
     assert run(['-m', 'scramjit', 'preflight', '--allow-partial', 'ok.py'], tmp_path).returncode == 0
 
 
-def test_bad_usage(proj):
-    assert run(['-m', 'scramjit'], proj).returncode == 2
-    assert run(['-m', 'scramjit', 'preflight', 'missing.py'], proj).returncode == 2
-    assert run(['-m', 'scramjit', 'preflight', 'sim.py:nothing'], proj).returncode == 2
+def test_help_and_version(proj):
+    r = run(['-m', 'scramjit'], proj)
+    assert r.returncode == 0 and 'Usage: scramjit <command>' in r.stdout and 'preflight' in r.stdout and 'Examples:' in r.stdout
+    assert 'scramjit preflight --run' in run(['-m', 'scramjit', 'help', 'preflight'], proj).stdout
+    assert '--quiet' in run(['-m', 'scramjit', 'preflight', '--help'], proj).stdout
+    assert 'Delete cached files' in run(['-m', 'scramjit', 'cache', '--help'], proj).stdout
+    v = run(['-m', 'scramjit', '--version'], proj).stdout
+    assert v.startswith('scramjit ') and 'cimo' in v and 'Python' in v
+
+
+@pytest.mark.parametrize('args, needle, also', [
+    (['preflght'], 'Did you mean', 'preflight'),
+    (['preflight', '--jsn'], 'Did you mean', '--json'),
+    (['sim.py'], 'hint:', 'scramjit preflight sim.py'),
+    (['preflight', 'sm.py'], 'Did you mean', 'sim.py'),
+    (['preflight', 'sim.py:eam'], 'Did you mean', 'sim.py:ema'),
+    (['preflight', 'nosuchdir/x.py:f'], 'no such file', 'nosuchdir'),
+    (['preflight', '--run'], 'needs a program', '--run -m pytest'),
+    (['preflight', '--run', 'ap.py'], 'Did you mean', 'app.py'),
+    (['c', 'sim.py'], 'hint:', 'FILE:FUNCTION'),
+    (['completion', 'bsh'], 'Did you mean', 'bash'),
+    (['help', 'preflght'], 'Did you mean', 'preflight'),
+])
+def test_mistakes_are_explained(proj, args, needle, also):
+    r = run(['-m', 'scramjit', *args], proj)
+    assert r.returncode == 2 and needle in r.stderr and also in r.stderr, r.stderr
+    assert 'Traceback' not in r.stderr
+
+
+def test_default_path_and_no_functions(proj, tmp_path_factory):
+    assert '✓ ema' in run(['-m', 'scramjit', 'preflight'], proj).stdout
+    empty = tmp_path_factory.mktemp('empty')
+    (empty / 'x.py').write_text('print(1)\n')
+    r = run(['-m', 'scramjit', 'preflight'], empty)
+    assert r.returncode == 0 and 'no @scram functions' in r.stderr
+
+
+def test_a_syntax_error_is_reported_not_skipped(tmp_path):
+    (tmp_path / 'bad.py').write_text('def f(:\n')
+    r = run(['-m', 'scramjit', 'preflight', '.'], tmp_path)
+    assert r.returncode == 1 and 'bad.py:1' in r.stdout
+
+
+def test_quiet(proj):
+    out = run(['-m', 'scramjit', 'preflight', '-q', 'sim.py'], proj).stdout
+    assert '✗ summarize' in out and '✓' not in out
+
+
+def test_json(proj):
+    r = run(['-m', 'scramjit', 'preflight', '--json', 'sim.py'], proj)
+    d = json.loads(r.stdout)
+    assert d['compiled'] == 4 and d['python'] == 1 and r.returncode == 1
+    bad = next(f for f in d['files'][0]['functions'] if f['name'] == 'summarize')
+    assert bad['state'] == 'python' and bad['problems'][0]['line'] == SIM.splitlines().index('    names = {}') + 1 and bad['problems'][0]['hint']
+    r = run(['-m', 'scramjit', 'preflight', '--json', '--run', 'app.py'], proj)
+    d = json.loads(r.stderr)
+    assert {f['name'] for f in d['functions']} == {'ema', 'grid', 'summarize'} and d['exit_status'] == 0
+
+
+def test_color_rules(proj):
+    esc = '\x1b['
+    args = ['-m', 'scramjit', 'preflight', 'sim.py']
+    assert esc not in run(args, proj).stdout                               # a pipe
+    assert esc in run(args, proj, FORCE_COLOR='1').stdout
+    assert esc not in run(args, proj, NO_COLOR='1').stdout
+    assert esc in run(['-m', 'scramjit', '--color', 'always', *args[2:]], proj).stdout
+    assert esc in run(args, proj, SCRAMJIT_COLOR='always').stdout
+    assert esc not in run(['-m', 'scramjit', '--color=never', *args[2:]], proj, FORCE_COLOR='1').stdout
+
+
+def test_terminals_without_unicode(proj):
+    e = dict(os.environ, PYTHONPATH=os.pathsep.join([ROOT, CIMO]), PYTHONIOENCODING='ascii', PYTHONWARNINGS='ignore')
+    for args in (['preflight', 'sim.py'], ['preflight', 'sim.py:ema'], ['preflight', '--run', 'app.py']):
+        r = subprocess.run([sys.executable, '-m', 'scramjit', *args], cwd=proj, env=e, capture_output=True, timeout=120)
+        assert b'Traceback' not in r.stderr, r.stderr
+        assert r.returncode == 1 or args[1] == 'sim.py:ema'
+
+
+def test_c(proj):
+    r = run(['-m', 'scramjit', 'c', 'sim.py:ema'], proj)
+    assert r.returncode == 0 and 'int sj_kernel' in r.stdout and '#line' in r.stdout and 'sj_floordiv' not in r.stdout
+    assert 'sj_floordiv' in run(['-m', 'scramjit', 'c', 'sim.py:ema', '--runtime'], proj).stdout
+    r = run(['-m', 'scramjit', 'c', 'sim.py:summarize'], proj)
+    assert r.returncode == 1 and 'has no C' in r.stderr and "dicts aren't compiled" in r.stderr
+
+
+def test_completion(proj):
+    assert 'preflight' in run(['-m', 'scramjit', '__complete', 'pre'], proj).stdout
+    assert '--json' in run(['-m', 'scramjit', '__complete', 'preflight', '--'], proj).stdout
+    for shell in ('bash', 'zsh', 'fish'):
+        assert 'scramjit' in run(['-m', 'scramjit', 'completion', shell], proj).stdout
+
+
+def test_cache_commands(proj, tmp_path):
+    cc = str(tmp_path / 'cc')
+    assert run(['-m', 'scramjit', 'cache', 'path'], proj, CIMO_CACHE_DIR=cc).stdout.strip() == cc
+    assert run(['-m', 'scramjit', 'cache', 'info'], proj, CIMO_CACHE_DIR=cc).returncode == 0
 
 
 def test_one_function_bounds(proj):
@@ -128,22 +233,22 @@ def test_checks_off(proj):
 
 def test_one_function_python(proj):
     r = run(['-m', 'scramjit', 'preflight', 'sim.py:summarize'], proj)
-    assert r.returncode == 1 and '🔴' in r.stdout and 'calls str()' in r.stdout
+    assert r.returncode == 1 and '✗' in r.stdout and 'calls str()' in r.stdout
 
 
 def test_run_report(proj):
     r = run(['-m', 'scramjit', 'preflight', '--run', 'app.py', 'one', 'two'], proj)
-    assert "args ['one', 'two']" in r.stdout, r.stderr
-    assert '% native' in r.stdout and '🟢 ema ×2' in r.stdout and '🔴 summarize' in r.stdout
-    assert 'a arrives as float and int' in r.stdout
-    assert 'failed: summarize is not compiled' in r.stdout
+    assert r.stdout == "args ['one', 'two']\n", r.stdout       # the program keeps stdout
+    assert '% native' in r.stderr and '✓ ema ×2' in r.stderr and '✗ summarize' in r.stderr
+    assert 'a arrives as float and int' in r.stderr
+    assert 'summarize runs as Python' in r.stderr
     assert r.returncode == 1
 
 
 def test_run_module(proj):
     (proj / 'okmod.py').write_text('import numpy as np\nimport sim\nsim.grid(np.ones((2, 2)))\n')
     r = run(['-m', 'scramjit', 'preflight', '--run', '-m', 'okmod'], proj)
-    assert r.returncode == 0 and '🟢 grid' in r.stdout, r.stdout + r.stderr
+    assert r.returncode == 0 and '✓ grid' in r.stderr, r.stdout + r.stderr
 
 
 def test_run_passes_on_the_programs_failure(proj):

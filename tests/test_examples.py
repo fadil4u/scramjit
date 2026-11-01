@@ -28,5 +28,5 @@ def test_example_runs_native(name, tmp_path):
 
 def test_preflight_agrees(tmp_path):
     r = run(['-m', 'scramjit', 'preflight', os.path.join(ROOT, 'examples')], tmp_path)
-    assert '9 compiled · 2 Python' in r.stdout, r.stdout
-    assert '🔴 histogram_dict' in r.stdout and '🔴 must_be_native' in r.stdout
+    assert '9 compiled, 2 run as Python' in r.stdout, r.stdout
+    assert '✗ histogram_dict' in r.stdout and '✗ must_be_native' in r.stdout

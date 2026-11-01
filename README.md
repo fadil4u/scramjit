@@ -144,20 +144,23 @@ except CompileError as e:
 ```
 $ scramjit preflight src/
 src/sim.py
-  🟢 ema        compiled
-  🟢 grid       compiled
-  🔴 summarize  Python
-        22  the Dict expression
-        24  calls str()
+  ✓ ema        compiled
+  ✓ grid       compiled
+  ✗ summarize  runs as Python
+      22 │     names = {}
+         │             ^^ dicts aren't compiled
+         │ hint: if the keys are small integers, use an array indexed by key; otherwise do this
+         │       outside the compiled function
 
-2 compiled · 1 Python
+2 compiled, 1 runs as Python
 ```
 
 `scramjit preflight --run app.py` (or `--run -m pytest`) reports what happened with the real types:
 calls, compile time, and time in native code and in Python. Both exit non-zero if a function isn't
-compiled, so they work as a CI check. `f.preflight()` annotates one function line by line, including
-which bounds checks were proven, hoisted out of the loop or kept. `SCRAMJIT_LOG=1` logs each compile
-and fallback.
+compiled, so they work as a CI check, and `--json` gives the report to tools. `scramjit preflight
+FILE:FUNCTION` or `f.preflight()` annotates one function line by line, including which bounds checks
+were proven, hoisted out of the loop or kept. `scramjit c FILE:FUNCTION` prints the generated C, and
+`SCRAMJIT_LOG=1` logs each compile and fallback. `scramjit --help` has the rest.
 
 Compiled code is cached on disk: compiling took 0.53 s in the first process and 0.06 s in later
 ones on a Gray-Scott kernel. `@scram(cache=False)` writes nothing.

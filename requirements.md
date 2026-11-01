@@ -440,6 +440,9 @@ needed. Preflight is built (`scramjit/_preflight.py`): static analysis sets each
 aside and retries, so it reports every line, not only the first, though a line can fail only because
 one it depends on did. Bounds notes come from the compiler, not from scanning the C, since a versioned
 loop's slow copy always holds checks that don't run in the fast one.
+The command line (`scramjit/cli/`) is built like cimo's: its parser, terminal and completion are copied
+rather than imported, because they aren't cimo's public API. `--run` reports on stderr so the program
+keeps stdout.
 
 **M4: loop lifting.** Compile the loops that fit inside functions that don't. Done when a function
 mixing Python-only setup (dicts, strings) with a numeric loop is partly compiled, matches CPython,

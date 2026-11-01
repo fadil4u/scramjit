@@ -5,7 +5,14 @@
 .peel.pulling{cursor:grabbing}
 .peel:focus-visible{outline:none}
 .peel-under{position:absolute;inset:0;pointer-events:auto;color:#fff;background:linear-gradient(45deg,#2563eb 30%,#f97316 72%,#dc2626);clip-path:polygon(0 0,100% 0,100% 100%)}
-.peel-under svg{position:absolute;top:9%;right:9%;width:37%;height:37%}
+.peel-under svg{position:absolute;top:6px;right:6px;width:22px;height:22px}
+/* a wink shortly after the page loads, and on every hover or keyboard focus */
+.peel .eye-r{transform-box:fill-box;transform-origin:center;animation:peel-wink .5s ease-in-out 2.5s}
+.peel:focus-visible .eye-r{animation:peel-wink-again .5s ease-in-out}
+@media(hover:hover){.peel:hover .eye-r{animation:peel-wink-again .5s ease-in-out}}
+@keyframes peel-wink{0%,100%{transform:none}35%,65%{transform:scaleY(.12)}}
+@keyframes peel-wink-again{0%,100%{transform:none}35%,65%{transform:scaleY(.12)}}
+@media(prefers-reduced-motion:reduce){.peel .eye-r,.peel:hover .eye-r,.peel:focus-visible .eye-r{animation:none}}
 .peel-hit{position:absolute;inset:0;pointer-events:auto;clip-path:polygon(0 0,100% 100%,0 100%)}
 .peel-label{position:absolute;top:calc(100% + 8px);right:12px;padding:5px 10px;border-radius:7px;background:#0b0f1a;color:#e6edf3;font:600 12.5px Inter,system-ui,-apple-system,"Segoe UI",sans-serif;white-space:nowrap;box-shadow:0 8px 20px -8px rgba(0,0,0,.6);opacity:0;transition:opacity .12s;pointer-events:none}
 .peel:focus-visible .peel-label{opacity:1}
@@ -13,14 +20,14 @@
 .peel.pulling .peel-label{opacity:0}
 /* the fold, drawn by agent.js; --crease is how far the crease is from the corner */
 .rip-flap{position:absolute;inset:0;z-index:2;pointer-events:none;filter:drop-shadow(-3px 4px 7px rgba(0,0,0,.55))}
-.rip-flap i{position:absolute;inset:0;background:linear-gradient(225deg,#59637a var(--crease),#c6cedb calc(var(--crease) + 14px),#8c96aa calc(var(--crease) + 110px),#3c4459 calc(var(--crease) + 420px))}
+.rip-flap i{position:absolute;inset:0;background:linear-gradient(225deg,#59637a var(--crease),#c6cedb calc(var(--crease) + 12px),#8c96aa calc(var(--crease) + 44px),#59637a calc(var(--crease) + 70px))}
 /* behind the banner */
 .rip-back{position:absolute;inset:0;background:#0b0f1a;color:#c9d1d9}
-.rip-in{height:100%;display:flex;flex-direction:column;gap:12px;padding-top:18px;padding-bottom:18px}
+.rip-in{position:absolute;display:flex;flex-direction:column;gap:10px}
 .rip-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;flex:none}
 .rip-bar .i-robot{width:22px;height:22px;flex:none;color:#ffb072}
 .rip-bar h2{white-space:nowrap;color:#e6edf3;font-size:16px;font-weight:600;letter-spacing:-.01em;margin:0}
-.rip-bar p{flex:1;min-width:0;margin:0 0 0 6px;font-size:13px;color:#8e94a3}
+.rip-bar h2{flex:1;min-width:0}
 .rip-bar button{display:inline-flex;align-items:center;gap:7px;height:34px;padding:0 13px;border:1px solid #2a3042;border-radius:7px;background:#1f2433;color:#d7dde8;font:600 13px Inter,system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer}
 .rip-bar button:hover:not(:disabled){background:#2b3245;color:#fff}
 .rip-bar button:disabled{opacity:.5;cursor:default}
@@ -28,7 +35,7 @@
 .rip-copy .i-done,.rip-copy.done .i-copy{display:none}.rip-copy.done .i-done{display:block}.rip-copy.done{color:#7ee2b8}
 .rip-back pre{flex:1;min-height:0;margin:0;padding:14px 16px;overflow:auto;overscroll-behavior:contain;background:#151821;border:1px solid #1f2535;border-radius:10px;font:12.5px/1.6 'DM Mono',ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere;scrollbar-color:#2d3243 transparent}
 .rip-back pre:focus-visible{outline:2px solid #ffb072;outline-offset:-2px}
-@media(max-width:600px){.rip-bar p{order:3;flex-basis:100%;margin:0}.rip-bar h2{flex:1;font-size:15px}.rip-bar button{padding:0 8px}}
+@media(max-width:600px){.peel-under svg{top:4px;right:4px;width:16px;height:16px}.rip-bar h2{font-size:15px}.rip-bar button{padding:0 8px}}
 /* the corner on pages without a banner: it links to the one that has it */
 .peel-link{--p:60px;position:fixed;z-index:55;width:var(--p);height:var(--p);cursor:pointer;transition:width .18s ease-out,height .18s ease-out}
 .peel-link:focus-visible{--p:72px}

@@ -1,8 +1,8 @@
-// Prompt for Agents. On the landing page, the banner's top right corner peels away to show the
+// Prompt for Agents. On the landing page, the banner's top right corner peels back to show the
 // prompt behind it. Elsewhere, a corner links there.
 (function () {
   var here = document.currentScript.src;
-  var ROBOT = '<svg class="i-robot" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v4"/><circle cx="12" cy="3" r=".6"/><rect x="4" y="7" width="16" height="13" rx="3"/><path d="M1.5 12.5v3M22.5 12.5v3M9 16h6"/><circle class="eye" cx="9" cy="11.5" r="1.2"/><circle class="eye" cx="15" cy="11.5" r="1.2"/></svg>';
+  var ROBOT = '<svg class="i-robot" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v4"/><circle cx="12" cy="3" r=".6"/><rect x="4" y="7" width="16" height="13" rx="3"/><path d="M1.5 12.5v3M22.5 12.5v3M9 16h6"/><circle class="eye" cx="9" cy="11.5" r="1.2"/><circle class="eye eye-r" cx="15" cy="11.5" r="1.2"/></svg>';
   var LABEL = '<span class="peel-label">Prompt for Agents</span>';
   var banner = document.querySelector('.banner');
 
@@ -17,7 +17,9 @@
     return;
   }
 
-  var REST = matchMedia('(max-width:600px)').matches ? 44 : 60, HOVER = REST + 12, TIP = 96;
+  var phone = matchMedia('(max-width:600px)');
+  var REST = phone.matches ? 44 : 60, HOVER = REST + 12, TIP = 96;
+  var SHARE = 0.4, ROLL = phone.matches ? 44 : 70;  // how much of the banner peels, and how wide the fold rolls up
   var COPY = '<svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg><svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
   var front = banner.querySelector('.banner-front');
 
@@ -25,8 +27,8 @@
   back.className = 'rip-back';
   back.id = 'agents';
   back.inert = true;
-  back.innerHTML = '<div class="wrap rip-in"><div class="rip-bar">' + ROBOT +
-    '<h2>Prompt for Agents</h2><p>Paste this into your coding agent.</p>' +
+  back.innerHTML = '<div class="rip-in"><div class="rip-bar">' + ROBOT +
+    '<h2>Prompt for Agents</h2>' +
     '<button type="button" class="rip-copy" disabled>' + COPY + '<span>Copy</span></button>' +
     '<button type="button" class="rip-close">Put it back</button></div>' +
     '<pre tabindex="0">Loading…</pre></div>';
@@ -58,10 +60,10 @@
   // crease is gone from the front and shows, reflected across the crease, as the flap.
   var q = REST, isOpen = false, raf = 0, drag = null;
   var points = function (ps) { return ps.length ? 'polygon(' + ps.map(function (p) { return p[0] + 'px ' + p[1] + 'px'; }).join(',') + ')' : 'polygon(0 0)'; };
-  function cut(rect, side, W) {
-    var out = [], d = function (p) { return side * (p[1] - p[0] + W - q); };
-    rect.forEach(function (a, i) {
-      var b = rect[(i + 1) % rect.length], da = d(a), db = d(b);
+  function cut(poly, d) {
+    var out = [];
+    poly.forEach(function (a, i) {
+      var b = poly[(i + 1) % poly.length], da = d(a), db = d(b);
       if (da >= 0) out.push(a);
       if (da * db < 0) { var t = da / (da - db); out.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]); }
     });
@@ -70,14 +72,44 @@
   function draw(v) {
     q = v;
     var W = banner.clientWidth, H = banner.clientHeight, rect = [[0, 0], [W, 0], [W, H], [0, H]];
-    front.style.clipPath = points(cut(rect, 1, W));
-    paper.style.clipPath = points(cut(rect, -1, W).map(function (p) { return [p[1] + W - q, p[0] - W + q]; }));
+    var below = function (p) { return p[1] - p[0] + W - q; };
+    front.style.clipPath = points(cut(rect, below));
+    var flipped = cut(rect, function (p) { return -below(p); }).map(function (p) { return [p[1] + W - q, p[0] - W + q]; });
+    paper.style.clipPath = points(cut(flipped, function (p) { return ROLL * Math.SQRT2 - below(p); }));
     paper.style.setProperty('--crease', q / Math.SQRT2 + 'px');
     var size = Math.min(q, TIP);
     peel.style.width = peel.style.height = size + 'px';
     peel.style.opacity = Math.max(0, Math.min(1, (170 - q) / 60));
   }
-  var full = function () { return banner.clientWidth + banner.clientHeight; };
+  // Open, the crease stops where SHARE of the banner has peeled or just short of the headline and
+  // lede, whichever comes first, unless the prompt's panel needs more room, as on a phone. The
+  // panel fits exactly above the crease.
+  var panel = back.querySelector('.rip-in'), TOP = 16, EDGE = 14;
+  function peeled(v, W, H) {
+    var d = function (p) { return p[0] - p[1] - W + v; };
+    var ps = cut([[0, 0], [W, 0], [W, H], [0, H]], d), area = 0;
+    ps.forEach(function (a, i) { var b = ps[(i + 1) % ps.length]; area += a[0] * b[1] - b[0] * a[1]; });
+    return Math.abs(area) / 2 / (W * H);
+  }
+  function clearOfCopy(W) {
+    var box = banner.getBoundingClientRect(), range = document.createRange(), limit = Infinity;
+    banner.querySelectorAll('.banner-copy h1, .banner-copy .lede').forEach(function (el) {
+      range.selectNodeContents(el);
+      [].forEach.call(range.getClientRects(), function (r) {
+        limit = Math.min(limit, r.top - box.top + W - (r.right - box.left) - ROLL * Math.SQRT2 - 8);
+      });
+    });
+    return limit;
+  }
+  function full() {
+    var W = banner.clientWidth, H = banner.clientHeight, lo = 0, hi = W + H, side = phone.matches ? 16 : 24;
+    for (var i = 0; i < 24; i++) { var m = (lo + hi) / 2; if (peeled(m, W, H) < SHARE) lo = m; else hi = m; }
+    var gaps = side + TOP + EDGE, maxW = W - 2 * side, maxH = H - 2 * TOP;
+    var v = Math.max(Math.min(lo, clearOfCopy(W)), Math.min(maxW, 320) + Math.min(maxH, 280) + gaps);
+    var pw = Math.min(maxW, Math.round((v - gaps) * 0.56)), ph = Math.min(maxH, v - gaps - pw);
+    panel.style.cssText = 'top:' + TOP + 'px;right:' + side + 'px;width:' + pw + 'px;height:' + ph + 'px';
+    return v;
+  }
   var still = matchMedia('(prefers-reduced-motion:reduce)');
   function move(to, ms, done) {
     cancelAnimationFrame(raf);
@@ -92,17 +124,14 @@
 
   function open(instant) {
     isOpen = true;
-    front.inert = true;
     back.inert = false;
     peel.setAttribute('aria-expanded', 'true');
-    var end = function () { front.style.visibility = 'hidden'; peel.hidden = true; if (!instant) text.focus({ preventScroll: true }); };
+    var end = function () { peel.hidden = true; if (!instant) text.focus({ preventScroll: true }); };
     if (instant) { draw(full()); end(); } else move(full(), 650, end);
   }
   function close() {
     isOpen = false;
     back.inert = true;
-    front.inert = false;
-    front.style.visibility = '';
     peel.hidden = false;
     peel.setAttribute('aria-expanded', 'false');
     move(REST, 550, function () { peel.focus({ preventScroll: true }); });
@@ -119,7 +148,7 @@
   peel.addEventListener('pointermove', function (e) {
     if (!drag) return;
     drag.moved = Math.max(0, (drag.x - e.clientX + e.clientY - drag.y) / 2);
-    draw(drag.q + drag.moved);
+    draw(Math.min(drag.q + drag.moved, full()));
   });
   peel.addEventListener('pointerup', function () {
     if (!drag) return;
@@ -147,6 +176,7 @@
   });
 
   if ('ResizeObserver' in window) new ResizeObserver(function () { if (!drag) draw(isOpen ? full() : q); }).observe(banner);
+  full();
   draw(REST);
   if (location.hash === '#agents') open(true);
 })();

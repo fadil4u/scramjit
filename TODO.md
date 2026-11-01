@@ -80,3 +80,17 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
     FMA makes them slower on arm64 (a `dot` through cimo: 2.15 ns per element with, 1.81 without;
     `bench/llm.py` through `gcc -O3`: 63 tok/s with, 82 without), probably the latency of the
     instruction the sum's next add waits on (not measured). Measure non-reductions (stencils) before making it fire or removing it.
+14. **Shift operators:** `>>` and `<<` fall back ("the RShift operator"). Hash, RNG and bit-packing loops use
+    them constantly, and a model writing code reaches for them first. Python's ints don't wrap on `<<`, so decide
+    how that fits the 64-bit rule in Gotchas.
+15. **Calls between compiled functions** (already noted in the spec under "Calls between compiled functions"). A
+    program built from `reset`, `step` and `observe` has to be pasted into one function by hand today: found
+    building a training loop around generated environments, where it is the main obstacle.
+16. **Compile time jumps on large functions.** In a generated 200-line training loop, adding a 4-line nested
+    copy (`rec[t, y, x] = grid[y, x]` under one `if`) took the compile from about 3 s to 11 to 15 s on a loaded
+    machine. Find out whether it comes from versioning duplicating the outer loop or from cimo's backend passes,
+    where a profile puts most of the time. Compile time decides whether generated code is practical, since each
+    candidate compiles once.
+17. **float32 arithmetic falls back, with a misleading reason:** "arithmetic on numpy bools", because
+    `arith_result` returns None for narrow types too. Say what is actually unsupported, then compile it:
+    float64 doubles the memory of anything with float32 weights.

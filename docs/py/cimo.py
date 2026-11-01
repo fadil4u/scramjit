@@ -766,6 +766,17 @@ def _i_bitfield(a, mn, ops):
     base = 0x53000000 if mn == 'ubfx' else 0x13000000
     return (base | _sf(rd) | (w == 64) << 22 | lsb << 16 | (lsb + width - 1) << 10 | rn[1] << 5
             | rd[1])
+def _i_ubfiz(a, mn, ops):
+    if len(ops) != 4:
+        raise AssemblerError('ubfiz needs 4 operands')
+    rd, rn = _reg(ops[0]), _reg(ops[1])
+    _same(rd, rn)
+    w = 64 if rd[0] == 'x' else 32
+    lsb, width = _imm(ops[2], True), _imm(ops[3], True)
+    if not (0 <= lsb < w and 1 <= width <= w - lsb):
+        raise AssemblerError('bad bit field in ubfiz')
+    return (0x53000000 | _sf(rd) | (w == 64) << 22 | ((-lsb) % w) << 16 | (width - 1) << 10
+            | rn[1] << 5 | rd[1])
 def _i_ror(a, mn, ops):
     if len(ops) != 3:
         raise AssemblerError('ror needs 3 operands')
@@ -1102,12 +1113,28 @@ def _i_csel(a, mn, ops):
         raise AssemblerError('bad condition %r' % ops[3])
     if mn == 'fcsel':
         return 0x1e200c00 | _ftype(rd) << 22 | rm[1] << 16 | c << 12 | rn[1] << 5 | rd[1]
-    return 0x1a800000 | _sf(rd) | rm[1] << 16 | c << 12 | rn[1] << 5 | rd[1]
+    base = {'csel': 0x1a800000, 'csinc': 0x1a800400, 'csinv': 0x5a800000, 'csneg': 0x5a800400}[mn]
+    return base | _sf(rd) | rm[1] << 16 | c << 12 | rn[1] << 5 | rd[1]
 def _i_mulh(a, mn, ops):
     if len(ops) != 3:
         raise AssemblerError('%s needs 3 operands' % mn)
     rd, rn, rm = [_reg(o, 'x') for o in ops]
     return (0x9bc07c00 if mn == 'umulh' else 0x9b407c00) | rm[1] << 16 | rn[1] << 5 | rd[1]
+def _i_tbz(a, mn, ops):
+    if len(ops) != 3:
+        raise AssemblerError('%s needs 3 operands' % mn)
+    rt = _reg(ops[0])
+    n = _imm(ops[1], True)
+    if not 0 <= n < (64 if rt[0] == 'x' else 32):
+        raise AssemblerError('bit number out of range')
+    sym, add, mod = _expr(ops[2])
+    if sym is None or mod is not None:
+        raise AssemblerError('bad branch target %r' % ops[2])
+    a.fixup('TSTBR14', sym, add)
+    return ((0x37000000 if mn == 'tbnz' else 0x36000000) | (n >> 5) << 31 | (n & 31) << 19 | rt[1])
+def _i_tst(a, mn, ops):
+    rn = _reg(ops[0])
+    return _i_logic(a, 'ands', ['wzr' if rn[0] == 'w' else 'xzr'] + list(ops))
 def _i_cbz(a, mn, ops):
     if len(ops) != 2:
         raise AssemblerError('%s needs 2 operands' % mn)
@@ -1163,10 +1190,12 @@ _INSNS = {
     'cmp': _i_cmp, 'cmn': _i_cmp, 'neg': _i_neg,
     'and': _i_logic, 'orr': _i_logic, 'eor': _i_logic, 'ands': _i_logic,
     'bic': _i_logic, 'orn': _i_logic, 'eon': _i_logic, 'ubfx': _i_bitfield, 'sbfx': _i_bitfield,
-    'ror': _i_ror,
+    'ror': _i_ror, 'ubfiz': _i_ubfiz,
     'lsl': _i_shift, 'lsr': _i_shift, 'asr': _i_shift,
     'mul': _i_dp2, 'sdiv': _i_dp2, 'udiv': _i_dp2, 'madd': _i_madd, 'msub': _i_madd,
-    'cbz': _i_cbz, 'cbnz': _i_cbz, 'csel': _i_csel, 'fcsel': _i_csel, 'smulh': _i_mulh, 'umulh': _i_mulh,
+    'cbz': _i_cbz, 'cbnz': _i_cbz, 'csel': _i_csel, 'fcsel': _i_csel,
+    'csinc': _i_csel, 'csinv': _i_csel, 'csneg': _i_csel, 'tbz': _i_tbz, 'tbnz': _i_tbz, 'tst': _i_tst,
+    'smulh': _i_mulh, 'umulh': _i_mulh,
     'sxtb': _i_ext, 'sxth': _i_ext, 'sxtw': _i_ext, 'uxtb': _i_ext, 'uxth': _i_ext,
     'mov': _i_mov, 'movk': _i_movk, 'movz': _i_movk, 'movn': _i_movk, 'cset': _i_cset,
     'fadd': _i_fp3, 'fsub': _i_fp3, 'fmul': _i_fp3, 'fdiv': _i_fp3, 'fneg': _i_fneg,
@@ -1502,18 +1531,18 @@ class _Asm:
             s = syms.get(name)
             if s is None:
                 s = syms[name] = Symbol(name)
-            if kind in ('JUMP26', 'CALL26', 'CONDBR19') and s.section is sec and not s.globl:
+            if kind in ('JUMP26', 'CALL26', 'CONDBR19', 'TSTBR14') and s.section is sec and not s.globl:
                 d = s.value + add - off
                 if d & 3:
                     raise AssemblerError('line %d: misaligned branch target %s' % (lineno, name))
-                bits = 26 if kind != 'CONDBR19' else 19
+                bits = {'CONDBR19': 19, 'TSTBR14': 14}.get(kind, 26)
                 if not -(1 << (bits + 1)) <= d < 1 << (bits + 1):
                     raise AssemblerError('line %d: branch out of range: %s' % (lineno, name))
                 w = struct.unpack_from('<I', sec.data, off)[0]
                 if bits == 26:
                     w |= (d >> 2) & 0x3ffffff
                 else:
-                    w |= ((d >> 2) & 0x7ffff) << 5
+                    w |= ((d >> 2) & ((1 << bits) - 1)) << 5
                 struct.pack_into('<I', sec.data, off, w)
             else:
                 sec.relocs.append(Reloc(off, kind, name, add))
@@ -2461,12 +2490,13 @@ def _storesz(i):
     from ..load import storesz
     return storesz(i)
 class E:
-    __slots__ = ('f', 'fn', 'frame', 'padding')
+    __slots__ = ('f', 'fn', 'frame', 'padding', 'tbzok')
     def __init__(self, f, fn):
         self.f = f
         self.fn = fn
         self.frame = 0
         self.padding = 0
+        self.tbzok = False
 _CMP = [
     (Cieq, "eq", "ne"),
     (Cine, "ne", "eq"),
@@ -2939,9 +2969,22 @@ def emitins(i, e):
     elif op == D.Oacsel:
         m = e.fn.mem[rval(i.arg[1])]
         k = i.cls
-        e.f.write("\\t%s\\t%s, %s, %s, %s\\n" % ("csel" if KBASE(k) == 0 else "fcsel",
-                                               rname(rval(i.to), k), rname(rval(i.arg[0]), k),
-                                               rname(rval(m.base), k), ctoa[m.offset.i][0]))
+        c = ctoa[m.offset.i][m.scale >> 4]
+        if KBASE(k):
+            mn = "fcsel"
+        else:
+            mn = ("csel", "csinc", "csinv", "csneg")[m.scale & 15]
+        e.f.write("\\t%s\\t%s, %s, %s, %s\\n" % (mn, rname(rval(i.to), k), _zr(i.arg[0], k),
+                                               rname(rval(m.base), k), c))
+    elif op == D.Oaubfiz:
+        k = i.cls
+        c = e.fn.con[rval(i.arg[1])].i
+        e.f.write("\\tubfiz\\t%s, %s, #%d, #%d\\n" % (rname(rval(i.to), k), rname(rval(i.arg[0]), k), c & 255, c >> 8))
+    elif op == D.Oatst:
+        k = i.cls
+        r = i.arg[1]
+        e.f.write("\\ttst\\t%s, %s\\n" % (rname(rval(i.arg[0]), k), rname(rval(r), k) if isreg(r)
+                                        else "#%d" % (e.fn.con[rval(r)].i & (M64 if k == Kl else 0xffffffff))))
     elif op in _FMA:
         m = e.fn.mem[rval(i.arg[1])]
         k = i.cls
@@ -3033,8 +3076,8 @@ def emitcondjmp(b, jt, s1, s2, e, cz=None):
         if cz is None:
             e.f.write("\\tb%s\\t%s%d\\n" % (ctoa[c][n], T.asloc, _id0 + to.id))
         else:
-            e.f.write("\\t%s\\t%s, %s%d\\n" % ("cbz" if (c == Cieq) != n else "cbnz", cz,
-                                             T.asloc, _id0 + to.id))
+            e.f.write("\\t%s\\t%s%s%d\\n" % (cz[0] if (c == Cieq) != n else cz[1], cz[2],
+                                           T.asloc, _id0 + to.id))
     if b.link is s2:
         branch(0, s1)
         return 1
@@ -3055,13 +3098,54 @@ def _cbz(ins, jt, e):
     n = len(ins)
     while n > 0 and ins[n - 1].op == Onop:
         n -= 1
-    if n == 0 or ins[n - 1].op != Oacmp or rtype(ins[n - 1].arg[1]) != RCon:
+    if n == 0 or rtype(ins[n - 1].arg[1]) != RCon or not isreg(ins[n - 1].arg[0]):
         return ins, None
     i = ins[n - 1]
     pc = e.fn.con[rval(i.arg[1])]
-    if pc.type != CBits or pc.i != 0 or not isreg(i.arg[0]):
+    if pc.type != CBits:
         return ins, None
-    return ins[:n - 1], rname(rval(i.arg[0]), i.cls)
+    if i.op == Oacmp and pc.i == 0:
+        return ins[:n - 1], ("cbz", "cbnz", "%s, " % rname(rval(i.arg[0]), i.cls))
+    if i.op == D.Oatst and e.tbzok:
+        v = pc.i & (M64 if i.cls == Kl else 0xffffffff)
+        if v & (v - 1) == 0:
+            bit = 0
+            while (v >> bit) != 1:
+                bit += 1
+            return ins[:n - 1], ("tbz", "tbnz", "%s, #%d, " % (rname(rval(i.arg[0]), i.cls), bit))
+    return ins, None
+def _dropflags(e):
+    b = e.fn.start
+    while b:
+        if b.npred == 1:
+            p = b.pred[0]
+            first = next((i for i in b.ins[:b.nins] if i.op != Onop), None)
+            last = next((i for i in reversed(p.ins[:p.nins]) if i.op != Onop), None)
+            if first is not None and last is not None and first.op == Oacmp and last.op == Oacmp \\
+                    and Jjf <= p.jmp.type <= Jjf + NCmp - 1 and first.cls == last.cls \\
+                    and req(first.arg[0], last.arg[0]) and req(first.arg[1], last.arg[1]) \\
+                    and _cbz(p.ins[:p.nins], p.jmp.type, e)[1] is None:
+                first.op = Onop
+        b = b.link
+def _siblingcall(b, e):
+    fn = e.fn
+    if not _ext.isel or fn.slot or fn.vararg or fn.dynalloc:
+        return None
+    if b.jmp.type != Jret0:
+        s = b.s1
+        if b.jmp.type != Jjmp or s is None or s.jmp.type != Jret0 or any(
+                i.op != Onop for i in s.ins[:s.nins]):
+            return None
+    n = b.nins
+    while n > 0 and (b.ins[n - 1].op == Onop or (b.ins[n - 1].op == Ocopy
+                                                 and req(b.ins[n - 1].to, b.ins[n - 1].arg[0]))):
+        n -= 1
+    if n == 0 or b.ins[n - 1].op != Ocall or rtype(b.ins[n - 1].arg[0]) != RCon:
+        return None
+    c = fn.con[rval(b.ins[n - 1].arg[0])]
+    if c.type != CAddr or (c.sym.type & SThr) or c.i:
+        return None
+    return n - 1
 def _frameless(e):
     fn = e.fn
     if (not _ext.isel or e.frame or fn.vararg or fn.dynalloc or fn.slot or (fn.reg & BIT(LR))
@@ -3139,6 +3223,16 @@ def arm64_emitfn(fn, out):
             save.append(i)
     emitinsl(save, e)
     dup, dlbl = layoutplan(e.fn) if _ext.layout else ({}, ())
+    if _ext.isel:
+        nins = 0
+        b = e.fn.start
+        while b:
+            nins += b.nins + 1
+            b = b.link
+        e.tbzok = nins < 1500
+        _dropflags(e)
+    else:
+        e.tbzok = False
     lbl = 0
     b = e.fn.start
     while b:
@@ -3146,6 +3240,11 @@ def arm64_emitfn(fn, out):
             e.f.write("%s%d:\\n" % (T.asloc, _id0 + b.id))
         jt = b.jmp.type
         body, cz = b.ins[:b.nins], None
+        sib = _siblingcall(b, e)
+        if sib is not None:
+            sibling = body[sib]
+            body = body[:sib]
+            jt = Jret0
         if jt != Jjmp and jt != Jhlt and jt != Jret0 and _ext.layout and b not in dup:
             body, cz = _cbz(body, jt, e)
         emitinsl(body, e)
@@ -3177,6 +3276,10 @@ def arm64_emitfn(fn, out):
                 e.f.write("\\tret\\n")
                 b = b.link
                 continue
+            tailto = None
+            if sib is not None:
+                l = str_(e.fn.con[rval(sibling.arg[0])].sym.id)
+                tailto = ("" if l[0] == '"' else T.assym) + l
             if e.fn.dynalloc:
                 e.f.write("\\tmov sp, x29\\n")
             o = e.frame + 16
@@ -3196,7 +3299,7 @@ def arm64_emitfn(fn, out):
                           "\\tmov\\tx16, #%d\\n"
                           "\\tmovk\\tx16, #%d, lsl #16\\n"
                           "\\tadd\\tsp, sp, x16\\n" % ((o - 16) & 0xFFFF, (o - 16) >> 16))
-            e.f.write("\\tret\\n")
+            e.f.write("\\tb\\t%s\\n" % tailto if tailto else "\\tret\\n")
         else:
             if jt != Jjmp and _ext.layout:
                 c = jt - Jjf
@@ -3242,7 +3345,7 @@ from ..defs import (R, RTmp, RCon, NIns, M64, Ins, Con, Mem, CBits, CAddr, SExt,
 from ..util import (err, newtmp, newcon, getcon, chuse, emit, emiti, idup, intern, iscmp,
                     cmpop, salloc, argcls, vgrow)
 from ..parse import printfn
-from ..defs import Tmp0, Oextsw, Oextuw, Osar, Oshr, Cine, Kd
+from ..defs import Tmp0, Oextsw, Oextuw, Osar, Oshr, Cieq, Cine, Kd
 from .regs import R0
 from .. import ext as _ext
 (Iother, Iplo12, Iphi12, Iplo24, Inlo12, Inhi12, Inlo24) = range(7)
@@ -3785,6 +3888,107 @@ def selextload(i, fn):
     di.cls = i.cls
     di.to = i.to
     return True
+def selmulcon(i, fn):
+    x = i.arg[0]
+    n = _conbits(i.arg[1], fn)
+    if n is None or not _plain(x, fn):
+        return False
+    k = i.cls
+    w = 64 if k == Kl else 32
+    n &= (1 << w) - 1
+    if n >> (w - 1):
+        n -= 1 << w
+        if n < 0 and log2p(-n) > 0:
+            _aalu(i, CON_Z, 1, SH_LSL, log2p(-n), x, fn)
+            return True
+        return False
+    if n < 3:
+        return False
+    tz = 0
+    while not (n >> tz) & 1:
+        tz += 1
+    m = n >> tz
+    up, down = log2p(m - 1), log2p(m + 1)
+    if up <= 0 and down <= 0:
+        return False
+    to = i.to
+    if tz:
+        t = newtmp('isel', k, fn)
+        emit(Oshl, k, to, t, getcon(tz, fn))
+        to = t
+    i1 = i.copy()
+    i1.to = to
+    if up > 0:
+        chuse(x, +1, fn)
+        _aalu(i1, x, 0, SH_LSL, up, x, fn)
+    else:
+        chuse(x, +1, fn)
+        t = newtmp('isel', k, fn)
+        emit(Osub, k, to, t, x)
+        emit(Oshl, k, t, x, getcon(down, fn))
+    return True
+def selubfiz(i, fn):
+    n = _conbits(i.arg[1], fn)
+    found = _only(i.arg[0], fn)
+    if n is None or found is None or found[1].op != Oand or found[1].cls != i.cls \\
+            or not _plain(found[1].arg[0], fn):
+        return False
+    w = 64 if i.cls == Kl else 32
+    m = _conbits(found[1].arg[1], fn)
+    if m is None:
+        return False
+    m &= (1 << w) - 1
+    if m == 0 or m & (m + 1):
+        return False
+    width = 0
+    while m >> width:
+        width += 1
+    n &= w - 1
+    if not 0 < n or n + width > w:
+        return False
+    x = found[1].arg[0]
+    found[1].set(Ins(Onop))
+    emit(D.Oaubfiz, i.cls, i.to, x, getcon(n | width << 8, fn))
+    return True
+def selcincadd(i, fn):
+    k = i.cls
+    for an, bn in ((0, 1), (1, 0)):
+        a, c = i.arg[an], i.arg[bn]
+        if not _plain(a, fn):
+            continue
+        found = _only(c, fn)
+        if found is None:
+            continue
+        dc = found[1]
+        if dc.op in (Oextuw, Oextsw) and k == Kl:
+            inner = _only(dc.arg[0], fn)
+            if inner is None:
+                continue
+            outer, dc = dc, inner[1]
+        else:
+            outer = None
+        cm = iscmp(dc.op)
+        if not cm or (outer is None and dc.cls != k):
+            continue
+        ck, cc = cm
+        args = list(dc.arg)
+        if outer is not None:
+            outer.set(Ins(Onop))
+        dc.set(Ins(Onop))
+        x = Mem()
+        fn.nmem += 1
+        vgrow(fn.mem, fn.nmem)
+        fn.mem[fn.nmem - 1] = x
+        x.offset.type = CBits
+        x.base = a
+        x.scale = CSINC | 1 << 4
+        chuse(a, +1, fn)
+        emit(D.Oacsel, k, i.to, a, MEM(fn.nmem - 1))
+        if selcmp(args, ck, fn):
+            cc = cmpop(cc)
+        x.offset.i = cc
+        return True
+    return False
 def selneg(i, fn):
     found = _only(i.arg[0], fn)
     if found is None or found[1].op != Omul or found[1].cls != i.cls:
@@ -3811,6 +4015,29 @@ def selneg(i, fn):
     fixarg(ab, 1, i.cls, 0, fn)
     x.base, x.index = ab
     return True
+CSEL, CSINC, CSINV, CSNEG = range(4)
+def _cselform(a, b, k, fn):
+    if KBASE(k) == 1:
+        return a, b, CSEL, 0
+    for x, y, inv in ((a, b, 1), (b, a, 0)):
+        found = _only(x, fn)
+        if found is None or found[1].cls != k or found[1].arg[0] != y or not _plain(y, fn):
+            continue
+        di = found[1]
+        kind = None
+        if di.op == Oadd and _conbits(di.arg[1], fn) == 1:
+            kind = CSINC
+        elif di.op == Oneg:
+            kind = CSNEG
+        elif di.op == Oxor and _conbits(di.arg[1], fn) in (-1, 0xffffffff if k == Kw else -1):
+            kind = CSINV
+        if kind is not None:
+            di.set(Ins(Onop))
+            chuse(y, +1, fn)
+            return y, y, kind, inv
+    if _conbits(b, fn) == 0:
+        return CON_Z, a, CSEL, 1
+    return a, b, CSEL, 0
 def selcsel(i, fn):
     d = selpos
     while selblk.ins[d].op != D.Osel0:
@@ -3824,10 +4051,13 @@ def selcsel(i, fn):
     vgrow(fn.mem, fn.nmem)
     fn.mem[fn.nmem - 1] = x
     x.offset.type = CBits
-    emit(D.Oacsel, k, i.to, i.arg[0], MEM(fn.nmem - 1))
+    a, b0, kind, inv = _cselform(i.arg[0], i.arg[1], k, fn)
+    x.scale = kind | inv << 4
+    emit(D.Oacsel, k, i.to, a, MEM(fn.nmem - 1))
     iarg = D.insb[D.curi].arg
-    fixarg(iarg, 0, k, 0, fn)
-    b = [i.arg[1]]
+    if _conbits(a, fn) != 0 or KBASE(k) == 1:
+        fixarg(iarg, 0, k, 0, fn)
+    b = [b0]
     fixarg(b, 0, k, 0, fn)
     x.base = b[0]
     if cm:
@@ -3893,6 +4123,12 @@ def sel(i, fn):
     if _ext.isel:
         if i.op in (Oadd, Osub) and KBASE(i.cls) == 0 and selmadd(i, fn):
             return
+        if i.op == Oadd and KBASE(i.cls) == 0 and selcincadd(i, fn):
+            return
+        if i.op == Omul and KBASE(i.cls) == 0 and selmulcon(i, fn):
+            return
+        if i.op == Oshl and KBASE(i.cls) == 0 and selubfiz(i, fn):
+            return
         if i.op in ALU and KBASE(i.cls) == 0:
             if selbits(i, fn) or selalu(i, fn):
                 return
@@ -3956,6 +4192,29 @@ def sel(i, fn):
     iarg = D.insb[D.curi].arg
     fixarg(iarg, 0, argcls(i, 0), 0, fn)
     fixarg(iarg, 1, argcls(i, 1), 0, fn)
+def _tstjump(b, r, k, cc, fn):
+    if not _plain(r, fn) or fn.tmp[rval(r)].nuse != 1:
+        return False
+    d = None
+    for n in range(b.nins):
+        if b.ins[n].to == r:
+            d = b.ins[n]
+    if d is None or d.op != Oand or d.cls != k or not _plain(d.arg[0], fn):
+        return False
+    y = d.arg[1]
+    n = _conbits(y, fn)
+    if n is not None:
+        n &= (1 << (64 if k == Kl else 32)) - 1
+        if n == 0 or not arm64_logimm(n, k):
+            return False
+        y = getcon(s64(n), fn)
+    elif not _plain(y, fn):
+        return False
+    x = d.arg[0]
+    d.set(Ins(Onop))
+    emit(D.Oatst, k, R, x, y)
+    b.jmp.type = Jjf + cc
+    return True
 def seljmp(b, fn):
     if b.jmp.type in (Jret0, Jjmp, Jhlt):
         return
@@ -3972,6 +4231,13 @@ def seljmp(b, fn):
             ir = b.ins[i]
             break
     cm = iscmp(ir.op) if ir is not None and use == 1 else None
+    if _ext.isel and ir is not None and use == 1:
+        if ir.op == Oand and ir.cls == Kw and _tstjump(b, r, Kw, Cine, fn):
+            return
+        if cm and cm[1] in (Cieq, Cine) and KBASE(cm[0]) == 0 and _conbits(ir.arg[1], fn) == 0 \\
+                and _tstjump(b, ir.arg[0], cm[0], cm[1], fn):
+            ir.set(Ins(Onop))
+            return
     if cm:
         ck, cc = cm
         if selcmp(ir.arg, ck, fn):
@@ -5368,7 +5634,9 @@ _OPS += [('aalu', ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 
          ('asbfx', ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
          ('aror', ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
          ('afnmul', ((Ke, Ke, Ks, Kd), (Ke, Ke, Ks, Kd)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-         ('afcon', ((Kx, Kx, Kx, Kx), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]
+         ('afcon', ((Kx, Kx, Kx, Kx), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('aubfiz', ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('atst', ((Kw, Kl, Ke, Ke), (Kw, Kl, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]
 _OPS += [('acsel', ((Kw, Kl, Ks, Kd), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]
 class Op:
     __slots__ = ('name', 'argcls', 'canfold', 'hasid', 'idval', 'commutes', 'assoc',
@@ -6523,7 +6791,7 @@ from . import copy as C
 from .defs import (R, RTmp, CON_Z, CBits, Con, Ins, KBASE, KWIDE, U32, Kx, Kw, Kl, UXXX,
                    UPhi, UIns, UJmp, Jjmp, Jjnz, Onop, Osub, Oadd, Osel0, optab, rtype,
                    rval, rkind, s32)
-from .util import die, getcon, newcon, isconbits, argcls, addins
+from .util import die, getcon, newcon, isconbits, argcls, addins, iscmp
 from .cfg import dom, reachesnotvia, fillcfg, fillloop
 from .fold import foldint, foldref
 from .gcm import pinned, isdivwl
@@ -6692,6 +6960,12 @@ def dedupins(fn, b, i):
     normins(fn, i)
     if i.op == Onop:
         return
+    if _ext.cse:
+        from .simplify import simplify
+        r = simplify(fn, b, i)
+        if r != R:
+            killins(fn, i, r)
+            return
     if pinned(i):
         if _ext.cse and isdivwl(i):
             dedupdiv(fn, b, i)
@@ -6785,6 +7059,21 @@ def diamond(b, p):
     if p.jmp.type != Jjmp or p.npred != 1 or p.pred[0] is not h:
         return None
     return int(h.s1 is p)
+def _selectself(fn, h, t, f, k):
+    d = fn.tmp[rval(h.jmp.arg)].def_ if rtype(h.jmp.arg) == RTmp else None
+    if d is None or KBASE(k) != 0 or iscmp(d.op) is None or iscmp(d.op)[0] != k:
+        return R
+    x, y = d.arg[0], d.arg[1]
+    c = iscmp(d.op)[1]
+    if c == D.Cieq:
+        t, f = f, t
+    elif c != D.Cine:
+        return R
+    if (t, f) == (x, y):
+        return x
+    if (t, f) == (y, x):
+        return y
+    return R
 def dedupselect(fn, b):
     h = b.idom
     if h is None or h.jmp.type != Jjnz or h.s1 is h.s2:
@@ -6796,6 +7085,16 @@ def dedupselect(fn, b):
         if p.narg == 2:
             w0, w1 = diamond(b, p.blk[0]), diamond(b, p.blk[1])
             if w0 is not None and w1 is not None and w0 != w1:
+                r = _selectself(fn, h, p.arg[w0 ^ 1], p.arg[w0], p.cls)
+                if r != R:
+                    replaceuses(fn, p.to, r)
+                    p.to = R
+                    if prev is None:
+                        b.phi = p.link
+                    else:
+                        prev.link = p.link
+                    p = p.link
+                    continue
                 k = (p.cls, h.jmp.arg, p.arg[w0 ^ 1], p.arg[w0])
                 seen = gvnselects.setdefault(k, [])
                 for b1, r in seen:
@@ -7273,6 +7572,128 @@ def expand(fn, bodies):
     if n:
         fn.rpo = [None] * fn.nblk
     return n
+def _noescape(fn):
+    slots = set()
+    b = fn.start
+    while b:
+        for i in b.ins:
+            if D.isalloc(i.op):
+                slots.add(i.to)
+        b = b.link
+    if not slots:
+        return True
+    b = fn.start
+    while b:
+        p = b.phi
+        while p:
+            if any(a in slots for a in p.arg[:p.narg]):
+                return False
+            p = p.link
+        if b.jmp.arg in slots:
+            return False
+        for i in b.ins:
+            if D.isalloc(i.op):
+                continue
+            if D.isload(i.op):
+                if i.arg[1] in slots:
+                    return False
+            elif D.isstore(i.op):
+                if i.arg[0] in slots:
+                    return False
+            elif i.arg[0] in slots or i.arg[1] in slots:
+                return False
+        b = b.link
+    return True
+def selftail(fn):
+    from .util import intern
+    if fn.vararg or fn.dynalloc or fn.retty != D.Kx:
+        return False
+    me = intern(fn.name)
+    st = fn.start
+    pars = []
+    for i in st.ins:
+        if not D.ispar(i.op):
+            break
+        if i.op in (D.Oparc, D.Opare):
+            return False
+        pars.append(i)
+    sites = []
+    b = fn.start
+    while b:
+        j = len(b.ins) - 1
+        while j >= 0 and b.ins[j].op == D.Odbgloc:
+            j -= 1
+        if j >= 0 and b.ins[j].op == D.Ocall and _symname(fn, b.ins[j].arg[0]) == me \\
+                and b.ins[j].arg[1] == R and D.isret(b.jmp.type):
+            call = b.ins[j]
+            t = b.jmp.type
+            if (t == D.Jret0 or (D.Jretw <= t <= D.Jretd and call.to == b.jmp.arg and call.to != R
+                                 and call.cls == t - D.Jretw)):
+                k = j
+                while k > 0 and D.isarg(b.ins[k - 1].op):
+                    k -= 1
+                args = b.ins[k:j]
+                if len(args) == len(pars) and all(a.op - D.Oarg == p.op - D.Opar and a.cls == p.cls
+                                                  for a, p in zip(args, pars)):
+                    sites.append((b, k, args))
+        b = b.link
+    if not sites or not _noescape(fn):
+        return False
+    ptmps = {p.to for p in pars}
+    b = fn.start
+    while b:
+        p = b.phi
+        while p:
+            if p.to in ptmps or any(a in ptmps for a in p.arg[:p.narg]):
+                return False
+            p = p.link
+        b = b.link
+    keep = [i for i in st.ins if D.ispar(i.op) or D.isalloc(i.op)]
+    if any(D.isalloc(i.op) and rtype(i.arg[0]) != RCon for i in st.ins):
+        return False
+    head = cfg.newblk()
+    head.name = 'tail.%s' % fn.name
+    head.id = fn.nblk
+    fn.nblk += 1
+    head.ins = [i for i in st.ins if not (D.ispar(i.op) or D.isalloc(i.op))]
+    head.nins = len(head.ins)
+    head.jmp.type = st.jmp.type
+    head.jmp.arg = st.jmp.arg
+    head.s1 = st.s1
+    head.s2 = st.s2
+    head.link = st.link
+    for s in (st.s1, st.s2):
+        p = s.phi if s else None
+        while p:
+            p.blk = [head if x is st else x for x in p.blk]
+            p = p.link
+    st.ins = keep
+    st.nins = len(keep)
+    st.jmp.type = D.Jjmp
+    st.jmp.arg = R
+    st.s1 = head
+    st.s2 = None
+    st.link = head
+    for b, k, args in sites:
+        if b is st:
+            b = head
+            k = k - len(keep)
+        out = b.ins[:k]
+        temps = []
+        for a, p in zip(args, pars):
+            t = newtmp('tail', p.cls, fn)
+            out.append(D.Ins(_EXT.get(p.op, D.Ocopy), p.cls, t, a.arg[0], R))
+            temps.append(t)
+        for t, p in zip(temps, pars):
+            out.append(D.Ins(D.Ocopy, p.cls, p.to, t, R))
+        b.ins = out
+        b.nins = len(out)
+        b.jmp.type = D.Jjmp
+        b.jmp.arg = R
+        b.s1 = head
+        b.s2 = None
+    fn.rpo = [None] * fn.nblk
+    return True
 def _callees(fn):
     out = []
     b = fn.start
@@ -7286,6 +7707,8 @@ def _callees(fn):
     return out
 def expand_all(fns, limit):
     from .util import intern
+    for fn in fns:
+        selftail(fn)
     byid = {intern(fn.name): fn for fn in fns}
     order = []
     state = {}
@@ -10197,6 +10620,310 @@ def simpl(fn):
         if new:
             idup(b, D.curi, NIns - D.curi)
         b = b.link
+''',
+'backend/simplify.py': '''\
+from . import defs as D
+from .defs import R, RTmp, RCon, Kw, Kl, Ks, Kd, CBits, KBASE, UIns, rtype, rval
+from .util import getcon, iscmp, cmpwlneg
+from .ssa import adduse
+_SIMPLE = frozenset((D.Oadd, D.Osub, D.Oneg, D.Omul, D.Odiv, D.Oudiv, D.Orem, D.Ourem, D.Oand, D.Oor,
+                     D.Oxor, D.Oshl, D.Oshr, D.Osar, D.Oextsb, D.Oextub, D.Oextsh, D.Oextuh, D.Oextsw,
+                     D.Oextuw)) | frozenset(range(D.Ocmpw, D.Ocmpl1 + 1))
+_ONE = {Ks: 0x3f800000, Kd: 0x3ff0000000000000}
+_ZEXT = {D.Oextub: 8, D.Oextuh: 16, D.Oextuw: 32, D.Oloadub: 8, D.Oloaduh: 16, D.Oloaduw: 32}
+_SEXT = {D.Oextsb: 8, D.Oextsh: 16, D.Oextsw: 32, D.Oloadsb: 8, D.Oloadsh: 16}
+MAXDEPTH = 6
+def _mask(k):
+    return 0xffffffffffffffff if k == Kl else 0xffffffff
+def _defn(fn, r):
+    if rtype(r) != RTmp:
+        return None
+    d = fn.tmp[rval(r)].def_
+    return None if d is None or d.op == D.Onop else d
+def _con(fn, r, k):
+    if rtype(r) == RCon and fn.con[rval(r)].type == CBits:
+        return fn.con[rval(r)].i & _mask(k)
+    return None
+def _ref(v, k, fn):
+    return getcon(D.s64(v & _mask(k)), fn)
+def known(fn, r, k, depth=0):
+    m = _mask(k)
+    c = _con(fn, r, k)
+    if c is not None:
+        return m & ~c, c
+    d = _defn(fn, r)
+    if d is None or depth >= MAXDEPTH or KBASE(d.cls) != 0:
+        return 0, 0
+    if d.cls == Kw and k == Kl:
+        return 0, 0
+    o = d.op
+    dm = _mask(d.cls)
+    if iscmp(o) is not None:
+        return m & ~1, 0
+    if o == D.Ocopy:
+        return known(fn, d.arg[0], k, depth + 1)
+    if o in _ZEXT:
+        return m & ~((1 << _ZEXT[o]) - 1), 0
+    if o in _SEXT or o == D.Oextsw:
+        n = _SEXT[o]
+        if o in (D.Oloadsb, D.Oloadsh):
+            return 0, 0
+        z, n1 = known(fn, d.arg[0], Kw, depth + 1)
+        low = (1 << n) - 1
+        sign = 1 << (n - 1)
+        hi = dm & ~low
+        if z & sign:
+            return (z & low | hi) & m, n1 & low & m
+        if n1 & sign:
+            return z & low & m, (n1 & low | hi) & m
+        return z & (low >> 1) & m, n1 & (low >> 1) & m
+    if o in (D.Oand, D.Oor, D.Oxor):
+        z0, o0 = known(fn, d.arg[0], d.cls, depth + 1)
+        z1, o1 = known(fn, d.arg[1], d.cls, depth + 1)
+        if o == D.Oand:
+            return (z0 | z1) & m, o0 & o1 & m
+        if o == D.Oor:
+            return z0 & z1 & m, (o0 | o1) & m
+        return ((z0 & z1) | (o0 & o1)) & m, ((z0 & o1) | (o0 & z1)) & m
+    if o in (D.Oshl, D.Oshr, D.Osar):
+        n = _con(fn, d.arg[1], Kw)
+        if n is None:
+            return 0, 0
+        w = 64 if d.cls == Kl else 32
+        n &= w - 1
+        z, on = known(fn, d.arg[0], d.cls, depth + 1)
+        if o == D.Oshl:
+            return ((z << n) | ((1 << n) - 1)) & dm & m, (on << n) & dm & m
+        hi = dm & ~(dm >> n)
+        if o == D.Oshr:
+            return ((z >> n) | hi) & m, (on >> n) & m
+        sign = 1 << (w - 1)
+        if z & sign:
+            return ((z >> n) | hi) & m, (on >> n) & m
+        if on & sign:
+            return (z >> n) & m, ((on >> n) | hi) & m
+        return (z >> n) & ~hi & m, (on >> n) & ~hi & m
+    if o in (D.Oadd, D.Osub, D.Omul):
+        z0, _ = known(fn, d.arg[0], d.cls, depth + 1)
+        z1, _ = known(fn, d.arg[1], d.cls, depth + 1)
+        def tz(z):
+            n = 0
+            while (z >> n) & 1:
+                n += 1
+            return n
+        n = tz(z0) + tz(z1) if o == D.Omul else min(tz(z0), tz(z1))
+        return ((1 << n) - 1) & m, 0
+    return 0, 0
+def _srange(z, o, w):
+    m = (1 << w) - 1
+    sign = 1 << (w - 1)
+    lo, hi = o, m & ~z
+    if z & sign:
+        return lo, hi
+    if o & sign:
+        return lo - (1 << w), hi - (1 << w)
+    return (lo | sign) - (1 << w), hi & ~sign
+def _foldcmp(fn, i, ck, cc):
+    w = 64 if ck == Kl else 32
+    z0, o0 = known(fn, i.arg[0], ck)
+    z1, o1 = known(fn, i.arg[1], ck)
+    if not (z0 | o0 | z1 | o1):
+        return None
+    if cc in (D.Cieq, D.Cine):
+        if (z0 & o1) | (o0 & z1):
+            return int(cc == D.Cine)
+        return None
+    m = (1 << w) - 1
+    if cc in (D.Ciuge, D.Ciugt, D.Ciule, D.Ciult):
+        lo0, hi0, lo1, hi1 = o0, m & ~z0, o1, m & ~z1
+    else:
+        lo0, hi0 = _srange(z0, o0, w)
+        lo1, hi1 = _srange(z1, o1, w)
+    if cc in (D.Cisge, D.Ciuge):
+        return 1 if lo0 >= hi1 else 0 if hi0 < lo1 else None
+    if cc in (D.Cisgt, D.Ciugt):
+        return 1 if lo0 > hi1 else 0 if hi0 <= lo1 else None
+    if cc in (D.Cisle, D.Ciule):
+        return 1 if hi0 <= lo1 else 0 if lo0 > hi1 else None
+    return 1 if hi0 < lo1 else 0 if lo0 >= hi1 else None
+def _set(fn, b, i, op, a, c=R):
+    i.op = op
+    i.arg[0] = a
+    i.arg[1] = c
+    for r in (a, c):
+        if rtype(r) == RTmp:
+            adduse(fn.tmp[rval(r)], UIns, b, i)
+def _isnot(fn, r, k):
+    d = _defn(fn, r)
+    if d is not None and d.op == D.Oxor and d.cls == k and _con(fn, d.arg[1], k) == _mask(k):
+        return d.arg[0]
+    return None
+def _float(fn, b, i):
+    k = i.cls
+    if i.op == D.Oneg:
+        d = _defn(fn, i.arg[0])
+        if d is not None and d.op == D.Oneg and d.cls == k:
+            return d.arg[0]
+    elif i.op in (D.Omul, D.Odiv):
+        one = _ONE.get(k)
+        if _con(fn, i.arg[1], Kl) == one or (k == Ks and _con(fn, i.arg[1], Kw) == one):
+            return i.arg[0]
+        if i.op == D.Omul and (_con(fn, i.arg[0], Kl) == one or (k == Ks and _con(fn, i.arg[0], Kw) == one)):
+            return i.arg[1]
+    return R
+def simplify(fn, b, i):
+    o = i.op
+    if o not in _SIMPLE:
+        return R
+    k = i.cls
+    if KBASE(k) != 0:
+        return _float(fn, b, i)
+    a, c = i.arg
+    cm = iscmp(o)
+    if cm is not None:
+        return _compare(fn, b, i, cm[0], cm[1])
+    n = _con(fn, c, k)
+    d0, d1 = _defn(fn, a), _defn(fn, c)
+    if o == D.Oadd:
+        for x, y, dy in ((a, c, d1), (c, a, d0)):
+            if dy is None or dy.cls != k:
+                continue
+            if dy.op == D.Osub and dy.arg[1] == x:
+                return dy.arg[0]
+            if dy.op == D.Oneg:
+                _set(fn, b, i, D.Osub, x, dy.arg[0])
+                return R
+            if dy.arg[0] == x and dy.op in (D.Omul, D.Oshl):
+                f = _con(fn, dy.arg[1], k)
+                if f is not None:
+                    f = f + 1 if dy.op == D.Omul else (1 << (f & (63 if k == Kl else 31))) + 1
+                    _set(fn, b, i, D.Omul, x, _ref(f, k, fn))
+                    return R
+        if a == c:
+            _set(fn, b, i, D.Omul, a, getcon(2, fn))
+            return R
+    elif o == D.Osub:
+        if a == c:
+            return getcon(0, fn)
+        if d0 is not None and d0.cls == k:
+            if d0.op == D.Oadd:
+                if d0.arg[1] == c:
+                    return d0.arg[0]
+                if d0.arg[0] == c:
+                    return d0.arg[1]
+            if d0.op == D.Osub and d0.arg[0] == c:
+                _set(fn, b, i, D.Oneg, d0.arg[1])
+                return R
+        if d1 is not None and d1.cls == k:
+            if d1.op == D.Osub and d1.arg[0] == a:
+                return d1.arg[1]
+            if d1.op == D.Oneg:
+                _set(fn, b, i, D.Oadd, a, d1.arg[0])
+                return R
+            if d1.op == D.Oadd:
+                if d1.arg[0] == a:
+                    _set(fn, b, i, D.Oneg, d1.arg[1])
+                    return R
+                if d1.arg[1] == a:
+                    _set(fn, b, i, D.Oneg, d1.arg[0])
+                    return R
+        if d0 is not None and d1 is not None and d0.op == D.Oor and d1.op == D.Oand and d0.cls == k \\
+                and d1.cls == k and {d0.arg[0], d0.arg[1]} == {d1.arg[0], d1.arg[1]}:
+            _set(fn, b, i, D.Oxor, d0.arg[0], d0.arg[1])
+            return R
+        if _con(fn, a, k) == 0:
+            _set(fn, b, i, D.Oneg, c)
+            return R
+    elif o == D.Oneg:
+        if d0 is not None and d0.cls == k:
+            if d0.op == D.Oneg:
+                return d0.arg[0]
+            if d0.op == D.Osub:
+                _set(fn, b, i, D.Osub, d0.arg[1], d0.arg[0])
+                return R
+    elif o == D.Omul:
+        if n == 0:
+            return getcon(0, fn)
+        if n == 1:
+            return a
+        if n == _mask(k):
+            _set(fn, b, i, D.Oneg, a)
+            return R
+    elif o in (D.Odiv, D.Oudiv):
+        if n == 1:
+            return a
+    elif o in (D.Orem, D.Ourem):
+        if n == 1:
+            return getcon(0, fn)
+    elif o == D.Oshl:
+        if n is not None and d0 is not None and d0.cls == k and d0.op in (D.Oshr, D.Osar) \\
+                and _con(fn, d0.arg[1], k) == n:
+            n &= 63 if k == Kl else 31
+            _set(fn, b, i, D.Oand, d0.arg[0], _ref(_mask(k) << n, k, fn))
+            return R
+    elif o == D.Oor or o == D.Oand or o == D.Oxor:
+        if o != D.Oxor:
+            if _isnot(fn, a, k) == c or _isnot(fn, c, k) == a:
+                return getcon(0, fn) if o == D.Oand else _ref(_mask(k), k, fn)
+        if o == D.Oor and d0 is not None and d1 is not None and d0.op == D.Oand and d1.op == D.Oand \\
+                and d0.cls == k and d1.cls == k:
+            for p, q in ((0, 0), (0, 1), (1, 0), (1, 1)):
+                if d0.arg[p] == d1.arg[q]:
+                    u, v = d0.arg[p ^ 1], d1.arg[q ^ 1]
+                    if _isnot(fn, u, k) == v or _isnot(fn, v, k) == u:
+                        return d0.arg[p]
+    if o == D.Oand and n is not None:
+        z, _ = known(fn, a, k)
+        if (z | n) & _mask(k) == _mask(k):
+            return a
+    elif o == D.Oor and n is not None:
+        _, on = known(fn, a, k)
+        if n & ~on == 0:
+            return a
+    elif o == D.Osar and n is not None:
+        z, _ = known(fn, a, k)
+        if z >> ((64 if k == Kl else 32) - 1) & 1:
+            _set(fn, b, i, D.Oshr, a, c)
+    elif D.isext(o):
+        dd = _defn(fn, a)
+        z, on = known(fn, a, Kw)
+        w = {D.Oextub: 8, D.Oextuh: 16, D.Oextuw: 32, D.Oextsb: 8, D.Oextsh: 16, D.Oextsw: 32}[o]
+        if w < 32 and dd is not None and dd.cls == k and k == Kw:
+            sign = 1 << (w - 1)
+            high = 0xffffffff & ~((1 << w) - 1)
+            if z & high == high and (o in (D.Oextub, D.Oextuh) or z & sign):
+                return a
+    z, on = known(fn, i.to, k)
+    if (z | on) & _mask(k) == _mask(k):
+        return _ref(on, k, fn)
+    return R
+def _compare(fn, b, i, ck, cc):
+    a, c = i.arg
+    v = _foldcmp(fn, i, ck, cc)
+    if v is not None:
+        return getcon(v, fn)
+    if cc in (D.Cieq, D.Cine):
+        d0, d1 = _defn(fn, a), _defn(fn, c)
+        n = _con(fn, c, ck)
+        if n == 0 and d0 is not None and iscmp(d0.op) is not None and KBASE(iscmp(d0.op)[0]) == 0 \\
+                and d0.cls == ck:
+            if cc == D.Cine:
+                if i.cls == d0.cls:
+                    return a
+            else:
+                _set(fn, b, i, cmpwlneg(d0.op), d0.arg[0], d0.arg[1])
+            return R
+        if d0 is not None and d0.op in (D.Oadd, D.Osub) and d0.cls == ck:
+            c0 = _con(fn, d0.arg[1], ck)
+            if c0 is not None:
+                if n is not None:
+                    v = n - c0 if d0.op == D.Oadd else n + c0
+                    _set(fn, b, i, i.op, d0.arg[0], _ref(v, ck, fn))
+                    return R
+                if d1 is not None and d1.op == d0.op and d1.cls == ck and _con(fn, d1.arg[1], ck) == c0:
+                    _set(fn, b, i, i.op, d0.arg[0], d1.arg[0])
+                    return R
+    return R
 ''',
 'backend/spill.py': '''\
 import sys
@@ -24967,10 +25694,10 @@ def optimize(fn):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "0d28d7a273a09c46a290",
-"runtime-arm64": "5dd20f3a50eb62311971",
-"runtime-arm64_apple": "f0dc83a386259a75f0b9",
-"runtime-arm64_win": "68a93204e668bb3dfe11"
+"compiler": "0aaf3e70dd11d631a6d0",
+"runtime-arm64": "a0fb67e7471b31b9b9e1",
+"runtime-arm64_apple": "39deae5433dc1fc24d8d",
+"runtime-arm64_win": "ecdcd567ba652971b7c0"
 }
 ''',
 'onefile.py': '''\

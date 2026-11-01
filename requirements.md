@@ -370,7 +370,14 @@ numpy scalars don't). The wrapping `sj_add`, `sj_sub`, `sj_mul` and `sj_neg` are
 `static inline`: cimo stops inlining into a function once it reaches 4000 IR instructions, in source
 order, so in a large function the later loops call one-instruction helpers. A llama2.c forward pass
 as one function (`bench/llm.py`) ran 28 tok/s natively with them as functions, 89 as macros; the M1
-kernels don't change. Other small helpers can still hit that limit (proposed to cimo). Facts from unit-step `range` loops (index non-negative, below
+kernels don't change. Other small helpers can still hit that limit (proposed to cimo). Versioning
+also takes `a[base + i]`, for `base` of Python ints unchanged in an innermost loop: `base >= 0 && stop
+<= n - base` can't overflow and proves every index, wrapped or not. On `bench/llm.py`, default options
+went from 77 to 92 tok/s natively and 68 to 88 in Pyodide. `boundscheck=False` gets it too, because it
+also drops the negative-index test: 89 to 90 natively but 70 to 88 in Pyodide. The price is a second
+copy of those loops: this function compiles in 4 s rather than 2.7 by default, 2.5 rather than 1.25
+with `boundscheck=False`. A constant `base` stays with `a[i + c]`, or `a[i - 1]` would always take the
+checked copy. Facts from unit-step `range` loops (index non-negative, below
 `len(a)`) drop negative-index adjustment and bounds checks, and loop versioning (one test before
 the loop, checked copy otherwise) removes the rest without changing where an `IndexError` is
 raised. With those, parity and bounds checks cost nothing measurable on the M1 kernels:

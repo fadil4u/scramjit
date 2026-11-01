@@ -1129,14 +1129,12 @@ class Compiler:
         short = None not in bounds and (bounds[1] - bounds[0] if len(bounds) > 1 else bounds[0]) <= 65536 \
             and (len(bounds) < 3 or bounds[2] > 0)
         fact = self.range_fact(s) if unit else None
-        if unit and fact and self.boundscheck:
+        if unit and fact:
             # loop versioning: if no access var + c can leave its array during this loop, run a
             # copy without those checks; otherwise the checked copy raises where Python would
             extra = self.version_candidates(s, var, fact)
             if extra:
-                cond = ' && '.join(
-                    f'{self.extent(*key[3])} <= {self.extent(key[0], key[1])}' if len(key) > 2 else
-                    f'{te} <= {self.extent(key[0], key[1])} - ({c})' for key, c in sorted(extra.items(), key=str))
+                cond = ' && '.join(self.version_test(key, c, te) for key, c in sorted(extra.items(), key=str))
                 self.open(f'if ({te} > {ts} && {cond})')
                 self.unit_loop(s, var, ts, te, fact + (extra,), short)
                 self.close('} else {')
@@ -1265,11 +1263,65 @@ class Compiler:
             self.facts[var] = saved
         self.close()
 
+    def version_test(self, key, c, te):
+        """The C test that makes one versioning candidate safe for a loop stopping at te."""
+        n = self.extent(key[0], key[1])
+        if len(key) == 2:
+            return f'{te} <= {n} - ({c})'
+        if key[2] == 'mod':
+            return f'{self.extent(*key[3])} <= {n}'
+        # base + var, with var >= 0: base >= 0 and var < te <= n - base give 0 <= base + var < n
+        # with no overflow, and neither can this test overflow, since 0 <= n and 0 <= base
+        b = self.hold(self.expr(c)[0], T.INT)
+        return f'{b} >= 0 && {te} <= {n} - {b}'
+
+    def index_base(self, idx, var):
+        """For an index var + base, where base is +, - and * of Python ints and int literals not
+        involving var: base, as an expression. Compiled ints wrap, so any order gives the same
+        value, and evaluating base early can't raise. None for any other index."""
+        terms = []
+
+        def flatten(e, sign):
+            if isinstance(e, ast.BinOp) and isinstance(e.op, (ast.Add, ast.Sub)):
+                flatten(e.left, sign)
+                flatten(e.right, sign if isinstance(e.op, ast.Add) else -sign)
+            else:
+                terms.append((e, sign))
+
+        def pure(e):
+            if isinstance(e, ast.Constant):
+                return type(e.value) is int and INT64_MIN <= e.value <= INT64_MAX
+            if isinstance(e, ast.Name):
+                return e.id != var and e.id not in self.cnames and self.env.get(e.id) is T.INT
+            if isinstance(e, ast.BinOp):
+                return isinstance(e.op, (ast.Add, ast.Sub, ast.Mult)) and pure(e.left) and pure(e.right)
+            return False
+
+        flatten(idx, 1)
+        at = [k for k, (e, sign) in enumerate(terms) if isinstance(e, ast.Name) and e.id == var and sign > 0]
+        if len(terms) < 2 or len(at) != 1:
+            return None
+        rest = terms[:at[0]] + terms[at[0] + 1:]
+        if not all(pure(e) for e, _ in rest) or all(isinstance(e, ast.Constant) for e, _ in rest):
+            return None                 # var + c has its own candidates, using the loop's start
+        base = rest[0][0] if rest[0][1] > 0 else ast.BinOp(ast.Constant(0), ast.Sub(), rest[0][0])
+        for e, sign in rest[1:]:
+            base = ast.BinOp(base, ast.Add() if sign > 0 else ast.Sub(), e)
+        ast.copy_location(base, idx)
+        return ast.fix_missing_locations(base)
+
     def version_candidates(self, s, var, fact):
         """Indexes var + c on some axis of an array, nonnegative but not proven below that axis's
-        extent: the largest c for each (array, axis)."""
+        extent: the largest c for each (array, axis). In an innermost loop whose variable starts at
+        0 or above, also indexes var + base, with base unchanged in the loop: (array, axis, 'base',
+        base's dump) -> base. Those drop the negative-index test too, so they apply with
+        boundscheck=False as well. Only innermost loops, so copies don't multiply."""
         self.facts[var] = fact
         extra = {}
+        body = list(ast.walk(ast.Module(body=s.body, type_ignores=[])))
+        stored = {n.id for n in body if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        innermost = fact[0] is not None and fact[0] >= 0 and not any(
+            isinstance(n, (ast.For, ast.While, ast.comprehension)) for n in body)
         try:
             for n in ast.walk(ast.Module(body=s.body, type_ignores=[])):
                 if not (isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)
@@ -1280,6 +1332,15 @@ class Compiler:
                 if len(idxs) != self.env[name].ndim:
                     continue
                 for axis, idx in enumerate(idxs):
+                    base = self.index_base(idx, var) if innermost else None
+                    if base is not None and not any(
+                            isinstance(x, ast.Name) and x.id in stored for x in ast.walk(base)):
+                        nonneg, inbounds = self.index_facts(name, idx, axis)
+                        if not (nonneg and inbounds):
+                            extra[(name, axis, 'base', ast.dump(base))] = base
+                        continue
+                    if not self.boundscheck:
+                        continue
                     if isinstance(idx, ast.BinOp) and isinstance(idx.op, ast.Mod):
                         src = self.len_of(idx.right)          # x % n: in [0, n), n another extent
                         if src and src != (name, axis) and self.uses_var(idx.left, var):
@@ -1492,6 +1553,11 @@ class Compiler:
             if src and any(len(f) > 3 and (name, axis, 'mod', src) in f[3] for f in self.facts.values()):
                 return True, True    # and a versioning test proved n <= name's extent
             return False, False
+        for var, f in self.facts.items():
+            if len(f) > 3 and any(len(k) > 2 and k[2] == 'base' for k in f[3]):
+                base = self.index_base(idx, var)
+                if base is not None and (name, axis, 'base', ast.dump(base)) in f[3]:
+                    return True, True    # a versioning test proved it
         off = 0
         if isinstance(idx, ast.BinOp) and isinstance(idx.op, (ast.Add, ast.Sub)) \
                 and isinstance(idx.right, ast.Constant) and type(idx.right.value) is int:

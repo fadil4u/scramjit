@@ -24,8 +24,10 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 ## Next
 
 1. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has.
-2. **Bounds-check hoisting beyond unit-step loops** over one variable (versioning covers
-   `for i in range(a, len(x))` with `arr[i + c]` today).
+2. **Bounds-check hoisting, what's left:** versioning covers `arr[i + c]` and, in innermost loops, `arr[base + i]`
+   with `base` built from Python ints that don't change in the loop. Not yet: steps other than 1 (RoPE's
+   `range(0, dim, 2)` in `bench/llm.py`), a start that isn't a literal or `len()`, numpy int bases, and outer
+   loops, where a second copy of everything inside costs more than it wins.
 3. **Store-to-load forwarding:** `y[i]` written then `y[i - 1]` read next iteration; keeping it in
    a register gives `ema` 2.39 ns against 3.07 (cimo doesn't do it).
 4. **Loop lifting (M4):** compile the loops that fit inside a function that doesn't, and let Python run the rest,

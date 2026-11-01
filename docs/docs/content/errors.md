@@ -12,7 +12,7 @@ Each decorated function is, for each signature it is called with, in one of thre
 | **Partly compiled** (amber) | some loops were lifted out and run native; the rest runs as Python |
 | **Python** (red) | nothing compiled: the function runs as the original Python |
 
-[Preflight](profiling.md) shows these states with the same colors, and show which lines run as Python and why.
+[Preflight](profiling.md) shows these states with the same colors, and which lines run as Python and why.
 
 ## Loops are lifted out
 

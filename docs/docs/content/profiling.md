@@ -128,9 +128,9 @@ It prints the same report as `step.preflight()`. Without `--run`, argument types
 
 ```console
 $ SCRAMJIT_LOG=1 python simulate.py
-scramjit: compiled step(float64[:, :], float64[:, :], float) in 0.18 s
-scramjit: flood(uint8[:, :], int64[:, :], int, int) from disk cache
-scramjit: tally(uint8[:], int64[:]) partly compiled: line 9 writes labels, a dict
+scramjit: compiled flood(uint8[:, :], int64[:, :], int, int) in 0.14 s
+scramjit: compiled ema(float64[:], float64[:], float) in 0.04 s
+scramjit: step(float64[:], float64[:], list) from disk cache, partly compiled: line 11 grows a list
 ```
 
 One line per compile, cache hit or fallback. A function that keeps compiling new signatures is being called with arguments of changing types; annotate them, or convert once before the loop.

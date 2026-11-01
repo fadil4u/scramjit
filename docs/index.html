@@ -438,7 +438,7 @@ void mandel_rows(int32_t *out, int64_t h, int64_t w,
   <p class="lede">numpy is fast when the work fits one array expression. Much real code doesn't: each step depends on the last, or on a branch, or on what was found so far. In CPython every iteration of that loop pays the interpreter, and threads take turns on the GIL.</p>
   <div class="fit">
     <div class="fit-c best"><span class="fit-t">Where it shines</span><h3>Loops that don't vectorize</h3><p>Recurrences, data-dependent branches, flood fills, dynamic programming, simulations, scans over byte buffers. Compiled, they run as C, with the GIL released so threads run in parallel.</p>
-      <div class="fit-eg"><code>y[i] = f(y[i-1])</code><code>if grid[j][i] == seed:</code><code>while queue:</code><code>best = min(best, d[k] + w)</code></div></div>
+      <div class="fit-eg"><code>y[i] = f(y[i-1])</code><code>if grid[j][i] == seed:</code><code>while lo &lt; hi:</code><code>best = min(best, d[k] + w)</code></div></div>
     <div class="fit-c also"><span class="fit-t">Also a fit</span><h3>Vectorizable code, pure-Python only</h3><p>Array math written as plain loops, for places that allow only pure Python or have no numpy. scramjit makes the loop fast without a binary dependency.</p></div>
   </div>
   <h3 class="where">Wherever Python runs</h3>
@@ -460,7 +460,7 @@ void mandel_rows(int32_t *out, int64_t h, int64_t w,
     <div class="stage" style="--c:#2563eb"><span class="dot">1</span><b>Parse</b><p>The function's source, with the standard <code>ast</code> module.</p></div>
     <div class="stage" style="--c:#5f6fd0"><span class="dot">2</span><b>Infer types</b><p>Over the whole function, from the call's argument types and annotations.</p></div>
     <div class="stage" style="--c:#a26a8a"><span class="dot">3</span><b>Typed IR</b><p>Every value has a concrete C type. No <code>PyObject</code> anywhere.</p></div>
-    <div class="stage" style="--c:#e8702a"><span class="dot">4</span><b>Lower</b><p>Builtins become loops, lists become arrays, types narrow where proven safe.</p></div>
+    <div class="stage" style="--c:#e8702a"><span class="dot">4</span><b>Lower</b><p>Builtins become loops, lists become arrays, types narrow where proven safe. What can't compile stays Python.</p></div>
     <div class="stage" style="--c:#f05a22"><span class="dot">5</span><b>Emit C</b><p>Readable C, with <code>#line</code> pointing back at your Python.</p></div>
     <div class="stage" style="--c:#dc2626"><span class="dot">6</span><b>cimo</b><p>Machine code in the process, or WebAssembly in Pyodide.</p></div>
   </div>

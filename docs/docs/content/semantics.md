@@ -13,7 +13,7 @@ A compiled function returns what CPython returns for the same function undecorat
 
 ## Why integers wrap
 
-Python integers never overflow; C integers do. Checking every operation would cost speed on every loop, so `int` is `int64` and wraps. Numeric code rarely comes near `2**63`, but if yours might, keep that function in Python.
+Python integers never overflow; C integers do. Checking every operation would cost speed on every loop, so `int` is `int64` and wraps. Numeric code rarely comes near `2**63`, but if yours might, leave that function undecorated.
 
 ## Why floats stay in order
 

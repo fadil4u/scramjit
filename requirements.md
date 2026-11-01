@@ -253,6 +253,24 @@ Findings from an LLVM-based JIT (studied for M0):
   globals, copying nested containers in and out (keep copy-in/out to flat numeric lists, and
   check every element, not the first).
 
+**Python data structures in an LLVM-based Python JIT** (studied 2026-11-01, by reading it and running it):
+
+- Copying a Python list in and back at the call was tried and is being abandoned: nested lists are rejected, and
+  its authors found that doing this consistently for nested structures is close to impossible. Reading one
+  element of a million-item list cost about 395 ms per call, since the whole list converts. Its check is
+  worth keeping: write back only if something wrote. And so is its answer to aliasing: a list met twice in
+  one call maps to one native list, so a write through one name shows through the other.
+- Its replacement is its own container types, which pass into compiled code in about 6 µs but cost users: they
+  must change their code, and reading one from Python took about 4,000 ns against 28 for a list. Classes work
+  the same way, through a decorator and a type spec. Plain instances, dataclasses and dicts passed in are
+  rejected. scramjit's aim differs: ordinary Python objects, so that decorating changes nothing else.
+- Its fixed-key string dicts are named tuples underneath, with constant keys only: the same plan as ours.
+  Enums are their values, globals compile as constants, and tuples are structs, with variable indexing only
+  when all elements share a type. All of this fits.
+- Don't copy its silent differences. Storing 1.5 into an int list or class field truncates to 1 with no error,
+  and a global changed after the first call keeps its old value. Our rule: an error, or a fallback, never a
+  wrong answer.
+
 ## Kernels and measurements (M0)
 
 `kernels/`: Gray-Scott reaction-diffusion, flood fill and viewshed as plain Python, the C

@@ -2,57 +2,53 @@
 // compiled to WebAssembly (syntax tree -> types -> C -> cimo) and runs much faster. three.js draws.
 (function () {
   'use strict';
-  const PYODIDE = 'https://cdn.jsdelivr.net/pyodide/v0.27.7/full/';
   const PRESETS = { erosion: 'Hydraulic erosion', beacon: 'Beacon (viewshed)', landslides: 'Landslides' };
   const ENTRY = { erosion: 'erode', beacon: 'viewshed', landslides: 'slide' };
   const UNITS = { erosion: 'droplets/s', beacon: 'sightlines/s', landslides: 'cells/s' };
-  const SJ_FILES = ['__init__.py', '_compiler.py', '_dispatch.py', '_errors.py', '_runtime.py', '_types.py'];
   const root = document.getElementById('lab-demo');
   if (!root) return;
   const $ = s => root.querySelector(s);
   const RM = matchMedia('(prefers-reduced-motion:reduce)').matches;
 
-  let py = null, lab = null, editor = null, viewer = null, preset = 'erosion', compiled = false, running = false;
+  let lab = null, editor = null, viewer = null, preset = 'erosion', compiled = false, running = false;
   let sources = {}, info = {}, stage = 'python', pyRate = {}, rate = 0, editTimer = null, presetsLoaded = null;
   let nudged = false, startedAt = 0;
 
-  // ---- loading
-  function script(src) {
-    return new Promise((ok, fail) => {
-      const s = document.createElement('script');
-      s.src = src; s.onload = ok; s.onerror = () => fail(new Error('could not load ' + src));
-      document.head.appendChild(s);
-    });
-  }
+  // ---- the Python side runs in a worker (lab/worker.js), so compiling never freezes the page
+  let worker = null, codeId = 0, pending = null, frameIn = null, watWaiters = [];
   function status(m) { $('.lab-status').textContent = m; }
   async function text(path) {
     const r = await fetch(path, { cache: 'no-cache' });
     if (!r.ok) throw new Error(path + ': ' + r.status);
     return r.text();
   }
-  async function boot() {
+  function boot() {
     root.classList.add('loading');
-    status('Loading Pyodide (CPython in WebAssembly, 7 MB)…');
-    if (!window.loadPyodide) await script(PYODIDE + 'pyodide.js');
-    py = await loadPyodide({ indexURL: PYODIDE });
-    status('Loading numpy…');
-    await py.loadPackage('numpy');
-    status('Loading cimo and scramjit (pure Python)…');
-    py.FS.mkdirTree('/home/pyodide/scramjit');
-    py.FS.writeFile('/home/pyodide/cimo.py', await text('py/cimo.py'));
-    for (const f of SJ_FILES) py.FS.writeFile('/home/pyodide/scramjit/' + f, await text('py/scramjit/' + f));
-    py.FS.writeFile('/home/pyodide/lab.py', await text('lab/lab.py'));
-    py.FS.writeFile('/home/pyodide/wat.py', await text('lab/wat.py'));
-    await presetsLoaded;
-    py.runPython("import sys; sys.path.insert(0, '/home/pyodide')");
-    status('Importing…');
-    await py.runPythonAsync('import lab');
-    lab = py.pyimport('lab');
-    setCode();                            // what's in the editor, edits made before loading included
-    root.classList.remove('loading');
-    root.classList.add('running');
-    running = true;
-    startedAt = performance.now();
+    status('Starting…');
+    worker = new Worker('lab/worker.js?v=2');
+    worker.onmessage = e => {
+      const m = e.data;
+      if (m.type === 'status') status(m.msg);
+      else if (m.type === 'fatal') { status('Could not start: ' + m.msg); root.classList.remove('loading'); }
+      else if (m.type === 'ready') presetsLoaded.then(() => {
+        lab = true;
+        setCode();                        // what's in the editor, edits made before loading included
+        root.classList.remove('loading');
+        root.classList.add('running');
+        running = true;
+        startedAt = performance.now();
+      });
+      else if (m.type === 'frame') frameIn = m;
+      else if (m.type === 'info' && pending && m.id === pending.id) { const k = pending.done; pending = null; k(m.info); }
+      else if (m.type === 'wat') watWaiters.splice(0).forEach(k => k(m.text));
+    };
+    worker.onerror = e => { status('Could not start: ' + (e.message || 'worker error')); root.classList.remove('loading'); };
+    worker.postMessage({ type: 'boot', base: new URL('.', location.href).href });
+  }
+  // send code to the worker; done(info) runs with the reply for the latest code only
+  function sendCode(src, on, done) {
+    pending = { id: ++codeId, done };
+    worker.postMessage({ type: 'code', id: codeId, preset, src, compiled: on });
   }
 
   // ---- code and the pipeline. One pane: the Python editor; with scramjit on, tabs for the syntax
@@ -71,9 +67,10 @@
     if (!info.wat) {                                    // disassemble when asked, then keep it
       view(';; disassembling…', 'wast');
       setTimeout(() => {
-        try { info.wat = lab.wasm_text(); } catch (e) { info.wat = ';; could not disassemble: ' + e.message; }
-        if (stage === 'wasm') view(info.wat, 'wast');
-      }, 30);
+        const forInfo = info;
+        watWaiters.push(t => { forInfo.wat = t; if (stage === 'wasm' && info === forInfo) view(t, 'wast'); });
+        worker.postMessage({ type: 'wasm' });
+      }, 0);
     } else view(info.wat, 'wast');
   }
   // the read-only viewer for the C and the WebAssembly text; kept as is (and scrolled) if unchanged
@@ -134,23 +131,25 @@
     const src = editor.getValue();
     $('.lab-err').hidden = true;
     if (!compiled) {
-      info = JSON.parse(lab.set_code(preset, src, false));
-      note('');
-      finish();
-      if (stage !== 'python') showStage('python');
+      sendCode(src, false, r => {
+        info = r;
+        note('');
+        finish();
+        if (stage !== 'python') showStage('python');
+      });
       return;
     }
-    note('compiling…', true);
-    requestAnimationFrame(() => setTimeout(() => {     // compiling blocks the page, so paint first
+    note('compiling…', true);                          // the worker compiles; the page keeps moving
+    sendCode(src, true, r => {
       if (!compiled) return;
-      info = JSON.parse(lab.set_code(preset, src, true));
+      info = r;
       const sec = (info.compile_ms / 1000).toFixed(1);
       note(info.state === 'compiled' ? sec + ' s' : '', false, info.state === 'compiled' ? `scramjit and cimo compiled this in ${sec} s, in this page` : '');
       finish();
       if (info.state === 'compiled' && intro) sweep();
       else if (info.state === 'fallback' && intro) showStage('c');
       else showStage(stage);
-    }, 30));
+    });
   }
   function finish() {
     const e = $('.lab-err');
@@ -239,16 +238,16 @@
 
   // ---- the frame loop: one time-boxed step of Python or compiled work, then draw
   function frame() {
-    if (running && lab && !document.hidden && inView) {
-      const r = JSON.parse(lab.step(compiled ? 22 : 14));
+    if (running && frameIn && !document.hidden && inView) {
+      const r = frameIn;                              // the worker's latest step; ask for the next
+      frameIn = null;
+      worker.postMessage({ type: 'ack' });
       if (r.error) { info = { state: 'error', error: r.error }; finish(); }
-      rate = rate ? rate * 0.85 + r.rate * 0.15 : r.rate;
-      if (!compiled && info.state !== 'error') pyRate[preset] = rate;
-      const hp = lab.heights(), hb = hp.getBuffer('f32');     // the array's memory, no copy
-      const vo = lab.overlay(), vb = vo ? vo.getBuffer('u8') : null;
-      updateMesh(hb.data, vb ? vb.data : null);
-      hb.release(); hp.destroy();
-      if (vo) { vb.release(); vo.destroy(); }
+      if (r.compiled === compiled) {
+        rate = rate ? rate * 0.85 + r.rate * 0.15 : r.rate;
+        if (!compiled && info.state !== 'error') pyRate[preset] = rate;
+      }
+      updateMesh(r.h, r.vis);
       const n = `${Math.round(rate).toLocaleString()} ${UNITS[preset]}`;
       const x = pyRate[preset] ? ` · ${Math.round(rate / pyRate[preset])}× Python` : '';
       $('.lab-rate').innerHTML = info.state === 'compiled' ? `Compiled by scramjit · ${n}${x}`
@@ -260,14 +259,16 @@
     requestAnimationFrame(frame);
   }
   let inView = true;
-  new IntersectionObserver(es => { inView = es[0].isIntersecting; }).observe(root);
+  const tellActive = () => { if (worker) worker.postMessage({ type: 'active', on: inView && !document.hidden }); };
+  new IntersectionObserver(es => { inView = es[0].isIntersecting; tellActive(); }).observe(root);
+  document.addEventListener('visibilitychange', tellActive);
 
   // ---- controls
   function setup() {
     const ta = $('textarea');
     editor = CodeMirror.fromTextArea(ta, { mode: 'python', theme: 'sj', lineNumbers: true, indentUnit: 4, viewportMargin: Infinity });
     editor.setValue('# loading the code…');
-    viewer = CodeMirror($('.lab-panel'), { theme: 'sj', lineNumbers: true, readOnly: true, mode: 'text/x-csrc' });
+    viewer = CodeMirror($('.lab-panel'), { theme: 'sj', lineNumbers: true, readOnly: 'nocursor', mode: 'text/x-csrc' });   // no focus, so no phone keyboard
     const names = () => {                               // the tabs are named after the files
       const t = root.querySelectorAll('.lab-tname');
       t[0].textContent = preset + '.py'; t[1].textContent = ENTRY[preset] + '.c'; t[2].textContent = ENTRY[preset] + '.wat';
@@ -275,13 +276,27 @@
     presetsLoaded = Promise.all(Object.keys(PRESETS).map(async p => { sources[p] = await text('lab/' + p + '.py'); }))
       .then(() => { if (!running) editor.setValue(sources[preset]); })
       .catch(e => editor.setValue('# could not load the presets: ' + e.message));
+    // phones: while typing, the terrain shrinks to a strip and the demo fits above the keyboard
+    const narrow = matchMedia('(max-width:960px)');
+    const fit = () => {
+      if (!root.classList.contains('typing')) return;
+      const vv = window.visualViewport, top = document.querySelector('.top'), head = top ? top.offsetHeight : 0;
+      root.style.setProperty('--vvh', ((vv ? vv.height : innerHeight) - head - 8) + 'px');
+      requestAnimationFrame(() => {
+        scrollTo(0, root.getBoundingClientRect().top + scrollY - head - 4);
+        resize(); editor.refresh(); editor.scrollIntoView(null, 40);
+      });
+    };
+    editor.on('focus', () => { if (narrow.matches && !root.classList.contains('is-full')) { root.classList.add('typing'); fit(); } });
+    editor.on('blur', () => { if (root.classList.contains('typing')) { root.classList.remove('typing'); requestAnimationFrame(() => { resize(); editor.refresh(); }); } });
+    if (window.visualViewport) visualViewport.addEventListener('resize', fit);
     editor.on('change', () => { clearTimeout(editTimer); if (running) editTimer = setTimeout(setCode, 700); });
     const sel = $('.lab-preset');
     for (const [k, v] of Object.entries(PRESETS)) sel.add(new Option(v, k));
     sel.addEventListener('change', () => {
       preset = sel.value; rate = 0; names();
       if (sources[preset]) editor.setValue(sources[preset]);
-      if (running) { lab.reset(); clearTimeout(editTimer); setCode(compiled); }
+      if (running) { worker.postMessage({ type: 'reset' }); clearTimeout(editTimer); setCode(compiled); }
     });
     const setMode = on => {
       if (on === compiled) return;
@@ -294,7 +309,7 @@
       if (running) setCode(on);
     };
     $('.lab-sj').addEventListener('click', () => setMode(!compiled));
-    $('.lab-reset').addEventListener('click', () => { if (running) { lab.reset(Math.floor(Math.random() * 1e9)); rate = 0; } });
+    $('.lab-reset').addEventListener('click', () => { if (running) { worker.postMessage({ type: 'reset', seed: Math.floor(Math.random() * 1e9) }); rate = 0; } });
     root.querySelectorAll('.lab-tab').forEach(c => c.addEventListener('click', () => showStage(c.dataset.s)));
     $('.lab-tree').addEventListener('click', e => {        // a statement opens its expressions
       const row = e.target.closest('.lab-row.x');
@@ -313,7 +328,7 @@
     });
     document.addEventListener('fullscreenchange', () => setFull(document.fullscreenElement === root));
     document.addEventListener('keydown', e => { if (e.key === 'Escape' && root.classList.contains('is-full') && !document.fullscreenElement) setFull(false); });
-    $('.lab-start').addEventListener('click', () => boot().catch(e => { status('Could not start: ' + e.message); root.classList.remove('loading'); }));
+    $('.lab-start').addEventListener('click', boot);
     initGL();
     // a still terrain before Python loads
     const n = 64, h = new Float32Array(n * n);

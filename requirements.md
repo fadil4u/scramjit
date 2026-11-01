@@ -405,6 +405,9 @@ is slow in WebAssembly (cimo's `fma` is software there), so the beacon uses `mat
 At compiled speed, erosion and landslides reach their steady state (a flat plain) in under a
 second, so the demo adds clock-based uplift toward the starting terrain (2 s time constant) and
 gentler droplets: the terrain shows the balance, and more work per second carves deeper.
+Compiling takes 1.5 to 3 s and blocks the thread it runs on, so the demo runs Pyodide in a
+Web Worker (`docs/lab/worker.js`): the page only draws and handles input, and gets each frame's
+heights as a transferred buffer.
 
 **M2: builtins, lists, narrowing.** Lowering rules for `enumerate`, `zip`, `map`, `filter`,
 comprehensions and the reductions; fixed-size lists as arrays; narrow types from annotations,

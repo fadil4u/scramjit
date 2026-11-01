@@ -167,6 +167,7 @@ Each decision is explicit and tested against CPython:
 - Division by zero, integer or float, raises `ZeroDivisionError` as Python does.
 - Float evaluation order follows Python; no reassociation, no FMA contraction unless opted in.
 - A variable negative exponent in `n ** k` raises `ValueError`, where Python returns a float.
+- A negative float to a fractional power raises `ValueError`, where Python returns a complex.
 - **`math` functions are bit-exact with CPython on every platform**, Pyodide included. Use the
   same code CPython runs:
   - functions CPython implements itself (`hypot`, `dist`, `fsum`, `isqrt`, `gamma`, `lgamma`,
@@ -439,12 +440,12 @@ reported at its Python line (fallback warning, preflight, and `CompileError` und
 `fallback=False`). Whole-function fallback lands in M1; it is the original function.
 
 **`**`.** Python's result type depends on the values in two cases: an int to a negative power is a
-float, and a negative float to a fractional power is a complex. A float that could go complex falls
-back, with a hint. `n ** k` with a variable `k` compiles to an int and raises `ValueError` if `k` is
-negative: decided 2026-11-01, because `n ** k` is too common to run as Python and an error is never a
-wrong answer. Rerunning in Python and resuming in Python were considered and left for later. This and
-every other difference from CPython are in `docs/docs/content/gotchas.md`; keep that page complete. numpy's rules have one type whatever the values, so `a[i] ** 0.5`
-always compiles. `parity=False` gives C's `pow`, and `x * x` for small powers. `x ** 2` calls libm's
+float, and a negative float to a fractional power is a complex. Both compile, to an int and a float,
+and raise `ValueError` in the rare case: decided 2026-11-01, because these are too common to run as
+Python and an error is never a wrong answer. A constant exponent, or a nonnegative constant base, rules
+the case out. Rerunning or resuming in Python was considered and left for later. numpy's rules have one
+type whatever the values, so `a[i] ** 0.5` gives `nan` as numpy does. This and every other difference
+from CPython are in `docs/docs/content/gotchas.md`; keep that page complete. `parity=False` gives C's `pow`, and `x * x` for small powers. `x ** 2` calls libm's
 `pow` as CPython does, which is why `v ** 2` over an array gains about 18x where `v * v` gains far more.
 
 **M3 progress.** The disk cache is cimo's: scramjit's C is deterministic, so a second process finds

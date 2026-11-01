@@ -18,7 +18,7 @@
 - [Loops and builtins](https://www.scramjit.dev/docs/content/loops-and-builtins.md): How range, zip, comprehensions and other builtins compile
 - [Arrays, lists and tuples](https://www.scramjit.dev/docs/content/containers.md): numpy arrays, tuples and lists
 - [Semantics](https://www.scramjit.dev/docs/content/semantics.md): Where results match CPython, and why
-- [Gotchas](https://www.scramjit.dev/docs/content/gotchas.md): Every known difference from CPython: 64-bit integers that wrap, n ** k with a negative k raises; and Ctrl-C, numpy warnings, debuggers and threads around a compiled call
+- [Gotchas](https://www.scramjit.dev/docs/content/gotchas.md): Every known difference from CPython: 64-bit integers that wrap, n ** k with a negative k and x ** 0.5 with a negative x raise; and Ctrl-C, numpy warnings, debuggers and threads around a compiled call
 - [Fallback and errors](https://www.scramjit.dev/docs/content/errors.md): Fallback to Python, FallbackWarning and CompileError
 - [Preflight](https://www.scramjit.dev/docs/content/profiling.md): scramjit preflight, f.preflight() and acting on its hints
 

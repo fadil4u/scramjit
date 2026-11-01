@@ -246,6 +246,14 @@ def test_a_suggestion_really_compiles(tmp_path):
     assert r.stdout.strip() == '[0.0, 0.5, 1.5, 2.5]', r.stderr
 
 
+def test_a_complex_power_is_flagged_only_when_possible(tmp_path):
+    (tmp_path / 'p.py').write_text('from scramjit import scram\n@scram\ndef f(x: float):\n    return x ** 0.5\n'
+                                   '@scram\ndef g(x: float):\n    return x ** 2 + 2.0 ** x\n')
+    out = run(['-m', 'scramjit', 'preflight', 'p.py'], tmp_path).stdout
+    assert 'line 4 raises ValueError if the base is negative' in out
+    assert 'line 7' not in out and '2 compiled' in out
+
+
 def test_differences_from_python_are_flagged(tmp_path):
     (tmp_path / 'p.py').write_text('from scramjit import scram\n@scram\ndef f(n: int, k: int):\n    return n ** k\n')
     r = run(['-m', 'scramjit', 'preflight', 'p.py'], tmp_path)

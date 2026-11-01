@@ -74,9 +74,25 @@ def d_flag_int(a, n: int, c: int):
     return v ** 2
 
 
-# must fall back: the type would depend on the data
-def fb_frac(x: float): return x ** 0.5
-def fb_var(x: float, y: float): return x ** y
+# Python's result is complex for a negative base: compiled, these raise (a documented difference)
+def c_half(x: float): return x ** 0.5
+def c_neg_half(x: float): return x ** -0.5
+def c_var(x: float, y: float): return x ** y
+def c_int_base(n: int): return n ** 0.5
+def c_int_base_var(n: int, y: float): return n ** y
+def c_builtin(x: float): return pow(x, 0.5)
+def c_aug(x: float):
+    x **= 0.5
+    return x
+def c_flag(a, x: float, c: int):
+    v = x
+    if c:
+        v = a[0]
+    return v ** 0.5
+def c_const_base(y: float): return 2.0 ** y
+
+
+# must fall back
 def i_var(n: int, k: int): return n ** k
 def i_var_aug(n: int, k: int):
     n **= k
@@ -84,11 +100,6 @@ def i_var_aug(n: int, k: int):
 def i_builtin_var(n: int, k: int): return pow(n, k)
 def i_true_base(b: bool, k: int): return b ** k
 def fb_three(x: float): return pow(x, 2, 3)
-def fb_flag_frac(a, x: float, c: int):
-    v = x
-    if c:
-        v = a[0]
-    return v ** 0.5
 
 
 X = [0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 2.5, -2.5, 3.0, -3.0, 10.0, 1e-5, 1e-160, -1e-160, 1e-200, 1e154, 1e155, 1e300, -1e300, 5e-324, -5e-324,
@@ -100,6 +111,8 @@ wrap = lambda v: ((v + (1 << 63)) % (1 << 64)) - (1 << 63)  # noqa: E731
 
 
 def norm(r):
+    if isinstance(r, complex) and not isinstance(r, np.generic):
+        return 'complex'
     if isinstance(r, (float, np.floating)):
         return (type(r).__name__, 'nan' if r != r else struct.pack('<d', float(r)).hex())
     if isinstance(r, (bool, np.bool_)):
@@ -128,19 +141,29 @@ CASES += [(a_frac_var, [(a, y) for a in AF[::3] for y in X]), (a_int_var, [(a, n
 CASES += [(f, [(a,) for a in AI]) for f in (n_two, n_neg, n_float, n_elems, n_big)]
 CASES += [(n_var, [(a, n) for a in AI[::6] for n in I]), (n_rpow, [(a, n) for a in AI for n in I[::3]])]
 CASES += [(d_flag, [(a, x, c) for a in AF[::9] for x in X for c in (0, 1)]), (d_flag_int, [(a, n, c) for a in AI[::6] for n in I for c in (0, 1)])]
-FALLS_BACK = [(fb_frac, (2.0,)), (fb_var, (2.0, 3.0)), (fb_three, (2.0,)), (fb_flag_frac, (np.array([4.0]), 2.0, 0))]
+FALLS_BACK = [(fb_three, (2.0,))]
+Y = X + [0.25, -0.25, 1.5, -1.5, 1e-300, 0.1]
+CASES += [(f, [(x,) for x in X]) for f in (c_half, c_neg_half, c_builtin, c_aug, c_const_base)]
+CASES += [(c_var, [(x, y) for x in X for y in Y]), (c_int_base, [(i,) for i in I]), (c_int_base_var, [(i, y) for i in I for y in Y])]
+CASES += [(c_flag, [(a, x, c) for a in AF[::9] for x in X for c in (0, 1)])]
 
 
 def main():
     np.seterr(all='ignore')
     warnings.simplefilter('ignore', RuntimeWarning)
-    bad, checked = [], 0
+    bad, checked, raised = [], 0, 0
     for f, cases in CASES:
         g = scram(f, fallback=False)
         for args in cases:
             checked += 1
             a, b = outcome(f, args), outcome(g, args)
-            if a != b:
+            # the documented difference: an error, never a wrong answer (including where Python's complex overflows)
+            if a[0] == 'complex' or a == ('OverflowError', 'complex exponentiation'):
+                if b[0] == 'ValueError' and 'gives a complex' in b[1]:
+                    raised += 1
+                else:
+                    bad.append((f.__name__, args, a, b))
+            elif a != b:
                 bad.append((f.__name__, args, a, b))
     wrong = []
     for f, args in FALLS_BACK:
@@ -148,7 +171,7 @@ def main():
             warnings.simplefilter('always', FallbackWarning)
             if outcome(scram(f), args) != outcome(f, args) or not w:
                 wrong.append(f.__name__)
-    print(f'{sys.platform} {sys.version.split()[0]}: {len(CASES)} functions, {checked} cases, {len(bad)} differ; fall back wrongly: {wrong}')
+    print(f'{sys.platform} {sys.version.split()[0]}: {len(CASES)} functions, {checked} cases, {len(bad)} differ, {raised} complex results raised; fall back wrongly: {wrong}')
     seen = {}
     for b in bad:
         seen.setdefault(b[0], []).append(b)

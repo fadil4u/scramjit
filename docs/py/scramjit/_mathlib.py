@@ -168,8 +168,8 @@ static double sj_frexp(double x, int64_t *ex) {
 }
 """),
     'floatpow': ((), """
-/* float ** float (float_pow in floatobject.c), for an exponent or base that can't give a complex
- * result. Returns 0, 1 for 0.0 ** negative, 2 on overflow. */
+/* float ** float (float_pow in floatobject.c). Returns 0, 1 for 0.0 ** negative, 2 on overflow, 3
+ * where Python's result is a complex. */
 static int sj_float_pow(sj_f2 f, double v, double w, double *out) {
     int negate = 0, odd;
     *out = 1.0;
@@ -194,7 +194,11 @@ static int sj_float_pow(sj_f2 f, double v, double w, double *out) {
         *out = odd ? v : 0.0;
         return 0;
     }
-    if (v < 0.0) { v = -v; negate = odd; }
+    if (v < 0.0) {
+        if (w != floor(w)) return 3;
+        v = -v;
+        negate = odd;
+    }
     if (v == 1.0) { *out = negate ? -1.0 : 1.0; return 0; }
     double r = f(v, w);
     if (isinf(r)) return 2;

@@ -520,9 +520,9 @@ class Compiler:
 
     def pow_type(self, a, b, node):
         """a ** b. numpy's rules give one type whatever the values. Python's give a float for an int to
-        a negative power, and a complex for a negative float to a fractional power. An int exponent that
-        isn't a constant is assumed nonnegative, and raises if it isn't (a documented difference from
-        Python); a float that could go complex falls back."""
+        a negative power, and a complex for a negative float to a fractional power. Compiled code has one
+        type per expression, so it assumes neither happens and raises if one does: a documented
+        difference from Python. A constant exponent or base that rules it out has no such case."""
         r = T.arith_result(a, b, 'Pow')
         if r is None:
             self.fail(node, 'arithmetic on numpy bools')
@@ -531,7 +531,7 @@ class Compiler:
         exp = const_number(node.right if isinstance(node, ast.BinOp) else node.value)
         if r.kind == 'int':
             if exp is None:
-                self.gotchas[self.line(node)] = 'raises ValueError if the exponent is negative, where Python gives a float'
+                self.gotcha(node, 'raises ValueError if the exponent is negative, where Python gives a float')
                 return r
             if exp >= 0:
                 return r
@@ -541,9 +541,13 @@ class Compiler:
         base = const_number(node.left) if isinstance(node, ast.BinOp) else None
         integral = b.kind != 'float' or (exp is not None and (exp != exp or abs(exp) == math.inf or exp == math.floor(exp)))
         if self.exact and not integral and not (base is not None and base >= 0):
-            self.fail(node, 'float ** a fractional exponent: a negative base gives a complex, so the type '
-                      'depends on the data')
+            self.gotcha(node, 'raises ValueError if the base is negative, where Python gives a complex')
         return r
+
+    def gotcha(self, node, text):
+        """Note that this line can differ from Python, for preflight."""
+        line, have = self.line(node), self.gotchas.get(self.line(node))
+        self.gotchas[line] = text if have is None or text in have else f'{have}; {text}'
 
     def join_all(self, node, ts, what):
         r = ts[0]
@@ -1776,6 +1780,7 @@ class Compiler:
                 self.emit(f'int {err} = sj_float_pow({table}, {fa}, {fb}, &{out});')
                 self.emit(f'if ({err} == 1) SJ_FAIL({ZERO_DIVISION}, {line}, 6, 0);')
                 self.emit(f'if ({err} == 2) SJ_FAIL({OVERFLOW_ERROR}, {line}, 4, 0);')
+                self.emit(f'if ({err} == 3) SJ_FAIL({VALUE_ERROR}, {line}, 17, 0);')
         if npf == '1':
             numpy()
         elif npf == '0':

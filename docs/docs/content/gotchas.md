@@ -27,6 +27,23 @@ If `k` can be negative, write `float(n) ** k`, which always gives a float and co
       note: line 3 raises ValueError if the exponent is negative, where Python gives a float
 ```
 
+### A negative base to a fractional power raises
+
+On a Python float, `x ** 0.5` and `x ** y` compile to a float. Where Python's result would be a complex, they raise `ValueError`:
+
+```python
+@scram
+def root(x: float):
+    return x ** 0.5
+
+root(4.0)       # 2.0, as in Python
+root(-8.0)      # ValueError; Python returns (1.7319121124709868e-16+2.8284271247461903j)
+```
+
+As with `n ** k`, compiled code has one type per expression, and this is an error, never a wrong answer. (Where Python's complex result would itself overflow, Python raises `OverflowError`; compiled code still raises `ValueError`.) An integer exponent is exact, as in Python: `x ** 2`, `x ** n` and `(-8.0) ** 3.0` work. So is a nonnegative constant base: `2.0 ** x` never raises this.
+
+numpy values follow numpy's rules: `a[i] ** 0.5` on a negative element is `nan`, in Python and compiled alike. With `@scram(parity=False)`, `x ** 0.5` is `nan` too. If you need the complex result, leave the function undecorated. `scramjit preflight` adds a note to each line this applies to.
+
 ### Integers are 64-bit, and wrap
 
 Python's integers are unbounded. Compiled integers are `int64`, and past that they wrap silently, **giving a wrong answer with no error**:
@@ -77,9 +94,9 @@ Compiled code releases the GIL, which is the point, but it also removes what was
 
 ## Options that change this on purpose
 
-- **`@scram(parity=False)`** trades exact results for speed: float `/`, `//` and `%` by zero and `math` functions give IEEE `inf` and `nan` instead of raising, `math` functions come from cimo's C library, and `x ** 0.5` gives `nan` for a negative base.
+- **`@scram(parity=False)`** trades exact results for speed: float `/`, `//` and `%` by zero and `math` functions give IEEE `inf` and `nan` instead of raising, `math` functions come from cimo's C library, and `x ** 0.5` gives `nan` for a negative base instead of raising.
 - **`@scram(boundscheck=False)`** removes index checks. An index out of range then reads or writes other memory instead of raising `IndexError`, which can return garbage or crash the process. Use it only on code you've verified with checks on.
 
 ## What isn't a gotcha
 
-Code that can't be compiled exactly runs as Python, so its results can't differ, only its speed. That includes `x ** 0.5` on a Python float, whose result is complex for a negative base, and anything else preflight marks as running as Python. See [fallback and errors](errors.md).
+Code that can't be compiled runs as Python, so its results can't differ, only its speed: anything preflight marks as running as Python. See [fallback and errors](errors.md).

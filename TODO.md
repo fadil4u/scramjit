@@ -30,8 +30,9 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 3. **Ctrl-C during a compiled call:** it waits until the call returns (10.7 s after the signal in one
    test), and a compiled infinite loop can only be killed. Check a flag at loop back edges, if that can
    be made cheap. Measure first.
-4. **`n ** k` with a negative `k` raises today** (see Gotchas). Rerunning in Python, for functions that
-   write nothing, or resuming in Python alongside loop lifting would remove the difference.
+4. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x` raise today** (see Gotchas). Rerunning
+   in Python, for functions that write nothing, or resuming in Python alongside loop lifting would remove
+   the difference.
 5. **SSA for variables that change type** (`x = 1` then `x = 0.5`): today they fall back.
 6. **Bounds-check hoisting beyond unit-step loops** over one variable (versioning covers
    `for i in range(a, len(x))` with `arr[i + c]` today).

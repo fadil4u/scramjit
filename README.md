@@ -104,13 +104,12 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 |:---|:---|
 | `for`, `while`, `break`, `continue`, `if`, conditional expressions | Slices and views: `a[1:]` |
 | `range`, `enumerate`, `zip`, `map`, `filter`, comprehensions | numpy array expressions: `a * 2`, `a.sum()` |
-| `sum(gen, 0.0)`, `min`, `max`, `abs`, tuple unpacking, `**` where the result type is known | Calls to other Python functions |
+| `sum(gen, 0.0)`, `min`, `max`, `abs`, `**`, tuple unpacking | Calls to other Python functions |
 | Numbers and n-D numpy arrays, including dtypes like `uint8` | Dicts, strings, objects |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | Lists that grow with `append` |
 
-`x ** 2`, `a[i] ** 0.5` and `n ** k` compile. A Python float to a fractional power (`x ** 0.5`) runs as
-Python, because a negative base gives a complex. A negative `k` in `n ** k` raises `ValueError`, where
-Python gives a float.
+`**` compiles. Where Python's result would change type, it raises `ValueError`: a negative `k` in
+`n ** k` (Python gives a float) and a negative float `x` in `x ** 0.5` (Python gives a complex).
 
 A function that can't be compiled runs as Python, with a `FallbackWarning` giving the reason:
 
@@ -176,8 +175,8 @@ Compiled functions are tested against the same functions running undecorated, in
 generated expressions. This covers floor division and modulo on negatives, `ZeroDivisionError`,
 `IndexError`, `math` domain errors and numpy's scalar rules.
 
-There are two exceptions: integers are 64-bit and wrap, and a negative variable exponent in `n ** k`
-raises `ValueError`. Compiled calls also don't respond to Ctrl-C until they return, skip numpy's
+There are three exceptions: integers are 64-bit and wrap, and the two `**` cases above raise
+`ValueError`. Compiled calls also don't respond to Ctrl-C until they return, skip numpy's
 warnings and `errstate`, and are invisible to debuggers and coverage. See
 [Gotchas](https://www.scramjit.dev/docs/?p=gotchas).
 

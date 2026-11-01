@@ -43,6 +43,8 @@ VALUE_ERROR_MESSAGES = [
     'Integers to negative integer powers are not allowed.',     # numpy
     'n ** k with a negative k: Python gives a float here, which compiled code can\'t; write float(n) ** k '
     '(see "Gotchas" in the docs)',
+    'x ** y with a negative x and a fractional y: Python gives a complex here, which compiled code can\'t '
+    '(see "Gotchas" in the docs)',
 ]
 OVERFLOW_ERROR_MESSAGES = [
     'cannot convert float infinity to integer',

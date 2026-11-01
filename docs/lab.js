@@ -4,10 +4,10 @@
 (function () {
   'use strict';
   const DEMOS = {
-    terrain: { presets: { erosion: 'Hydraulic erosion', beacon: 'Beacon (viewshed)', landslides: 'Landslides' }, draw: 'terrain', reset: 'New terrain', hint: 'drag to turn the terrain' },
-    fractal: { presets: { fractal: 'Mandelbrot dive' }, draw: 'image', fit: 'cover', smooth: true, reset: 'New dive', hint: 'click to steer the dive' },
-    sand: { presets: { sand: 'Falling sand' }, draw: 'image', fit: 'contain', smooth: false, reset: 'Clear', hint: 'draw on it' },
-    flock: { presets: { flock: 'Boids' }, draw: 'flock', fit: 'cover', reset: 'Scatter', hint: 'move through the flock' },
+    terrain: { presets: { erosion: 'Hydraulic erosion', beacon: 'Beacon (viewshed)', landslides: 'Landslides' }, draw: 'terrain', reset: 'New terrain' },
+    fractal: { presets: { fractal: 'Mandelbrot dive' }, draw: 'image', fit: 'cover', smooth: true, reset: 'New dive' },
+    sand: { presets: { sand: 'Falling sand' }, draw: 'image', fit: 'contain', smooth: false, reset: 'Clear' },
+    flock: { presets: { flock: 'Boids' }, draw: 'flock', fit: 'cover', reset: 'Scatter' },
   };
   const PRESETS = Object.assign({}, ...Object.values(DEMOS).map(d => d.presets));
   const DEMO_OF = {};
@@ -402,7 +402,6 @@
       root.dataset.demo = d;
       last2d = null;
       const k = $('.lab-2d'); k.getContext('2d').clearRect(0, 0, k.width, k.height);
-      if (!running) $('.lab-rate').textContent = v.hint;
       setPreset(Object.keys(v.presets)[0]);
     };
     // every demo starts as plain Python, so its slow speed comes first; the switch and the nudge return

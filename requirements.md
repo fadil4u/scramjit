@@ -163,6 +163,19 @@ Each decision is explicit and tested against CPython:
   `@scram(boundscheck=False)`.
 - Division by zero, integer or float, raises `ZeroDivisionError` as Python does.
 - Float evaluation order follows Python; no reassociation, no FMA contraction unless opted in.
+- **`math` functions are bit-exact with CPython on every platform**, Pyodide included. Use the
+  same code CPython runs:
+  - functions CPython implements itself (`hypot`, `dist`, `fsum`, `isqrt`, `gamma`, `lgamma`,
+    ...) are ported into scramjit's runtime, with CPython's license notice;
+  - functions CPython takes from the platform C library (`sin`, `atan2`, `exp`, `pow`, ...) call
+    that same library on native targets (glibc, Apple's libm, the Windows CRT, linked through
+    cimo), and in Pyodide are ported into the runtime from the libm that Pyodide's CPython is
+    built with (emscripten's, derived from musl; MIT);
+  - CPython's own handling around those calls (NaN, infinities, domain and range errors raising
+    `ValueError` or `OverflowError`) is reproduced exactly.
+
+  Differential tests compare every supported function against CPython on every platform, with
+  zero differing results as the bar.
 
 ## Execution model
 
@@ -243,8 +256,8 @@ the same writes, as CPython.
   a loop index lowers to a compare.
 - **Math functions:** cimo's C library differs from CPython's in the last bit for many inputs:
   `atan2` 18%, `hypot` 14% (CPython implements `hypot` itself), `sin` and `cos` 3%, `exp` and
-  `pow` under 0.1%, `sqrt` and `log` never (100,000 random inputs). Open: how "never change
-  results" applies to math functions.
+  `pow` under 0.1%, `sqrt` and `log` never (100,000 random inputs). Decided: math functions are
+  bit-exact too; see "Semantics".
 - **Calls between compiled functions** aren't in the subset yet; kernels with a helper per ray or
   cell need them.
 
@@ -308,8 +321,9 @@ are benchmarked against pure CPython.
 
 **M2: builtins, lists, narrowing.** Lowering rules for `enumerate`, `zip`, `map`, `filter`,
 comprehensions and the reductions; fixed-size lists as arrays; narrow types from annotations,
-dtypes and range analysis. Done when each rule has differential tests and the generated C for
-each M0 kernel contains no iterator or boxing code.
+dtypes and range analysis. Done when each rule has differential tests, the generated C for
+each M0 kernel contains no iterator or boxing code, and every supported `math` function gives
+results identical to CPython's, natively and in Pyodide.
 
 **M3: n-D arrays, errors, disk cache, Pyodide.** Done when all M0 kernels run in native CPython
 and in Pyodide, a second process reuses the disk cache, and every out-of-subset construct is

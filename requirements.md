@@ -74,8 +74,8 @@ def saxpy(a: float, x, y):
         y[i] += a * x[i]
 ```
 
-The decorator is the whole user-facing API. Options (`boundscheck`, `cache`, `fallback`) are
-keyword arguments to it. It is named `scram` (to scram: to go, fast) and imported as
+The decorator is the whole user-facing API. Options (`boundscheck`, `cache`, `fallback`, `exact`)
+are keyword arguments to it. It is named `scram` (to scram: to go, fast) and imported as
 `from scramjit import scram`; a callable module (`@scramjit`) was rejected because mypy and Pyright
 report "module not callable" for every variant of the trick. The undecorated
 function stays reachable as `f.__wrapped__` (the `functools` convention), for debugging and
@@ -176,6 +176,16 @@ Each decision is explicit and tested against CPython:
 
   Differential tests compare every supported function against CPython on every platform, with
   zero differing results as the bar.
+- **Parity can be traded for speed** with `@scram(exact=False)`, where matching CPython costs
+  speed: float `/`, `//`, `%` by zero give IEEE inf and nan instead of raising, and `int / int`
+  and int-float comparisons use plain double arithmetic. Integer `//` and `%` by zero still
+  raise (in C they trap). Later: FMA contraction, faster math functions, reassociation for
+  vectorization. Parity stays the default; the code generator's job is to make it cost nothing.
+- **numpy scalars are numpy's, not Python's.** A value read from an array is a numpy scalar:
+  dividing it by zero gives inf, nan or 0 instead of raising, and int with np.int64 gives
+  np.int64 (NEP 50). Types record numpy-ness; a variable holding both kinds (`total = 0.0`, then
+  `total += x[i]`) carries a runtime flag. Narrow dtypes (float32, uint8) follow NEP 50 too
+  (M2).
 
 ## Execution model
 
@@ -317,7 +327,28 @@ measurements (M0)" and "Prior art"; one decision is open there (math functions).
 **M1: scalars, 1-D arrays, `range`.** `ast` → C for scalar arithmetic, `range` loops, `if`,
 `while`, and 1-D numpy arrays; annotations as contracts; `int64`/`float64` only; in-memory cache.
 Done when the M0 kernels that need only these features run, match CPython on random inputs, and
-are benchmarked against pure CPython.
+are benchmarked against pure CPython. **Done 2026-11-01** (see "M1 findings").
+
+**M1 findings.** Differential tests (`tests/`) plus 2000-program random expression runs (about
+9,500 checks, numpy scalars included) found zero mismatches. CPython quirks reproduced: `float *
+int` with the int equal to -1 is computed as a negation (a NaN's sign flips; other ints and
+numpy scalars don't). cimo doesn't inline `static inline` functions (5.15 vs 3.07 ns on `ema`),
+so hot helpers are macros. Facts from unit-step `range` loops (index non-negative, below
+`len(a)`) drop negative-index adjustment and bounds checks, and loop versioning (one test before
+the loop, checked copy otherwise) removes the rest without changing where an `IndexError` is
+raised. With those, parity and bounds checks cost nothing measurable on the M1 kernels:
+`bench/m1.py`, arm64, ns per element, all modes within 3%:
+
+| kernel | CPython | scramjit | speedup |
+|---|---|---|---|
+| ema (recurrence) | 260 | 3.10 (hand C 3.12) | 84x |
+| ratio_sum (divisions) | 155 | 1.03 | 150x |
+| count_below (int vs float compare) | 74 | 1.66 | 45x |
+| prefix_max | 99 | 0.69 | 143x |
+| edit_distance (DP) | 482 | 4.28 | 113x |
+| collatz (int // and %) | 42 | 2.39 | 17x |
+
+No M0 kernel uses only 1-D arrays, so M1 was measured on these.
 
 **M2: builtins, lists, narrowing.** Lowering rules for `enumerate`, `zip`, `map`, `filter`,
 comprehensions and the reductions; fixed-size lists as arrays; narrow types from annotations,

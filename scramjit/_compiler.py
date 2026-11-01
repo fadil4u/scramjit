@@ -61,8 +61,9 @@ def flag_or(a, b):
 
 
 class Compiler:
-    def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True):
+    def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, exact=True):
         self.f = fdef
+        self.exact = exact     # False: C's float semantics where CPython parity costs speed
         self.globals = globals_
         self.filename = filename
         self.offset = line_offset
@@ -78,6 +79,7 @@ class Compiler:
         self.lines = []
         self.depth = 1
         self.ntemp = 0
+        self.facts = {}        # loop variable -> (lowest value, array whose len() bounds it, slack)
 
     # ---- helpers
     def line(self, node):
@@ -448,32 +450,130 @@ class Compiler:
         ts, te = self.temp(), self.temp()
         self.emit(f'int64_t {ts} = {start}, {te} = {stop};')
         unit = step is None or (isinstance(s.iter.args[2], ast.Constant) and s.iter.args[2].value == 1)
+        fact = self.range_fact(s) if unit else None
+        if unit and fact and self.boundscheck:
+            # loop versioning: if no access var + c can leave its array during this loop, run a
+            # copy without those checks; otherwise the checked copy raises where Python would
+            extra = self.version_candidates(s, var, fact)
+            if extra:
+                cond = ' && '.join(f'{te} <= v_{arr}__n - ({c})' for arr, c in sorted(extra.items()))
+                self.open(f'if ({te} > {ts} && {cond})')
+                self.unit_loop(s, var, ts, te, fact + (extra,))
+                self.close('} else {')
+                self.depth += 1
+                self.unit_loop(s, var, ts, te, fact)
+                self.close()
+                return
         if unit:
-            ti = self.temp()
-            self.open(f'for (int64_t {ti} = {ts}; {ti} < {te}; {ti}++)')
-            self.emit(f'v_{var} = {ti};')
-        else:
-            tp, tn, tk = self.temp(), self.temp(), self.temp()
-            self.emit(f'int64_t {tp} = {step};')
-            self.emit(f'if ({tp} == 0) SJ_FAIL({VALUE_ERROR}, {self.line(s)}, 1, 0);')
-            self.emit(f'uint64_t {tn} = {tp} > 0 ? ({ts} < {te} ? ((uint64_t){te} - (uint64_t){ts} - 1) / (uint64_t){tp} + 1 : 0)'
-                      f' : ({ts} > {te} ? ((uint64_t){ts} - (uint64_t){te} - 1) / (0 - (uint64_t){tp}) + 1 : 0);')
-            self.open(f'for (uint64_t {tk} = 0; {tk} < {tn}; {tk}++)')
-            self.emit(f'v_{var} = (int64_t)((uint64_t){ts} + {tk} * (uint64_t){tp});')
+            self.unit_loop(s, var, ts, te, fact)
+            return
+        tp, tn, tk = self.temp(), self.temp(), self.temp()
+        self.emit(f'int64_t {tp} = {step};')
+        self.emit(f'if ({tp} == 0) SJ_FAIL({VALUE_ERROR}, {self.line(s)}, 1, 0);')
+        self.emit(f'uint64_t {tn} = {tp} > 0 ? ({ts} < {te} ? ((uint64_t){te} - (uint64_t){ts} - 1) / (uint64_t){tp} + 1 : 0)'
+                  f' : ({ts} > {te} ? ((uint64_t){ts} - (uint64_t){te} - 1) / (0 - (uint64_t){tp}) + 1 : 0);')
+        self.open(f'for (uint64_t {tk} = 0; {tk} < {tn}; {tk}++)')
+        self.emit(f'v_{var} = (int64_t)((uint64_t){ts} + {tk} * (uint64_t){tp});')
+        self.loop_body(s, var, None)
+
+    def unit_loop(self, s, var, ts, te, fact):
+        ti = self.temp()
+        self.open(f'for (int64_t {ti} = {ts}; {ti} < {te}; {ti}++)')
+        self.emit(f'v_{var} = {ti};')
+        self.loop_body(s, var, fact)
+
+    def loop_body(self, s, var, fact):
         if self.env[var].np == 'dyn':
             self.emit(f'v_{var}__np = 0;')
+        saved = self.facts.get(var)
+        if fact:
+            self.facts[var] = fact
         for b in s.body:
             self.stmt(b)
+        self.facts.pop(var, None)
+        if saved:
+            self.facts[var] = saved
         self.close()
+
+    def version_candidates(self, s, var, fact):
+        """Arrays indexed as var + c in the loop, nonnegative but not proven below len(): the
+        largest c for each."""
+        self.facts[var] = fact
+        extra = {}
+        try:
+            for n in ast.walk(ast.Module(body=s.body, type_ignores=[])):
+                if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name) \
+                        and n.value.id in self.env and self.env[n.value.id].kind == 'array':
+                    idx, off = n.slice, 0
+                    if isinstance(idx, ast.BinOp) and isinstance(idx.op, (ast.Add, ast.Sub)) \
+                            and isinstance(idx.right, ast.Constant) and type(idx.right.value) is int:
+                        off = idx.right.value if isinstance(idx.op, ast.Add) else -idx.right.value
+                        idx = idx.left
+                    if not (isinstance(idx, ast.Name) and idx.id == var):
+                        continue
+                    nonneg, inbounds = self.index_facts(n.value.id, n.slice)
+                    if nonneg and not inbounds:
+                        extra[n.value.id] = max(off, extra.get(n.value.id, off))
+        finally:
+            self.facts.pop(var, None)
+        return extra
+
+    def range_fact(self, s):
+        """What a unit-step range() loop proves about its variable, if the body never assigns it:
+        a lower bound, and an array A with var < len(A) - slack."""
+        var = s.target.id
+        for n in ast.walk(ast.Module(body=s.body, type_ignores=[])):
+            if isinstance(n, ast.Name) and n.id == var and isinstance(n.ctx, ast.Store):
+                return None
+        args = s.iter.args
+        start, stop = (None, args[0]) if len(args) == 1 else (args[0], args[1])
+        if start is None:
+            lo = 0
+        elif isinstance(start, ast.Constant) and type(start.value) is int:
+            lo = start.value
+        elif self.len_of(start):
+            lo = 0
+        else:
+            lo = None
+        hi, slack = self.len_of(stop), 0
+        if hi is None and isinstance(stop, ast.BinOp) and isinstance(stop.op, ast.Sub) \
+                and isinstance(stop.right, ast.Constant) and type(stop.right.value) is int and stop.right.value >= 0:
+            hi, slack = self.len_of(stop.left), stop.right.value
+        return (lo, hi, slack) if lo is not None or hi else None
+
+    def len_of(self, e):
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and self.is_builtin(e.func.id, 'len') \
+                and len(e.args) == 1 and isinstance(e.args[0], ast.Name):
+            return e.args[0].id
+        return None
+
+    def index_facts(self, name, idx):
+        """(never negative, always below len(name)) for an index expression, from loop facts."""
+        off = 0
+        if isinstance(idx, ast.BinOp) and isinstance(idx.op, (ast.Add, ast.Sub)) \
+                and isinstance(idx.right, ast.Constant) and type(idx.right.value) is int:
+            off = idx.right.value if isinstance(idx.op, ast.Add) else -idx.right.value
+            idx = idx.left
+        if not isinstance(idx, ast.Name) or idx.id not in self.facts:
+            return False, False
+        fact = self.facts[idx.id]
+        lo, hi, slack = fact[:3]
+        versioned = fact[3] if len(fact) > 3 else {}
+        nonneg = lo is not None and lo + off >= 0
+        return nonneg, nonneg and ((hi == name and off <= slack) or off <= versioned.get(name, -1 << 62))
 
     def element(self, sub):
         """Index an array: Python's negative indices, numpy's IndexError. Returns (array, index)."""
         name = sub.value.id
         raw = self.coerce(self.expr(sub.slice)[0], self.typeof(sub.slice), T.INT)
         n = f'v_{name}__n'
+        nonneg, inbounds = self.index_facts(name, sub.slice)
         t0, t1 = self.temp(), self.temp()
-        self.emit(f'int64_t {t0} = {raw}, {t1} = {t0} < 0 ? {t0} + {n} : {t0};')
-        if self.boundscheck:
+        if nonneg:                      # proven: no negative-index adjustment
+            self.emit(f'int64_t {t0} = {raw}, {t1} = {t0};')
+        else:
+            self.emit(f'int64_t {t0} = {raw}, {t1} = {t0} < 0 ? {t0} + {n} : {t0};')
+        if self.boundscheck and not inbounds:
             self.emit(f'if ((uint64_t){t1} >= (uint64_t){n}) SJ_FAIL({INDEX_ERROR}, {self.line(sub)}, {t0}, {n});')
         return f'v_{name}', t1
 
@@ -584,7 +684,7 @@ class Compiler:
         isfloat = rt.kind == 'float'
         fa, fb = self.coerce(a, at, T.FLOAT), self.coerce(b, bt, T.FLOAT)
         if op in ('Add', 'Sub', 'Mult'):
-            if op == 'Mult' and at.kind == 'float' and bt.kind == 'int' and npf != '1':
+            if op == 'Mult' and self.exact and at.kind == 'float' and bt.kind == 'int' and npf != '1':
                 # CPython computes float * int(-1) as a negation, so a NaN's sign bit flips
                 # (multiplying by -1.0, by any other int, or numpy scalars, leaves it alone)
                 py = f'{b} == -1' if npf == '0' else f'!{npf} && {b} == -1'
@@ -594,14 +694,22 @@ class Compiler:
                 return f'({fa} {sym} {fb})', npf
             return f'sj_{op.lower()[:3]}((int64_t){a}, (int64_t){b})', npf
         both_int = at.kind != 'float' and bt.kind != 'float'
+        if both_int and op in ('FloorDiv', 'Mod') and isinstance(right, ast.Constant) \
+                and type(right.value) is int and right.value > 0 and right.value & (right.value - 1) == 0:
+            k = right.value.bit_length() - 1      # x // 2**k is an arithmetic shift, x % 2**k a mask:
+            if op == 'FloorDiv':                  # exactly Python's floor semantics, for every sign
+                return f'((int64_t){a} >> {k})', npf
+            return f'((int64_t){a} & {right.value - 1}LL)', npf
         zero = f'{b} == 0' if both_int else f'{fb} == 0.0'
         msg = {('Div', True): 0, ('Div', False): 1, ('FloorDiv', True): 2, ('FloorDiv', False): 4,
                ('Mod', True): 3, ('Mod', False): 5}[(op, both_int if op == 'Div' else not isfloat)]
-        if npf != '1':                      # Python raises on a zero divisor; numpy doesn't
+        # Python raises on a zero divisor; numpy doesn't. Without exact, only an int // or % is
+        # checked (in C it would trap); / and float // and % give IEEE results.
+        if npf != '1' and (self.exact or (both_int and op != 'Div')):
             cond = zero if npf == '0' else f'!{npf} && {zero}'
             self.emit(f'if ({cond}) SJ_FAIL({ZERO_DIVISION}, {line}, {msg}, 0);')
         if op == 'Div':
-            if not both_int or npf == '1':
+            if not both_int or npf == '1' or not self.exact:
                 return f'({fa} / {fb})', npf
             exact = f'sj_truediv((int64_t){a}, (int64_t){b})'
             return (exact if npf == '0' else f'({npf} ? {fa} / {fb} : {exact})'), npf
@@ -619,12 +727,14 @@ class Compiler:
             if af:
                 return f'({a} {op} {b})'
             return f'((int64_t){a} {op} (int64_t){b})'
+        if not self.exact:                       # C: the int is converted to double
+            return f'((double){a} {op} (double){b})'
         if af:                                   # float <op> int: compare int <swapped op> float
             a, b, op = b, a, SWAP[op]
-        r = self.temp()
-        self.emit(f'int {r} = sj_cmp_if((int64_t){a}, {b});  /* -1, 0, 1, or 2 if NaN */')
-        return {'<': f'({r} == -1)', '<=': f'({r} == -1 || {r} == 0)', '>': f'({r} == 1)',
-                '>=': f'({r} == 0 || {r} == 1)', '==': f'({r} == 0)', '!=': f'({r} != 0)'}[op]
+        # |int| <= 2**53 converts to double exactly: compare directly. Beyond, compare exactly.
+        code = {'<': 0, '<=': 1, '>': 2, '>=': 3, '==': 4, '!=': 5}[op]
+        return (f'((int64_t){a} >= -9007199254740992LL && (int64_t){a} <= 9007199254740992LL ? '
+                f'(double){a} {op} {b} : sj_cmp_test(sj_cmp_if((int64_t){a}, {b}), {code}))')
 
     def compare(self, e):
         operands = [e.left] + e.comparators

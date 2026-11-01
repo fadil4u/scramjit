@@ -44,26 +44,21 @@ PRELUDE = r'''
 
 #define SJ_FAIL(st, ln, a, b) do { sj_st = (st); sj_ln = (ln); sj_x = (a); sj_y = (b); goto sj_fail; } while (0)
 
+/* Hot helpers are macros, not functions: cimo doesn't inline calls. Arguments are always
+ * temporaries or constants (the code generator holds values first), so repeating them is safe. */
+
 /* int64 arithmetic that wraps instead of being undefined on overflow */
-static inline int64_t sj_add(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }
-static inline int64_t sj_sub(int64_t a, int64_t b) { return (int64_t)((uint64_t)a - (uint64_t)b); }
-static inline int64_t sj_mul(int64_t a, int64_t b) { return (int64_t)((uint64_t)a * (uint64_t)b); }
-static inline int64_t sj_neg(int64_t a) { return (int64_t)(0 - (uint64_t)a); }
-static inline int64_t sj_abs(int64_t a) { return a < 0 ? sj_neg(a) : a; }
+#define sj_add(a, b) ((int64_t)((uint64_t)(a) + (uint64_t)(b)))
+#define sj_sub(a, b) ((int64_t)((uint64_t)(a) - (uint64_t)(b)))
+#define sj_mul(a, b) ((int64_t)((uint64_t)(a) * (uint64_t)(b)))
+#define sj_neg(a) ((int64_t)(0 - (uint64_t)(a)))
+#define sj_abs(a) ((a) < 0 ? sj_neg(a) : (a))
 
 /* Python's // and % on ints: round toward negative infinity. b != 0. */
-static inline int64_t sj_floordiv(int64_t a, int64_t b) {
-    if (b == -1) return sj_neg(a);
-    int64_t q = a / b;
-    if ((a % b != 0) && ((a < 0) != (b < 0))) q--;
-    return q;
-}
-static inline int64_t sj_mod(int64_t a, int64_t b) {
-    if (b == -1) return 0;
-    int64_t r = a % b;
-    if (r != 0 && ((r < 0) != (b < 0))) r += b;
-    return r;
-}
+#define sj_floordiv(a, b) ((b) == -1 ? sj_neg(a) : \
+    (a) / (b) - (((a) % (b) != 0) & (((a) < 0) != ((b) < 0))))
+#define sj_mod(a, b) ((b) == -1 ? 0 : \
+    (a) % (b) + (((a) % (b) != 0 && (((a) % (b) < 0) != ((b) < 0))) ? (b) : 0))
 
 /* Python's // and % on floats (the algorithm of CPython's float divmod; numpy's matches it for
  * nonzero divisors). b != 0. */
@@ -86,10 +81,8 @@ static inline double sj_ffloordiv(double a, double b) {
 }
 
 /* int / int, correctly rounded for every int64, as Python's true division is. b != 0. */
-static inline int sj_bitlen(uint64_t x) { int n = 0; while (x) { n++; x >>= 1; } return n; }
-static inline double sj_truediv(int64_t a, int64_t b) {
-    const int64_t lim = (int64_t)1 << 53;
-    if (a <= lim && a >= -lim && b <= lim && b >= -lim) return (double)a / (double)b;
+static int sj_bitlen(uint64_t x) { int n = 0; while (x) { n++; x >>= 1; } return n; }
+static double sj_truediv_big(int64_t a, int64_t b) {
     int neg = (a < 0) != (b < 0);
     uint64_t ua = a < 0 ? 0 - (uint64_t)a : (uint64_t)a;
     uint64_t ub = b < 0 ? 0 - (uint64_t)b : (uint64_t)b;
@@ -128,6 +121,18 @@ static inline int sj_cmp_if(int64_t i, double f) {
     return i < fi ? -1 : i > fi ? 1 : 0;
 }
 
+/* the result of an ordering test op (0 <, 1 <=, 2 >, 3 >=, 4 ==, 5 !=) from sj_cmp_if's r */
+static inline int sj_cmp_test(int r, int op) {
+    switch (op) {
+    case 0: return r == -1;
+    case 1: return r == -1 || r == 0;
+    case 2: return r == 1;
+    case 3: return r == 0 || r == 1;
+    case 4: return r == 0;
+    default: return r != 0;
+    }
+}
+
 /* int(f) for a float that isn't NaN or infinite: truncate; beyond int64, wrap like every int. */
 static inline int64_t sj_float_to_int(double f) {
     double t = trunc(f);
@@ -138,4 +143,7 @@ static inline int64_t sj_float_to_int(double f) {
                                             : (uint64_t)w;
     return (int64_t)u;
 }
+/* int / int: exact in double when both are within 2**53, else the long path */
+#define sj_truediv(a, b) ((a) <= 9007199254740992LL && (a) >= -9007199254740992LL && \
+    (b) <= 9007199254740992LL && (b) >= -9007199254740992LL ? (double)(a) / (double)(b) : sj_truediv_big(a, b))
 '''

@@ -433,3 +433,26 @@ def test_random_expressions():
             same(f, *args)
             checked += 1
     assert checked > 150
+
+
+# ---- exact=False trades parity for speed
+
+def test_exact_false_gives_ieee_results():
+    fast_div = scram(div.__wrapped__, exact=False, fallback=False)
+    assert fast_div(1.0, 0.0) == math.inf and math.isnan(fast_div(0.0, 0.0))
+    assert fast_div(1, 0) == math.inf
+    fast_lt = scram(lt.__wrapped__, exact=False, fallback=False)
+    assert fast_lt(1, 2.5) is True
+    with pytest.raises(ZeroDivisionError):             # an int // 0 still raises (C would trap)
+        scram(floordiv.__wrapped__, exact=False, fallback=False)(1, 0)
+
+
+@strict
+def pow2(a):
+    return a // 4 + a % 8 * 3 - a // 1 + a % 1
+
+
+def test_power_of_two_divisors():
+    for a in range(-40, 41):
+        same(pow2, a)
+    same(pow2, -(1 << 63))

@@ -116,11 +116,12 @@ class Compiled:
 
 
 class Function:
-    def __init__(self, fn, boundscheck=True, cache=True, fallback=True):
+    def __init__(self, fn, boundscheck=True, cache=True, fallback=True, exact=True):
         functools.update_wrapper(self, fn)
         self._fn = fn
         self._boundscheck = boundscheck
         self._fallback = fallback
+        self._exact = exact
         self._cache = {}
         self._lock = threading.Lock()
         code = fn.__code__
@@ -209,7 +210,7 @@ class Function:
             if t is None:
                 raise Unsupported(None, f'an argument of type {_describe(x, t)} is not compiled')
         c = Compiler(self._tree, list(key), self._fn.__globals__, self._filename, self._first - 1,
-                     self._boundscheck)
+                     self._boundscheck, self._exact)
         source = c.generate()
         cimo = _get_cimo()
         try:

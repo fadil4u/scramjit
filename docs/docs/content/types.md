@@ -1,8 +1,5 @@
 # Types and annotations
 
-> [!PLANNED]
-> Designed, not built. M1 handles `int64` and `float64` only; narrowing arrives in M2.
-
 ## Inferred from the call
 
 scramjit infers a type for every variable over the whole function, seeded by the types of the arguments at call time. A new combination of argument types (a `float32` array instead of `float64`, say) compiles a new specialization; each one is cached by its signature.
@@ -30,8 +27,6 @@ Accepted annotations:
 | `float` | a Python `float`, held as `float64` |
 | `bool` | a Python `bool` |
 | `np.int8`, `np.float32`, … | a numpy scalar type of that size |
-
-scramjit's own spellings for sized scalars and arrays (for example `i32` or `f32[:, :]`) are **open**.
 
 ## The narrowest type that is proven sufficient
 

@@ -1,8 +1,5 @@
 # Errors
 
-> [!PLANNED]
-> Designed, not built. Errors that point at the Python line are part of M3.
-
 ## Compile errors point at your Python
 
 Anything outside the supported subset is a compile error raised on the first call. It names the Python file and line and says why:

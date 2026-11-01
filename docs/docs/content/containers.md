@@ -1,13 +1,10 @@
 # Arrays, lists and tuples
 
-> [!PLANNED]
-> 1-D numpy arrays arrive in M1, lists and tuples in M2, n-D arrays in M3.
-
 ## numpy arrays
 
 Arrays are passed by pointer, shape and strides, never copied. Writes go to your array. The generated code is specialized to the dtype, the number of dimensions and the layout, so a C-contiguous array gets plain `a[i]` indexing.
 
-Negative indices count from the end, as in Python. Whether bounds are checked by default is **open**; see [Semantics](semantics.md).
+Negative indices count from the end, as in Python. Indices are bounds-checked by default and raise `IndexError`; see [Semantics](semantics.md).
 
 ## Tuples
 
@@ -39,6 +36,6 @@ def blur3(src, dst):
 
 A homogeneous numeric list argument is copied into an array at the call and copied back if the function mutated it. That is O(n) per call, so pass large data as numpy arrays.
 
-## Not yet
+## Not supported
 
-Growable lists, dicts, sets and strings, as typed C containers, come later. Each needs allocation and a runtime, and the numeric subset comes first.
+Growable lists, dicts, sets and strings. Each would need allocation and a runtime inside compiled code; a function that needs them is a compile error that says so. Keep that code in Python and call the compiled function from it.

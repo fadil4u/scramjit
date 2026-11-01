@@ -1,8 +1,5 @@
 # Loops and builtins
 
-> [!PLANNED]
-> `range` loops, `if` and `while` arrive in M1; the rest of this page in M2.
-
 No builtin exists at runtime as a callable. Each one is a rule in the compiler that emits plain C, so `range`, `zip` and generator expressions cost nothing beyond the loop they describe. Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
 
 ## `range`

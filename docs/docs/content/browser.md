@@ -1,8 +1,5 @@
 # In the browser
 
-> [!PLANNED]
-> Pyodide support is part of M3.
-
 scramjit runs wherever cimo does. In Pyodide, JupyterLite, marimo and PyScript, cimo compiles to WebAssembly in the page and links it into Pyodide's memory, so a decorated function runs as WebAssembly instead of as interpreted Python.
 
 ```python

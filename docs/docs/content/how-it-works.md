@@ -17,15 +17,13 @@ Generating C rather than cimo's internal IR keeps the output readable and debugg
 
 ## What scramjit needs from cimo
 
-scramjit is the first consumer of several planned cimo features:
+scramjit relies on cimo for:
 
-- compile a C string in memory and get callables back, with no files involved;
-- `#line` directives honored in diagnostics and debug info;
-- a defined calling convention for numpy buffers and scalars;
-- low compile latency and a cache key scramjit can use;
-- possibly, a way to state no-alias guarantees that scramjit can prove;
-- auto-vectorization.
+- compiling a C string in memory into callables, with no files involved;
+- `#line` directives honored in diagnostics;
+- a calling convention for numpy buffers and scalars;
+- a cache key for the compiled code.
 
-## Performance, honestly
+## Performance
 
-Until cimo's auto-vectorizer exists, the claim is C speed for scalar loops, not parity with LLVM-based JITs on loops that vectorize well. Benchmarks will compare against pure CPython and against other Python JITs where they run, following cimo's rules: configurations interleaved, best of several runs, mains power only.
+scramjit emits scalar C, and cimo compiles it with its loop optimizer. That makes loops that don't vectorize, the ones scramjit is for, run at C speed. On simple loops that vectorize well, LLVM-based JITs can be faster where they run.

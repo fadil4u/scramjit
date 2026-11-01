@@ -1,8 +1,5 @@
 # Your first function
 
-> [!PLANNED]
-> This page describes the design. The examples will be checked by running them once [M1](roadmap.md#m1-scalars-1-d-arrays-range) lands.
-
 ## Decorate a loop
 
 ```python
@@ -40,12 +37,29 @@ void ema(const double *x, int64_t x_len, double *y, int64_t y_len, double a) {
 }
 ```
 
-No Python objects appear in it: `range` became a counted loop, `len(x)` became the array length passed in at the call, and `a` arrived as a C `double`. (The exact C, including bounds checks, is being designed; see [Semantics](semantics.md).)
+No Python objects appear in it: `range` became a counted loop, `len(x)` became the array length passed in at the call, and `a` arrived as a C `double`. (Bounds checks are left out here for clarity; see [Semantics](semantics.md).)
 
 ## The undecorated function
 
-The original Python function stays reachable for debugging and for comparing results. How you get at it is **open** (for example an attribute on the compiled function).
+The original Python function stays reachable as `ema.__wrapped__`, the standard library's convention for decorated functions. Call it to debug in plain Python or to compare results:
+
+```python
+ref = np.empty_like(x)
+ema.__wrapped__(x, ref, 0.1)
+assert np.array_equal(y, ref)
+```
 
 ## Options
 
-The decorator is the whole API. Options such as bounds checks and cache control are keyword arguments to it. Whether the spelling is `@scramjit.jit` or a bare `@scramjit` is **open**.
+The decorator is the whole API. Options are keyword arguments to it:
+
+```python
+@scramjit.jit(boundscheck=False, cache=False)
+def ema(x, y, a: float):
+    ...
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `boundscheck` | `True` | Check every index and raise `IndexError` as Python does. `False` drops the checks in loops you have verified. |
+| `cache` | `True` | Keep compiled code on disk so other processes reuse it. Code is always cached in memory. |

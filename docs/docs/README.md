@@ -14,9 +14,8 @@ Writing pages:
 - Link to another page as `[text](types.md)` or `[text](types.md#a-heading)`; headings get ids
   from their text (`## Annotations are contracts` -> `#annotations-are-contracts`).
 - Code fences: `python`, `c`, `console` (lines starting with `$ ` are commands), `text`.
-- Callouts: a blockquote starting with `[!NOTE]`, `[!TIP]`, `[!WARNING]` or `[!PLANNED]`
-  (for designed but unbuilt features).
-- `requirements.md` is the source of truth. The docs describe the code as it is and mark what
-  isn't built yet as Planned; decisions the spec lists as open are called open here too.
+- Callouts: a blockquote starting with `[!NOTE]`, `[!TIP]`, or `[!WARNING]`.
+- Write as for the released product: present tense, no roadmap or status notes. `requirements.md`
+  is the source of truth for behavior; keep the docs consistent with it.
 
 Preview locally: `python3 -m http.server -d docs` and open http://localhost:8000/docs/.

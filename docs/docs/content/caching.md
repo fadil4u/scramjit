@@ -1,8 +1,5 @@
 # Compilation and caching
 
-> [!PLANNED]
-> The in-memory cache is part of M1; the on-disk cache is part of M3.
-
 ## When compilation happens
 
 On each call the decorator reads the argument types: Python type, dtype, number of dimensions and layout. If it has no compiled version for that signature yet, it generates C specialized to it, compiles it with cimo and caches it.
@@ -18,4 +15,4 @@ Compiled code releases the GIL while it runs, so several Python threads calling 
 
 ## First-call latency
 
-Compiling happens in pure Python, so the first call to each specialization takes noticeably longer than the ones after it. How long is a measurement scramjit's design depends on: it decides whether library authors can compile on import. It will be recorded in the spec and here once cimo's compile time on generated C has been measured.
+Compiling happens in pure Python, so the first call to each specialization takes noticeably longer than the ones after it. The disk cache means that cost is paid once per machine, not once per process. Pass `cache=False` to keep compiled code in memory only.

@@ -20,6 +20,9 @@ This is the living spec: what to build, why, what has been measured, and in what
 - **Benchmarks:** follow cimo's rules (interleave configurations, best of several runs, mains
   power only). Compare against pure CPython and against other Python JITs where they run.
 - **Record findings here, concisely.** This file is a spec, not a log.
+- **Site and docs** (`docs/`, served by GitHub Pages) are written as for the released product:
+  present tense, no roadmap or status notes. They follow this spec; where it is open, they show
+  Python's behavior as the default.
 
 ## Pitch
 

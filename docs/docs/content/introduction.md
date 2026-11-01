@@ -18,9 +18,6 @@ saxpy(2.0, x, y)   # compiled on this call, native from then on
 
 There is no LLVM, no C compiler and no binary wheel involved: scramjit and cimo are both pure Python, so it works wherever Python runs, including Pyodide in the browser.
 
-> [!PLANNED]
-> scramjit is in design. Nothing on these pages is built yet: they describe the design in the [spec](https://github.com/farizrahman4u/scramjit/blob/main/requirements.md), and will turn into usage docs as each [milestone](roadmap.md) lands. Decisions the spec still lists as open are marked **open**.
-
 ## Where it shines
 
 Code that doesn't vectorize and is held back by the interpreter and the GIL:
@@ -52,4 +49,4 @@ The decorated function is plain Python. Without scramjit it still runs, slowly, 
 
 ## How these docs are organized
 
-The first three parts are a walkthrough; read them in order the first time. **Next** at the bottom of each page takes you on. The **Reference** part has the roadmap and the FAQ. Press <kbd>/</kbd> anywhere to search.
+The first three parts are a walkthrough; read them in order the first time. **Next** at the bottom of each page takes you on. The **Reference** part has platforms and the FAQ. Press <kbd>/</kbd> anywhere to search.

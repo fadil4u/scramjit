@@ -21,10 +21,9 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 
 ## Next
 
-1. **Rest of M2:** narrow dtypes (float32, int32, uint8, ...) with numpy's NEP 50 scalar
-   arithmetic, value-range narrowing; `map`/`filter`; nested tuples; lists of several for
-   clauses. Then the M2 acceptance check on the M0 kernels (needs 2-D arrays from M3).
-2. **M3:** n-D arrays (and strides), disk cache, Pyodide, out-of-subset reporting.
+1. **Rest of M2:** value-range narrowing; nested tuples; `for ... else`. Then the M2 acceptance check.
+2. **M3:** the disk cache, and out-of-subset reporting (`preflight`, `f.signatures`, `f.c()`,
+   `SCRAMJIT_LOG`). The site and docs already describe these.
 3. **SSA for variables that change type** (`x = 1` then `x = 0.5`): today they fall back.
 4. **Bounds-check hoisting beyond unit-step loops** over one variable (versioning covers
    `for i in range(a, len(x))` with `arr[i + c]` today).

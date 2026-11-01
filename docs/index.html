@@ -512,9 +512,9 @@ for (int64_t i = 0; i &lt; a_len; i++)
   </div>
 
   <div class="wf">
-    <div class="wf-cap"><span class="wf-n" style="background:#dc2626">3</span><span class="wf-when">One function</span><h3><code>f.explain()</code></h3><p>Prints the function with each line marked native or Python and what the compiler decided: types, bounds checks, which loops were optimized. In a REPL or notebook, or from the command line with <code>scramjit preflight sim.py:step</code>.</p></div>
+    <div class="wf-cap"><span class="wf-n" style="background:#dc2626">3</span><span class="wf-when">One function</span><h3><code>f.preflight()</code></h3><p>Prints the function with each line marked native or Python and what the compiler decided: types, bounds checks, which loops were optimized. In a REPL or notebook, or from the command line with <code>scramjit preflight sim.py:step</code>.</p></div>
     <div class="code"><div class="bar"><span class="dots"><i></i><i></i><i></i></span>terminal · python</div>
-<pre class="xp"><span class="t-pr">&gt;&gt;&gt;</span> step.explain()
+<pre class="xp"><span class="t-pr">&gt;&gt;&gt;</span> step.preflight()
 <b class="t-hd">step</b>(float64[:], float64[:], list)
 <span class="t-amb">partly compiled</span> <span class="t-dim">· sim.py · compiled in 38 ms</span>
 <span class="t-dim">─────────────────────────────────────────────</span>
@@ -530,7 +530,7 @@ for (int64_t i = 0; i &lt; a_len; i++)
   </div>
 
   <p class="note">Each fallback also raises a <code>FallbackWarning</code> once, naming the line. <code>@scram(fallback=False)</code> makes it an error for code that must be native.</p>
-  <p class="doclink"><a href="docs/?p=profiling">Docs: preflight and explain →</a> <span class="sep">·</span> <a href="docs/?p=errors">fallback and errors →</a></p>
+  <p class="doclink"><a href="docs/?p=profiling">Docs: preflight →</a> <span class="sep">·</span> <a href="docs/?p=errors">fallback and errors →</a></p>
 </div></section>
 
 <section class="s" id="semantics"><div class="wrap">

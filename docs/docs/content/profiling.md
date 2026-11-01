@@ -1,6 +1,6 @@
-# Preflight and explain
+# Preflight
 
-Code scramjit can't compile runs as Python, so nothing breaks, but speed can go missing quietly. Preflight and `explain()` show the state of every decorated function, which lines run as Python and why, what compiling cost, and what to change.
+Code scramjit can't compile runs as Python, so nothing breaks, but speed can go missing quietly. Preflight shows the state of every decorated function, which lines run as Python and why, what compiling cost, and what to change.
 
 Every function is in one of three states, shown with the same colors everywhere:
 
@@ -73,12 +73,12 @@ Both modes exit non-zero when any function is less than compiled; `--allow-parti
 $ scramjit preflight --run -m pytest
 ```
 
-## Explain one function
+## One function
 
-`f.explain()` prints the function with each line marked native or Python, and what the compiler decided. It works in any REPL or notebook:
+`f.preflight()` prints the function with each line marked native or Python, and what the compiler decided. It works in any REPL or notebook:
 
 ```text
->>> step.explain()
+>>> step.preflight()
 step(float64[:], float64[:], list)
 partly compiled · sim.py · compiled in 38 ms
 ─────────────────────────────────────────────
@@ -100,7 +100,7 @@ It reports:
 - **loops:** which ones cimo's optimizer unrolled or otherwise improved, and why the others weren't;
 - **the call boundary:** arrays passed in place, lists copied, strided arrays.
 
-Pass a signature to explain only that one: `f.explain(f.signatures[0])`.
+Pass a signature to report on only that one: `f.preflight(f.signatures[0])`.
 
 ### From the command line
 
@@ -112,7 +112,7 @@ $ scramjit preflight src/sim.py:step --run app.py      # every signature compile
 $ scramjit preflight pkg.sim:step                      # a dotted module path works too
 ```
 
-It prints the same report as `step.explain()`. Without `--run`, argument types come from annotations, and unannotated arguments are assumed to be numbers or arrays. With `--run`, the report covers each signature the function was actually compiled for. Put the function before `--run`: everything after `--run` is the program and its arguments.
+It prints the same report as `step.preflight()`. Without `--run`, argument types come from annotations, and unannotated arguments are assumed to be numbers or arrays. With `--run`, the report covers each signature the function was actually compiled for. Put the function before `--run`: everything after `--run` is the program and its arguments.
 
 ## Specializations and the generated C
 

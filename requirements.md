@@ -203,11 +203,11 @@ be easy to see. Tools, all pure Python, behind one `scramjit` command (also `pyt
   whole run (the coverage number). Ends with hints. Catches the type-driven fallbacks the static
   mode can't see; running the test suite under it is the CI check.
 - Both modes exit non-zero on anything but compiled (`--allow-partial` accepts partly compiled).
-- **`scramjit preflight PATH:FUNCTION`** (or `pkg.module:function`): the `f.explain()` report for one
+- **`scramjit preflight PATH:FUNCTION`** (or `pkg.module:function`): the `f.preflight()` report for one
   function, from the command line. Static by default (one assumed signature); with `--run` it shows
   each signature compiled during the run. The target comes before `--run`, which takes the rest of
   the command line.
-- **`f.explain()`:** the Python source annotated per line: state (native or Python, and why),
+- **`f.preflight()`:** the same per-function report in a REPL or notebook: the Python source annotated per line: state (native or Python, and why),
   inferred and narrowed types, bounds checks proven, hoisted or kept, loops cimo optimized or not,
   copies at the call boundary. Ends with hints.
 - **`f.signatures`, `f.c()`, `SCRAMJIT_LOG=1`:** the specializations and their states, the
@@ -226,7 +226,7 @@ Planned cimo features; scramjit is their first consumer:
 - A defined calling convention for numpy buffers and scalars.
 - Low compile latency and a cache key scramjit can use.
 - The per-loop optimization report (`cimo report`: optimized or not, and why) as data, mapped to
-  `#line`, for `f.explain()`.
+  `#line`, for the per-line preflight report.
 - Symbols for profilers (perf map, jitdump) so `perf` names compiled functions.
 - Possibly: a way to state no-alias guarantees scramjit can prove (`restrict`).
 - Auto-vectorization (cimo's SIMD v2). C users can write vector types by hand; scramjit users
@@ -256,7 +256,7 @@ reported at its Python line (fallback warning, preflight, and `CompileError` und
 
 **M4: loop lifting.** Compile the loops that fit inside functions that don't. Done when a function
 mixing Python-only setup (dicts, strings) with a numeric loop is partly compiled, matches CPython,
-and preflight (both modes) and `explain()` show the state per line.
+and preflight (static, `--run` and `f.preflight()`) shows the state per line.
 
 ## Risks
 

@@ -184,7 +184,8 @@ section.s{padding:76px 0 8px}
 .lab-full:hover{border-color:#f9731688;color:#fff}
 .lab-full svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .lab-full .i-exit,.lab.is-full .lab-full .i-enter{display:none}.lab.is-full .lab-full .i-exit{display:block}
-.lab.is-full{position:fixed;inset:0;z-index:100;margin:0;border-radius:0;border:0;grid-template-columns:minmax(0,.75fr) minmax(0,1.6fr)}
+.lab.is-full{position:fixed;inset:0;z-index:100;margin:0;border-radius:0;border:0;grid-template-columns:clamp(600px,38vw,760px) minmax(0,1fr)}
+.lab.is-full .lab-pipe{flex-wrap:wrap;row-gap:6px}
 .lab:fullscreen{position:static}
 .lab.is-full .lab-left{min-height:0;height:100vh}
 .lab.is-full .lab-code{flex:1;height:auto}

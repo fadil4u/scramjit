@@ -152,10 +152,7 @@ class Compiler:
         elif isinstance(s, ast.For):
             if s.orelse:
                 self.fail(s, 'for ... else')
-            if not isinstance(s.target, ast.Name):
-                self.fail(s, 'a for loop target that is not a single name')
-            self.range_args(s.iter)
-            self.assign_type(s, s.target.id, T.INT)
+            self.bind_types(s.target, self.elem_struct(self.iterable(s.iter)), s)
             self.infer_block(s.body)
         elif isinstance(s, ast.Return):
             self.returns.append((s, self.typeof(s.value) if s.value is not None else T.NONE))
@@ -196,6 +193,64 @@ class Compiler:
         for a in it.args:
             if self.typeof(a).kind not in ('int', 'bool'):
                 self.fail(a, 'range() of a non-integer')
+
+    # ---- iterables: range(), arrays, enumerate(), zip(), reversed(), nested. Each lowers to one
+    # counted loop that reads elements by index; no iterator exists at run time.
+    def iterable(self, it):
+        if isinstance(it, ast.Name) and it.id in self.env and self.env[it.id].kind == 'array':
+            return ('array', it.id)
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name):
+            name = it.func.id
+            if self.is_builtin(name, 'range'):
+                self.range_args(it)
+                return ('range', it)
+            if self.is_builtin(name, 'enumerate'):
+                args = list(it.args)
+                for k in it.keywords:
+                    if k.arg != 'start':
+                        self.fail(it, 'enumerate() with these arguments')
+                    args.append(k.value)
+                if not 1 <= len(args) <= 2:
+                    self.fail(it, 'enumerate() with these arguments')
+                if len(args) == 2 and self.typeof(args[1]).kind not in ('int', 'bool'):
+                    self.fail(it, 'enumerate() with a non-integer start')
+                return ('enumerate', self.iterable(args[0]), args[1] if len(args) == 2 else None)
+            if self.is_builtin(name, 'zip'):
+                if it.keywords or not it.args:
+                    self.fail(it, 'zip() with these arguments')
+                return ('zip', [self.iterable(a) for a in it.args])
+            if self.is_builtin(name, 'reversed'):
+                if it.keywords or len(it.args) != 1:
+                    self.fail(it, 'reversed() with these arguments')
+                inner = self.iterable(it.args[0])
+                if inner[0] not in ('range', 'array'):
+                    self.fail(it, 'reversed() of something other than range() or an array')
+                return ('reversed', inner)
+        self.fail(it, 'loops over something other than range(), an array, enumerate(), zip() or reversed()')
+
+    def elem_struct(self, d):
+        kind = d[0]
+        if kind == 'range':
+            return T.INT
+        if kind == 'array':
+            return self.env[d[1]].elem
+        if kind == 'enumerate':
+            return [T.INT, self.elem_struct(d[1])]
+        if kind == 'zip':
+            return [self.elem_struct(x) for x in d[1]]
+        return self.elem_struct(d[1])
+
+    def bind_types(self, target, struct, s):
+        if isinstance(target, ast.Name):
+            if isinstance(struct, list):
+                self.fail(s, 'a tuple assigned to one name (tuples are not compiled yet)')
+            self.assign_type(s, target.id, struct)
+        elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(struct, list) \
+                and len(target.elts) == len(struct):
+            for t, x in zip(target.elts, struct):
+                self.bind_types(t, x, s)
+        else:
+            self.fail(s, 'a loop target that does not match what the loop yields')
 
     def array_of(self, sub):
         if not isinstance(sub.value, ast.Name) or sub.value.id not in self.env \
@@ -424,7 +479,11 @@ class Compiler:
                 self.stmt(b)
             self.close()
         elif isinstance(s, ast.For):
-            self.for_range(s)
+            d = self.iterable(s.iter)
+            if d[0] == 'range':
+                self.for_range(s)
+            else:
+                self.for_iter(s, d)
         elif isinstance(s, ast.Return):
             if s.value is not None:
                 v = self.expr(s.value)
@@ -475,6 +534,88 @@ class Compiler:
         self.open(f'for (uint64_t {tk} = 0; {tk} < {tn}; {tk}++)')
         self.emit(f'v_{var} = (int64_t)((uint64_t){ts} + {tk} * (uint64_t){tp});')
         self.loop_body(s, var, None)
+
+    def iter_prep(self, d):
+        """Evaluate an iterable's operands (in Python's order); return (trip count, elem(k)),
+        where elem(k) gives (C value, type, flag) leaves, nested in lists for tuples."""
+        kind = d[0]
+        if kind == 'array':
+            name, t = d[1], self.env[d[1]].elem
+            return f'(uint64_t)v_{name}__n', lambda k: (f'v_{name}[{k}]', t, '1')
+        if kind == 'range':
+            args = [self.coerce(self.expr(a)[0], self.typeof(a), T.INT) for a in d[1].args]
+            start, stop = ('0LL', args[0]) if len(args) == 1 else (args[0], args[1])
+            ts, te, tp, tn = self.temp(), self.temp(), self.temp(), self.temp()
+            self.emit(f'int64_t {ts} = {start}, {te} = {stop}, {tp} = {args[2] if len(args) == 3 else "1LL"};')
+            if len(args) == 3:
+                self.emit(f'if ({tp} == 0) SJ_FAIL({VALUE_ERROR}, {self.line(d[1])}, 1, 0);')
+            self.emit(f'uint64_t {tn} = {tp} > 0 ? ({ts} < {te} ? ((uint64_t){te} - (uint64_t){ts} - 1) / (uint64_t){tp} + 1 : 0)'
+                      f' : ({ts} > {te} ? ((uint64_t){ts} - (uint64_t){te} - 1) / (0 - (uint64_t){tp}) + 1 : 0);')
+            self.range_parts = (ts, tp, tn)
+            return tn, lambda k: (f'(int64_t)((uint64_t){ts} + {k} * (uint64_t){tp})', T.INT, '0')
+        if kind == 'enumerate':
+            n, inner = self.iter_prep(d[1])
+            st = self.temp()
+            start = '0LL' if d[2] is None else self.coerce(self.expr(d[2])[0], self.typeof(d[2]), T.INT)
+            self.emit(f'int64_t {st} = {start};')
+            return n, lambda k: [(f'sj_add({st}, (int64_t){k})', T.INT, '0'), inner(k)]
+        if kind == 'zip':
+            parts = [self.iter_prep(x) for x in d[1]]
+            n = self.temp()
+            self.emit(f'uint64_t {n} = {parts[0][0]};')
+            for c, _ in parts[1:]:
+                self.emit(f'if ({c} < {n}) {n} = {c};')
+            return n, lambda k: [f(k) for _, f in parts]
+        inner = d[1]                                  # reversed
+        if inner[0] == 'array':
+            name, t = inner[1], self.env[inner[1]].elem
+            return f'(uint64_t)v_{name}__n', lambda k: (f'v_{name}[v_{name}__n - 1 - (int64_t){k}]', t, '1')
+        n, _ = self.iter_prep(inner)
+        ts, tp, tn = self.range_parts
+        return n, lambda k: (f'(int64_t)((uint64_t){ts} + ({tn} - 1 - {k}) * (uint64_t){tp})', T.INT, '0')
+
+    def bind_values(self, target, v):
+        if isinstance(target, ast.Name):
+            c, t, f = v
+            self.assign(target.id, (c, f), t)
+        else:
+            for t, x in zip(target.elts, v):
+                self.bind_values(t, x)
+
+    def for_iter(self, s, d):
+        n, elem = self.iter_prep(d)
+        k = self.temp()
+        self.open(f'for (uint64_t {k} = 0; {k} < {n}; {k}++)')
+        self.bind_values(s.target, elem(k))
+        fact_var, fact = self.iter_fact(s, d)
+        saved = self.facts.get(fact_var) if fact_var else None
+        if fact:
+            self.facts[fact_var] = fact
+        for b in s.body:
+            self.stmt(b)
+        if fact:
+            self.facts.pop(fact_var, None)
+            if saved:
+                self.facts[fact_var] = saved
+        self.close()
+
+    def iter_fact(self, s, d):
+        """for i, x in enumerate(a[, c]): i is c + k, so >= c, and below len(a) when c is 0."""
+        if d[0] != 'enumerate' or not isinstance(s.target, ast.Tuple) or not isinstance(s.target.elts[0], ast.Name):
+            return None, None
+        var = s.target.elts[0].id
+        for n in ast.walk(ast.Module(body=s.body, type_ignores=[])):
+            if isinstance(n, ast.Name) and n.id == var and isinstance(n.ctx, ast.Store):
+                return None, None
+        start = d[2]
+        lo = 0 if start is None else (start.value if isinstance(start, ast.Constant) and type(start.value) is int else None)
+        if lo is None:
+            return None, None
+        inner = d[1]
+        if inner[0] == 'zip':
+            inner = inner[1][0]
+        hi = inner[1] if inner[0] == 'array' and lo == 0 else None
+        return var, (lo, hi, 0)
 
     def unit_loop(self, s, var, ts, te, fact):
         ti = self.temp()
@@ -849,7 +990,8 @@ def da_stmt(c, s, assigned):
         return assigned
     if isinstance(s, ast.For):
         da_reads(c, s.iter, assigned)
-        da_block(c, s.body, assigned | {s.target.id})
+        names = {n.id for n in ast.walk(s.target) if isinstance(n, ast.Name)}
+        da_block(c, s.body, assigned | names)
         return assigned
     if isinstance(s, ast.Return):
         if s.value is not None:

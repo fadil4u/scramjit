@@ -157,37 +157,42 @@ def functions():
 
 
 def _make_plan(f, entry, args):
-    """A small function for calls with these argument types, or f._slow if they need the general path.
-    It's generated because a call is where the time goes: what's known from the types is decided here,
-    once. Anything it can't vouch for at call time (an int past 64 bits, an array of another dtype,
-    dimension or layout, an empty one) goes to f._slow, so plans change only speed."""
+    """A small function for calls with these argument types, or f._slow_call if they need the general
+    path. It's generated because a call is where the time goes: what's known from the types is decided
+    here, once. Anything it can't vouch for at call time (an int past 64 bits, an array of another
+    dtype, dimension or layout, an empty one) goes to f._slow, so plans change only speed."""
     env = {'kernel': entry.kernel, 'slow': f._slow, 'failed': f._failed, 'box': f._box, 'ret': entry.ret, 'pool': [],
-           'addressof': ctypes.addressof, 'c_char': ctypes.c_char, 'bytearray': bytearray, 'memoryview': memoryview}
+           'addressof': ctypes.addressof, 'from_buffer': ctypes.c_char.from_buffer, 'bytearray': bytearray, 'memoryview': memoryview}
     names = [f'a{i}' for i in range(len(args))]
-    guards, setup, cargs = [], [], []
+    cargs = []
     for i, (x, t, n) in enumerate(zip(args, entry.types, names)):
         if t.kind == 'array':
             env[f'd{i}'] = x.dtype
-            setup.append(f'fl = {n}.flags')
-            guards.append(f'{n}.dtype is d{i} and {n}.ndim == {x.ndim} and fl.c_contiguous and fl.writeable is {bool(x.flags.writeable)}')
-            if x.flags.writeable:
-                cargs.append(f'addressof(c_char.from_buffer({n}))')
-            else:
-                cargs.append(n)
-            cargs.extend(f'{n}.shape[{k}]' for k in range(x.ndim))
+            cargs.append(f'p{i}' if x.flags.writeable else n)
+            cargs.extend(f's{i}[{k}]' for k in range(x.ndim))
         elif t.kind == 'tuple':
             return f._slow_call
         elif t.np:
             cargs.append(f'{n}.item()')
         else:
-            if t.kind == 'int':
-                guards.append(f'-9223372036854775808 <= {n} <= 9223372036854775807')
             cargs.append(n)
     if entry.libm is not None:
         pointer = ctypes.c_char_p(entry.libm)
         env['libm_keep'] = (entry.libm, pointer)        # alive as long as the plan
         env['libm'] = ctypes.cast(pointer, ctypes.c_void_p).value
         cargs.append('libm')
+    # an array's checks go one at a time, each read after the last passed, then its address and shape
+    arrays = [i for i, t in enumerate(entry.types) if t.kind == 'array']
+    src_guards = []
+    for i, (t, n) in enumerate(zip(entry.types, names)):
+        if t.kind == 'array':
+            x = args[i]
+            src_guards.append(f'    fl = {n}.flags\n    if {n}.dtype is not d{i} or {n}.ndim != {x.ndim} or not fl.c_contiguous or fl.writeable is not {bool(x.flags.writeable)}:\n        return slow(({", ".join(names)},))\n    s{i} = {n}.shape')
+        elif t.kind == 'int' and not t.np:
+            src_guards.append(f'    if not -9223372036854775808 <= {n} <= 9223372036854775807:\n        return slow(({", ".join(names)},))')
+    addresses = ''.join(f'        p{i} = addressof(from_buffer({names[i]}))\n' for i in arrays if args[i].flags.writeable)
+    take = (f'    try:\n{addresses}    except (ValueError, TypeError, BufferError):      # empty: no buffer to take the address of\n'
+            f'        return slow(({", ".join(names)},))\n') if addresses else ''
     size = 40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0)
     r = entry.ret
     if r is T.NONE:
@@ -198,32 +203,25 @@ def _make_plan(f, entry, args):
         result = 'd[0]'
     elif r.kind == 'tuple':
         env['boxes'] = [(32 + 16 * i, 40 + 16 * i, et) for i, et in enumerate(r.elem)]
-        result = 'tuple(box(io, at, flag, et) for at, flag, et in boxes)'
+        result = 'tuple([box(io, at, flag, et) for at, flag, et in boxes])'
     else:
         result = 'box(io, 0, 16, ret)'
-    head = ', '.join(names)
-    pad = '    '
-    checks = ''.join(f'{pad}{pad}{s}\n' for s in dict.fromkeys(setup))
-    src = f"""def plan({head}):
-    try:
-{checks}        if not ({' and '.join(guards) or 'True'}):
-            return slow(({head}{',' if names else ''}))
-        carg = ({''.join(c + ', ' for c in cargs)})
-    except (ValueError, TypeError, BufferError):        # empty arrays have no buffer to take the address of
-        return slow(({head}{',' if names else ''}))
-    try:
-        io, ioaddr, q, d = pool.pop()
-    except IndexError:
+    src = f"""def plan({', '.join(names)}):
+{chr(10).join(src_guards)}
+{take}    if pool:
+        io, ioaddr, q, d = entry = pool.pop()
+    else:
         io = bytearray({size})
-        ioaddr = addressof(c_char.from_buffer(io))
+        ioaddr = addressof(from_buffer(io))
         view = memoryview(io)
         q, d = view.cast('q'), view.cast('d')
-    status = kernel(*carg, ioaddr)
+        entry = (io, ioaddr, q, d)
+    status = kernel({''.join(c + ', ' for c in cargs)}ioaddr)
     if status:
-        pool.append((io, ioaddr, q, d))
+        pool.append(entry)
         failed(status, io)
     value = {result}
-    pool.append((io, ioaddr, q, d))
+    pool.append(entry)
     return value
 """
     exec(src, env)  # noqa: S102

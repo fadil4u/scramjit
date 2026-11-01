@@ -105,7 +105,7 @@ section.s{padding:76px 0 8px}
 .pts li::before{content:"";position:absolute;left:0;top:.62em;width:8px;height:8px;border-radius:2px;background:var(--flow);transform:rotate(45deg)}
 .pts b{color:var(--ink);font-weight:600}
 .note{font-size:13px;color:var(--ink3);margin-top:12px}
-.doclink{margin-top:18px;font-size:14px;font-weight:500}.doclink a{color:var(--cold)}.doclink a:hover{color:var(--coldD)}
+.doclink{margin-top:18px;font-size:14px;font-weight:500;color:var(--ink4)}.doclink a{color:var(--hotD)}.doclink a:hover{color:var(--hotDD)}
 /* code panels */
 .code{background:var(--code);border:1px solid var(--codeline);border-radius:12px;overflow:hidden;color:#c9d1d9;min-width:0}
 .code .bar{height:36px;display:flex;align-items:center;gap:10px;padding:0 8px 0 12px;border-bottom:1px solid #232838;background:var(--code2);font-family:var(--mono);font-size:11.5px;color:#8e94a3}
@@ -127,21 +127,15 @@ section.s{padding:76px 0 8px}
 /* one pane: Python and its C stacked; a raster line sweeps through and turns each line it passes into the other */
 .code .panes{position:relative;display:grid;cursor:pointer}
 .code .panes>pre{grid-area:1/1}
-.frame{--sw:2.4s}.frame.quick{--sw:1.3s}
-.panes pre.c{clip-path:inset(0 0 100% 0)}
-.frame.done pre.py{clip-path:inset(100% 0 0 0)}
-.frame.done pre.c{clip-path:inset(0 0 0 0)}
-.frame.sweep pre.py,.frame.unsweep pre.py{animation:sw-py var(--sw) cubic-bezier(.45,.05,.55,.95) both}
-.frame.sweep pre.c,.frame.unsweep pre.c{animation:sw-c var(--sw) cubic-bezier(.45,.05,.55,.95) both}
-.frame.sweep .scan,.frame.unsweep .scan{animation:sw-scan var(--sw) cubic-bezier(.45,.05,.55,.95) both}
-.frame.unsweep pre.py,.frame.unsweep pre.c,.frame.unsweep .scan{animation-direction:reverse}
-.scan{position:absolute;left:0;right:0;top:0;height:2px;pointer-events:none;opacity:0;background:linear-gradient(90deg,rgba(37,99,235,0),#3b82f6 12%,#f97316 58%,#ef4444 88%,rgba(239,68,68,0));box-shadow:0 0 16px 3px rgba(249,115,22,.45)}
+/* --p is the raster's position, 0 (all Python) to 1 (all C); script animates it either way */
+.frame{--p:0}
+.panes pre.py{clip-path:inset(calc(var(--p) * 100%) 0 0 0)}
+.panes pre.c{clip-path:inset(0 0 calc((1 - var(--p)) * 100%) 0)}
+.scan{position:absolute;left:0;right:0;top:calc(var(--p) * 100%);height:2px;pointer-events:none;opacity:0;transition:opacity .2s;background:linear-gradient(90deg,rgba(37,99,235,0),#3b82f6 12%,#f97316 58%,#ef4444 88%,rgba(239,68,68,0));box-shadow:0 0 16px 3px rgba(249,115,22,.45)}
+.frame.moving .scan{opacity:1}
 .scan::after{content:"";position:absolute;left:0;right:0;bottom:2px;height:26px;background:linear-gradient(0deg,rgba(249,115,22,.12),rgba(249,115,22,0))}
-.frame.unsweep .scan::after{bottom:auto;top:2px;background:linear-gradient(180deg,rgba(59,130,246,.12),rgba(59,130,246,0))}
-@keyframes sw-py{from{clip-path:inset(0 0 0 0)}to{clip-path:inset(100% 0 0 0)}}
-@keyframes sw-c{from{clip-path:inset(0 0 100% 0)}to{clip-path:inset(0 0 0 0)}}
-@keyframes sw-scan{0%{top:0;opacity:0}5%{opacity:1}94%{opacity:1}100%{top:100%;opacity:0}}
-@media (prefers-reduced-motion:reduce){.frame.sweep pre.py,.frame.sweep pre.c,.frame.sweep .scan,.frame.unsweep pre.py,.frame.unsweep pre.c,.frame.unsweep .scan{animation:none}.tabs button,.code .fname span{transition:none}}
+.frame.up .scan::after{bottom:auto;top:2px;background:linear-gradient(180deg,rgba(59,130,246,.12),rgba(59,130,246,0))}
+@media (prefers-reduced-motion:reduce){.tabs button,.code .fname span{transition:none}}
 .code .cfoot{display:flex;align-items:center;gap:8px;padding:8px 14px;border-top:1px solid #232838;font:500 11.5px var(--mono);color:#6f7891}
 .code .cfoot i{width:7px;height:7px;border-radius:50%;background:var(--hot)}
 /* usage carousel: auto-advances while in view, pauses on hover or focus; arrows, buttons, keys and swipe move it */
@@ -550,19 +544,25 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
     f.querySelector('.t-py').setAttribute('aria-pressed', !c);
     f.querySelector('.t-c').setAttribute('aria-pressed', c);
   }
-  function reset(f) { clearTimeout(sw); f.classList.remove('sweep', 'unsweep', 'done', 'quick'); mark(f, false); }
-  // to C (dir 1) or back to Python (dir -1); quick for a manual toggle
-  function run(f, dir, quick) {
-    var c = dir > 0;
-    if (f.classList.contains('c') === c && !f.classList.contains('sweep') && !f.classList.contains('unsweep')) return;
-    clearTimeout(sw);
-    f.classList.remove('sweep', 'unsweep'); f.classList.toggle('quick', !!quick);
-    mark(f, c);
-    if (RM) { f.classList.toggle('done', c); return; }
-    f.classList.remove('done'); f.offsetWidth;
-    f.classList.add(c ? 'sweep' : 'unsweep');
-    sw = setTimeout(function () { f.classList.remove('sweep', 'unsweep'); f.classList.toggle('done', c); }, quick ? 1300 : 2400);
+  // the raster's position p runs from 0 (all Python) to 1 (all C). A new target, even mid-sweep,
+  // turns the line around from where it is.
+  function setP(f, p) { f._p = p; f.style.setProperty('--p', p.toFixed(4)); }
+  function animTo(f, target, full) {
+    cancelAnimationFrame(f._raf);
+    var p0 = f._p || 0;
+    mark(f, target === 1);
+    if (RM || p0 === target) { setP(f, target); f.classList.remove('moving'); return; }
+    var d = Math.abs(target - p0) * full, t0 = performance.now();
+    f.classList.add('moving'); f.classList.toggle('up', target < p0);
+    (function step(now) {
+      var u = Math.max(0, Math.min(1, (now - t0) / d)), e = u < .5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u);
+      setP(f, p0 + (target - p0) * e);
+      if (u < 1) f._raf = requestAnimationFrame(step); else f.classList.remove('moving');
+    })(t0);
   }
+  function reset(f) { clearTimeout(sw); cancelAnimationFrame(f._raf); f.classList.remove('moving'); setP(f, 0); mark(f, false); }
+  // to C (dir 1) or back to Python (dir -1); quick for a manual toggle
+  function run(f, dir, quick) { clearTimeout(sw); animTo(f, dir > 0 ? 1 : 0, quick ? 1300 : 2400); }
   // show the Python first, then sweep it into C
   function play(f, delay) { reset(f); sw = setTimeout(function () { run(f, 1); }, delay); }
   frames.forEach(function (f) {

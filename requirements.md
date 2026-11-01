@@ -350,6 +350,19 @@ raised. With those, parity and bounds checks cost nothing measurable on the M1 k
 
 No M0 kernel uses only 1-D arrays, so M1 was measured on these.
 
+**M2 progress (2026-11-01).** Built and differentially tested: loops over arrays, lists,
+`enumerate`, `zip`, `reversed` (nested, tuple targets) as one counted loop; `sum`, `min`, `max`,
+`any`, `all` over iterables and comprehensions, fused, each following CPython's `bltinmodule.c`
+(sum's int, Neumaier-compensated float and generic phases; `any`/`all` short-circuit over
+generators but not list comprehensions); tuples of numbers (swap assignment, returns, arguments);
+lists that never change size (literals, `[x] * n`, single-loop comprehensions) as heap arrays
+with Python's list errors; `math` functions bit-exact, calling the host libm CPython calls,
+wrapped in `mathmodule.c`'s logic. Findings: `sum()` of floats with the default int start
+returns the int 0 when empty, so it falls back with a hint to write `sum(..., 0.0)`; numpy ints
+have no `__floor__`, so `math.floor(np.int64(x))` goes through float (precision lost above 2**53)
+and `math.trunc` of one raises. Not yet: narrow dtypes (NEP 50), value-range narrowing, and the
+acceptance check on the M0 kernels, which needs 2-D arrays (M3).
+
 **M2: builtins, lists, narrowing.** Lowering rules for `enumerate`, `zip`, `map`, `filter`,
 comprehensions and the reductions; fixed-size lists as arrays; narrow types from annotations,
 dtypes and range analysis. Done when each rule has differential tests, the generated C for

@@ -230,6 +230,103 @@ def test_a_forked_child_has_its_own_ctrl_c(tmp_path):
     assert 'child 42 parent finished' in out, out + err
 
 
+# ---- Windows: a real console control event, in a console of the program's own
+
+WINDOWS_COMMON = """
+import ctypes, os, signal, sys, threading, time
+import numpy as np
+from scramjit import scram
+import kernels
+print = __import__('functools').partial(print, flush=True)
+sent = []
+def fire(after):
+    time.sleep(after)
+    sent.append(time.perf_counter())
+    assert ctypes.windll.kernel32.GenerateConsoleCtrlEvent(0, 0)
+f = scram(kernels.f, fallback=False)
+f(1)
+"""
+
+
+def run_windows(tmp_path, kernels, body):
+    (tmp_path / 'kernels.py').write_text(textwrap.dedent(kernels))
+    (tmp_path / 'main.py').write_text(WINDOWS_COMMON + textwrap.dedent(body))
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([ROOT, CIMO, str(tmp_path)]), PYTHONWARNINGS='ignore')
+    p = subprocess.Popen([sys.executable, 'main.py'], cwd=tmp_path, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         creationflags=subprocess.CREATE_NO_WINDOW)
+    try:
+        out, err = p.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, err = p.communicate()
+        raise AssertionError(f'still running after 60 s: {out} {err}') from None
+    return out, err
+
+
+windows = pytest.mark.skipif(sys.platform != 'win32', reason='console control events')
+
+
+@windows
+@pytest.mark.parametrize('name', LOOPS)
+def test_windows_every_kind_of_loop_stops(tmp_path, name):
+    src, arg = LOOPS[name]
+    out, err = run_windows(tmp_path, src, f"""
+        threading.Thread(target=fire, args=(0.3,), daemon=True).start()
+        try:
+            f({arg})
+            print('finished')
+        except KeyboardInterrupt:
+            print('interrupted', time.perf_counter() - sent[0] < 5)
+    """)
+    assert 'interrupted True' in out, out + err
+
+
+@windows
+def test_windows_a_custom_handler_doesnt_stop_the_kernel(tmp_path):
+    out, err = run_windows(tmp_path, LOOPS['for_range'][0], """
+        seen = []
+        signal.signal(signal.SIGINT, lambda *a: seen.append(1))
+        threading.Thread(target=fire, args=(0.05,), daemon=True).start()
+        r = f(400_000_000)
+        time.sleep(0.05)
+        print('finished', seen)
+    """)
+    assert 'finished [1]' in out, out + err
+
+
+@windows
+def test_windows_a_worker_thread_is_not_stopped(tmp_path):
+    out, err = run_windows(tmp_path, LOOPS['for_range'][0], """
+        done = []
+        t = threading.Thread(target=lambda: done.append(f(300_000_000)))
+        t.start()
+        threading.Thread(target=fire, args=(0.1,), daemon=True).start()
+        try:
+            while t.is_alive():
+                time.sleep(0.01)
+            print('no interrupt')
+        except KeyboardInterrupt:
+            print('main interrupted')
+        t.join()
+        print('worker finished', len(done))
+    """)
+    assert 'main interrupted' in out and 'worker finished 1' in out, out + err
+
+
+@windows
+def test_windows_a_signal_while_in_python_doesnt_stop_the_next_call(tmp_path):
+    out, err = run_windows(tmp_path, LOOPS['for_range'][0], """
+        threading.Thread(target=fire, args=(0.1,), daemon=True).start()
+        try:
+            time.sleep(10)
+        except KeyboardInterrupt:
+            print('in python')
+        time.sleep(0.2)
+        print('whole', f(100000) == f.__wrapped__(100000))
+    """)
+    assert 'in python' in out and 'whole True' in out, out + err
+
+
 # ---- chunk boundaries
 
 

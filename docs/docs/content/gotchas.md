@@ -57,6 +57,10 @@ Python's integers are unbounded. Compiled integers are `int64`, and past that th
 
 Checking every operation would cost speed on every loop, and numeric code rarely comes near `2 ** 63`. If yours might, leave that function undecorated, or use floats. An argument that doesn't fit in 64 bits is safe: that call runs as Python.
 
+### On Windows, a NaN's sign can differ
+
+A few operations give a NaN with the opposite sign bit from CPython's on Windows: `inf % 1.0`, `inf // 1.0`, `math.atan2(0.0, nan)` and `nan * -1`. Both are NaN and compare the same; only `math.copysign` or the raw bytes can tell. Seen on Windows arm64; Linux matches exactly.
+
 ## Things that work differently around a compiled call
 
 The results are the same in all of these. What changes is what you can observe while the code runs.

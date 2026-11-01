@@ -27,15 +27,23 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 2. **Rest of M3:** run the M0 kernels in Pyodide as a test, not only through the site; preflight's
    per-loop report once cimo exposes one (cimo's `TODO.md`), and a `disk` label in the compile column,
    which needs cimo to say whether a compile hit its cache.
-3. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x` raise today** (see Gotchas). Rerunning
+3. **Test Ctrl-C on macOS.** `tests/test_interrupt.py` has run on Linux and Windows arm64, not macOS. It
+   should work, since it uses `signal.set_wakeup_fd` and sockets, but nothing has checked it.
+4. **A NaN's sign differs from CPython's on Windows** (arm64, the only one tried). `inf % 1.0`, `inf // 1.0`
+   and `math.atan2(0.0, nan)` give `7ff8...` where CPython gives `fff8...`, and `nan * -1` gives `fff8...`
+   where it gives `7ff8...`; `tests/test_m1.py` and `test_m2.py` fail there on these, 7 in all. The values are
+   all NaN, and only `math.copysign` or the raw bytes can tell. Likely fix: call the CRT's `fmod` through the
+   libm table, as for `sin`, and make the `* -1` negation depend on the platform. Nothing runs scramjit's tests
+   on Windows automatically yet.
+5. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x` raise today** (see Gotchas). Rerunning
    in Python, for functions that write nothing, or resuming in Python alongside loop lifting would remove
    the difference.
-4. **SSA for variables that change type** (`x = 1` then `x = 0.5`): today they fall back.
-5. **Bounds-check hoisting beyond unit-step loops** over one variable (versioning covers
+6. **SSA for variables that change type** (`x = 1` then `x = 0.5`): today they fall back.
+7. **Bounds-check hoisting beyond unit-step loops** over one variable (versioning covers
    `for i in range(a, len(x))` with `arr[i + c]` today).
-6. **Store-to-load forwarding:** `y[i]` written then `y[i - 1]` read next iteration; keeping it in
+8. **Store-to-load forwarding:** `y[i]` written then `y[i - 1]` read next iteration; keeping it in
    a register gives `ema` 2.39 ns against 3.07 (cimo doesn't do it).
-7. **Call boundary cost:** about 1.4 µs with numbers (was 3.2) and 2.4 µs with an array (was 6.6), through
+9. **Call boundary cost:** about 1.4 µs with numbers (was 3.2) and 2.4 µs with an array (was 6.6), through
    a function generated per signature (`_make_plan`). For numbers: ctypes about 450 ns (the floor), cimo's
    `Kernel.__call__` about 450 (see cimo's `TODO.md`), scramjit about 500. In Pyodide about 13 µs, not yet
    broken down. Break-even is 30 to 50 loop iterations per call. Rejected: caching an array's address (saves

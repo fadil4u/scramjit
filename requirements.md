@@ -464,7 +464,8 @@ was worse. Counted loops run in chunks of 65,536 instead, checking between them,
 measurable on the benchmarks. Short constant ranges skip chunks (their setup cost 3x3 stencils 28%); a very
 short variable range still pays about 20%. `while` loops check every iteration, which was cheap. It stops a
 kernel only on the main thread and under Python's default handler, since a stopped kernel can't resume and
-another handler might not raise.
+another handler might not raise. Tested with real signals on Linux and real console control events on Windows
+arm64 (a console of the program's own, `CREATE_NO_WINDOW`, then `GenerateConsoleCtrlEvent`); macOS isn't yet.
 
 **M3 progress.** The disk cache is cimo's: scramjit's C is deterministic, so a second process finds
 it (Gray-Scott first call 0.53 s, then 0.06 s, mostly preprocessing the prelude); no second cache

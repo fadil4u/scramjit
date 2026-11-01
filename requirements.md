@@ -203,6 +203,10 @@ be easy to see. Tools, all pure Python, behind one `scramjit` command (also `pyt
   whole run (the coverage number). Ends with hints. Catches the type-driven fallbacks the static
   mode can't see; running the test suite under it is the CI check.
 - Both modes exit non-zero on anything but compiled (`--allow-partial` accepts partly compiled).
+- **`scramjit preflight PATH:FUNCTION`** (or `pkg.module:function`): the `f.explain()` report for one
+  function, from the command line. Static by default (one assumed signature); with `--run` it shows
+  each signature compiled during the run. The target comes before `--run`, which takes the rest of
+  the command line.
 - **`f.explain()`:** the Python source annotated per line: state (native or Python, and why),
   inferred and narrowed types, bounds checks proven, hoisted or kept, loops cimo optimized or not,
   copies at the call boundary. Ends with hints.

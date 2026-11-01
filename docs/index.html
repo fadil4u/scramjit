@@ -512,7 +512,7 @@ for (int64_t i = 0; i &lt; a_len; i++)
   </div>
 
   <div class="wf">
-    <div class="wf-cap"><span class="wf-n" style="background:#dc2626">3</span><span class="wf-when">One function</span><h3><code>f.explain()</code></h3><p>Prints the function with each line marked native or Python and what the compiler decided: types, bounds checks, which loops were optimized. Works in any REPL or notebook.</p></div>
+    <div class="wf-cap"><span class="wf-n" style="background:#dc2626">3</span><span class="wf-when">One function</span><h3><code>f.explain()</code></h3><p>Prints the function with each line marked native or Python and what the compiler decided: types, bounds checks, which loops were optimized. In a REPL or notebook, or from the command line with <code>scramjit preflight sim.py:step</code>.</p></div>
     <div class="code"><div class="bar"><span class="dots"><i></i><i></i><i></i></span>terminal · python</div>
 <pre class="xp"><span class="t-pr">&gt;&gt;&gt;</span> step.explain()
 <b class="t-hd">step</b>(float64[:], float64[:], list)

@@ -102,6 +102,18 @@ It reports:
 
 Pass a signature to explain only that one: `f.explain(f.signatures[0])`.
 
+### From the command line
+
+Give preflight a function instead of a directory:
+
+```console
+$ scramjit preflight src/sim.py:step                   # static: one assumed signature
+$ scramjit preflight src/sim.py:step --run app.py      # every signature compiled during the run
+$ scramjit preflight pkg.sim:step                      # a dotted module path works too
+```
+
+It prints the same report as `step.explain()`. Without `--run`, argument types come from annotations, and unannotated arguments are assumed to be numbers or arrays. With `--run`, the report covers each signature the function was actually compiled for. Put the function before `--run`: everything after `--run` is the program and its arguments.
+
 ## Specializations and the generated C
 
 ```python

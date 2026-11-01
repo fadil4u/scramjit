@@ -66,3 +66,8 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
    broken down. Break-even is 30 to 50 loop iterations per call. Rejected: caching an array's address (saves
    200 ns, but `resize(refcheck=False)` would corrupt memory silently); `__call__` by argument count (100 to
    150 ns, not worth its keyword edge cases).
+11. **Native arm64 is 2.4x slower than Pyodide on an LLM forward pass.** A llama2.c forward pass written as one
+    function of plain loops over float64 arrays (stories15M, single thread): 27 tok/s native, 64.5 in Pyodide
+    with `boundscheck=False, parity=False`. Native gets 27.3 with the default options too, where Pyodide drops
+    to 13.5, so check that those options take effect natively. The C version through cimo doesn't show the gap
+    (70 native, 75 wasm). Compare the generated C and cimo's arm64 output with `gcc -O3` on the same C.

@@ -252,8 +252,8 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
 </section>
 
 <section class="proof" aria-label="scramjit by design"><div class="wrap proof-row">
-  <div class="pf"><b>1</b><p>decorator: the whole user-facing API</p><code>@scramjit.jit</code></div>
-  <div class="pf"><b>0</b><p>native dependencies: standard library plus cimo, both pure Python</p><code>import scramjit</code></div>
+  <div class="pf"><b>1</b><p>decorator: the whole user-facing API</p><code>@scram</code></div>
+  <div class="pf"><b>0</b><p>native dependencies: standard library plus cimo, both pure Python</p><code>from scramjit import scram</code></div>
   <div class="pf"><b>0</b><p>Python objects in generated code: arguments are unboxed at the call</p><code>double *, int64_t</code></div>
   <div class="pf"><b>3.9+</b><p>CPython, plus Pyodide, JupyterLite, marimo and PyScript</p><code>micropip.install("scramjit")</code></div>
 </div></section>
@@ -277,9 +277,9 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
         <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="fname"><span class="n-py">ema.py</span><span class="n-c">ema · float64[:], float64[:], float</span></span><span class="tabs" role="group" aria-label="Show the Python or the generated C"><button type="button" class="t-py" aria-pressed="true">Python</button><button type="button" class="t-c" aria-pressed="false">generated C</button></span></div>
         <div class="panes">
 <pre data-lang="py" class="py">import numpy as np
-import scramjit
+from scramjit import scram
 
-@scramjit.jit
+@scram
 def ema(x, y, a: float):
     y[0] = x[0]
     for i in range(1, len(x)):
@@ -304,9 +304,9 @@ void ema(const double *x, int64_t x_len,
         <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="fname"><span class="n-py">distance.py</span><span class="n-c">edit_distance · uint8[:], uint8[:], int64[:]</span></span><span class="tabs" role="group" aria-label="Show the Python or the generated C"><button type="button" class="t-py" aria-pressed="true">Python</button><button type="button" class="t-c" aria-pressed="false">generated C</button></span></div>
         <div class="panes">
 <pre data-lang="py" class="py">import numpy as np
-import scramjit
+from scramjit import scram
 
-@scramjit.jit
+@scram
 def edit_distance(a, b, row):
     for j in range(len(b) + 1):
         row[j] = j
@@ -354,9 +354,9 @@ int64_t edit_distance(const uint8_t *a, int64_t a_len,
         <div class="panes">
 <pre data-lang="py" class="py">from concurrent.futures import ThreadPoolExecutor
 import numpy as np
-import scramjit
+from scramjit import scram
 
-@scramjit.jit
+@scram
 def mandel_rows(out, y0: int, y1: int, iters: int):
     h, w = out.shape
     for j in range(y0, y1):

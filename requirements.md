@@ -66,16 +66,18 @@ desktop or server.
 ## API: a decorator
 
 ```python
-import scramjit
+from scramjit import scram
 
-@scramjit.jit
+@scram
 def saxpy(a: float, x, y):
     for i in range(len(x)):
         y[i] += a * x[i]
 ```
 
 The decorator is the whole user-facing API. Options (bounds checks, cache control) are keyword
-arguments to it. The exact name (`@scramjit.jit` or bare `@scramjit`) is open. The undecorated
+arguments to it. It is named `scram` (to scram: to go, fast) and imported as
+`from scramjit import scram`; a callable module (`@scramjit`) was rejected because mypy and Pyright
+report "module not callable" for every variant of the trick. The undecorated
 function stays reachable for debugging.
 
 ## Compilation model: unboxed
@@ -135,7 +137,7 @@ Each decision is explicit and tested against CPython:
 - `//` and `%` round toward negative infinity, as in Python, not truncate as in C.
 - Negative indices count from the end, as in Python.
 - Bounds checks are on by default and raise `IndexError` as Python does; opt out per function with
-  `@scramjit.jit(boundscheck=False)`.
+  `@scram(boundscheck=False)`.
 - Float division by zero: open (raise as Python does, or return inf as C does).
 - Float evaluation order follows Python; no reassociation, no FMA contraction unless opted in.
 

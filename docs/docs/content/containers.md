@@ -11,7 +11,7 @@ Negative indices count from the end, as in Python. Indices are bounds-checked by
 Tuples become C structs. Returning several values works as in Python:
 
 ```python
-@scramjit.jit
+@scram
 def minmax(a):
     lo = hi = a[0]
     for v in a:
@@ -25,7 +25,7 @@ def minmax(a):
 A list that is never resized becomes a fixed-size C array. That means no `append`, `pop`, `extend`, `insert`, `del` or slice assignment on it, and no escape into code that might do those. It lives on the stack when it is small, constant-sized and not returned, and on the heap otherwise.
 
 ```python
-@scramjit.jit
+@scram
 def blur3(src, dst):
     w = [0.25, 0.5, 0.25]          # a 3-element C array on the stack
     for i in range(1, len(src) - 1):

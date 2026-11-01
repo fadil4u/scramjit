@@ -4,16 +4,16 @@
 
 ```python
 import numpy as np
-import scramjit
+from scramjit import scram
 
-@scramjit.jit
+@scram
 def ema(x, y, a: float):
     y[0] = x[0]
     for i in range(1, len(x)):
         y[i] = a * x[i] + (1 - a) * y[i - 1]
 ```
 
-This is a recurrence: each output depends on the one before it, so it can't be written as one vectorized numpy expression. In pure Python it runs one bytecode-interpreted iteration at a time.
+`scram` is scramjit's one decorator. This function is a recurrence: each output depends on the one before it, so it can't be written as one vectorized numpy expression. In pure Python it runs one bytecode-interpreted iteration at a time.
 
 ## Call it
 
@@ -54,7 +54,7 @@ assert np.array_equal(y, ref)
 The decorator is the whole API. Options are keyword arguments to it:
 
 ```python
-@scramjit.jit(boundscheck=False, cache=False)
+@scram(boundscheck=False, cache=False)
 def ema(x, y, a: float):
     ...
 ```

@@ -1,12 +1,12 @@
 # Introduction
 
-scramjit is a just-in-time compiler for Python, written in pure Python, for the loops the interpreter is slowest at. Put a decorator on a function with a hot loop; on the first call scramjit translates it to C, compiles that with [cimo](https://www.cimo.dev) inside your process, and from then on the call runs native code, without holding the GIL.
+scramjit is a just-in-time compiler for Python, written in pure Python, for the loops the interpreter is slowest at. Put `@scram` on a function with a hot loop; on the first call scramjit translates it to C, compiles that with [cimo](https://www.cimo.dev) inside your process, and from then on the call runs native code, without holding the GIL.
 
 ```python
 import numpy as np
-import scramjit
+from scramjit import scram
 
-@scramjit.jit
+@scram
 def saxpy(a: float, x, y):
     for i in range(len(x)):
         y[i] += a * x[i]

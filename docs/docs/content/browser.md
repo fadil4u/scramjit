@@ -6,9 +6,9 @@ scramjit runs wherever cimo does. In Pyodide, JupyterLite, marimo and PyScript, 
 import micropip
 await micropip.install("scramjit")
 
-import scramjit
+from scramjit import scram
 
-@scramjit.jit
+@scram
 def mandel(xs, ys, out, iters: int):
     for j in range(len(ys)):
         for i in range(len(xs)):

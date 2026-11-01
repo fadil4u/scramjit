@@ -11,7 +11,7 @@ A variable that takes several types unifies by Python's rules: `int` and `float`
 Annotations are used, not ignored. They are checked at the call boundary, and they give the compiler information it can narrow with.
 
 ```python
-@scramjit.jit
+@scram
 def scale(img, k: float):
     for i in range(len(img)):
         img[i] = img[i] * k

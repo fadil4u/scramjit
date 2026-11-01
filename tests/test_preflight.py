@@ -246,6 +246,15 @@ def test_a_suggestion_really_compiles(tmp_path):
     assert r.stdout.strip() == '[0.0, 0.5, 1.5, 2.5]', r.stderr
 
 
+def test_differences_from_python_are_flagged(tmp_path):
+    (tmp_path / 'p.py').write_text('from scramjit import scram\n@scram\ndef f(n: int, k: int):\n    return n ** k\n')
+    r = run(['-m', 'scramjit', 'preflight', 'p.py'], tmp_path)
+    assert r.returncode == 0 and 'note: line 4 raises ValueError if the exponent is negative' in r.stdout
+    assert 'raises ValueError' in run(['-m', 'scramjit', 'preflight', 'p.py:f'], tmp_path).stdout
+    d = json.loads(run(['-m', 'scramjit', 'preflight', '--json', 'p.py'], tmp_path).stdout)
+    assert d['files'][0]['functions'][0]['differences'][0]['line'] == 4
+
+
 def test_quiet(proj):
     out = run(['-m', 'scramjit', 'preflight', '-q', 'sim.py'], proj).stdout
     assert '✗ summarize' in out and '✓' not in out

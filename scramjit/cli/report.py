@@ -60,6 +60,8 @@ def static(t, reports, quiet=False):
             if a.compiler is not None:
                 if not quiet:
                     t.write(f'  {_mark(t, True)} {f.name:<{width}}  {t.style("compiled", "muted")}')
+                    for line, text in sorted(a.compiler.gotchas.items()):
+                        t.write(f'      {t.style("note:", "warning")} line {line} {text}')
                 continue
             t.write(f'  {_mark(t, False)} {t.style(f"{f.name:<{width}}", "bold")}  runs as Python')
             for p in a.problems:
@@ -96,7 +98,8 @@ def static_json(stream, reports):
             good += a.compiler is not None
             bad += a.compiler is None
             fs.append({'name': f.name, 'line': f.lineno, 'state': a.state, 'signature': [x.name for x in a.signature],
-                       'problems': [p.as_dict() for p in a.problems]})
+                       'problems': [p.as_dict() for p in a.problems],
+                       'differences': [{'line': k, 'text': v} for k, v in sorted(a.compiler.gotchas.items())] if a.compiler else []})
         files.append({'path': r.path, 'functions': fs,
                       'would_compile': [{'name': f.name, 'line': f.lineno, 'signature': [x.name for x in a.signature]}
                                         for f, a in r.candidates]})
@@ -105,7 +108,7 @@ def static_json(stream, reports):
     stream.write('\n')
 
 
-def lines_table(t, lines, first, fdef, offset, title, status, bounds, problems, types):
+def lines_table(t, lines, first, fdef, offset, title, status, bounds, problems, types, gotchas=None):
     """One function, line by line."""
     t.write(t.style(title, 'bold'))
     t.write(status)
@@ -145,6 +148,8 @@ def lines_table(t, lines, first, fdef, offset, title, status, bounds, problems, 
                         hints.append(f'line {n}: {KEEP_HINT}')
                 else:
                     note = t.style('bounds hoisted out of the loop' if n in hoisted else 'bounds proven', 'muted')
+            if gotchas and n in gotchas:
+                note = t.style(gotchas[n], 'yellow')
         pad = ' ' * (width - len(text)) if note else ''
         t.write(f'{t.style(f"{n:>4}", "muted")} {bar} {mark} {text}{pad}  {note}'.rstrip())
     t.write(rule)
@@ -170,7 +175,7 @@ def one_static(t, fdef, a, source, path, boundscheck):
     lines_table(t, text, start, fdef, 0, f'{fdef.name}({", ".join(x.name for x in a.signature)})',
                 _state_line(t, c is not None, f'· {os.path.basename(path)} · assumed signature'),
                 (c.checks, c.hoisted_lines, boundscheck) if c else None, a.problems,
-                {k: v.name for k, v in c.env.items()} if c else {})
+                {k: v.name for k, v in c.env.items()} if c else {}, c.gotchas if c else None)
 
 
 def function_report(f, signature, stream):
@@ -197,7 +202,7 @@ def function_report(f, signature, stream):
         lines_table(t, lines, f._first, fdef, offset, f'{f.__name__}({", ".join(x.name for x in a.signature)})',
                     _state_line(t, c is not None, f'· {where} · assumed signature, not called yet'),
                     (c.checks, c.hoisted_lines, f._boundscheck) if c else None, a.problems,
-                    {k: v.name for k, v in c.env.items()} if c else {})
+                    {k: v.name for k, v in c.env.items()} if c else {}, c.gotchas if c else None)
         return
     for i, key in enumerate(keys):
         if i:
@@ -208,7 +213,7 @@ def function_report(f, signature, stream):
             s = f._compile_s.get(key)
             when = f' · compiled in {s * 1000:.0f} ms' if s is not None else ''
             lines_table(t, lines, f._first, fdef, offset, f'{f.__name__}({names})', _state_line(t, True, f'· {where}{when}'),
-                        (entry.checks, entry.hoisted, f._boundscheck), [], entry.locals)
+                        (entry.checks, entry.hoisted, f._boundscheck), [], entry.locals, entry.gotchas)
         else:
             line, why = f._why.get(key, (f._first, 'not compiled'))
             lines_table(t, lines, f._first, fdef, offset, f'{f.__name__}({names})', _state_line(t, False, f'· {where}'),

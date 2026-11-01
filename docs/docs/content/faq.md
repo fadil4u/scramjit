@@ -14,7 +14,7 @@ The supported types are numeric: scalars, arrays, tuples and fixed-size lists. B
 
 ## What if it can't compile my function?
 
-It runs as Python, so your program still works and gives the same results; you just don't get the speedup for that part. You get a `FallbackWarning` naming the line. Add `@scram(fallback=False)` to make that an error instead.
+It runs as Python, so your program still works and gives the same results; you just don't get the speedup for that part. (Code that does compile has a few [documented differences](gotchas.md).) You get a `FallbackWarning` naming the line. Add `@scram(fallback=False)` to make that an error instead.
 
 ## Does it help with the GIL?
 

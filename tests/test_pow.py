@@ -77,7 +77,12 @@ def d_flag_int(a, n: int, c: int):
 # must fall back: the type would depend on the data
 def fb_frac(x: float): return x ** 0.5
 def fb_var(x: float, y: float): return x ** y
-def fb_int_var(n: int, k: int): return n ** k
+def i_var(n: int, k: int): return n ** k
+def i_var_aug(n: int, k: int):
+    n **= k
+    return n
+def i_builtin_var(n: int, k: int): return pow(n, k)
+def i_true_base(b: bool, k: int): return b ** k
 def fb_three(x: float): return pow(x, 2, 3)
 def fb_flag_frac(a, x: float, c: int):
     v = x
@@ -115,12 +120,15 @@ CASES = [(f, [(x,) for x in X]) for f in (f_square, f_cube, f_inv, f_zero, f_two
 CASES += [(f_var, [(x, n) for x in X for n in I])]
 CASES += [(f, [(i,) for i in I]) for f in (i_square, i_zero, i_big, i_neg, i_neg2, i_to_f, i_builtin, i_aug)]
 CASES += [(i_bool, [(True,), (False,)])]
+NONNEG = [0, 1, 2, 3, 7, 10, 63, 64, 70, 200]             # (Python computes these exactly, so not huge)
+CASES += [(f, [(n, k) for n in I for k in NONNEG]) for f in (i_var, i_var_aug, i_builtin_var)]
+CASES += [(i_true_base, [(b, k) for b in (True, False) for k in NONNEG])]
 CASES += [(f, [(a,) for a in AF]) for f in (a_half, a_two, a_elems, a_loop, a_store)]
 CASES += [(a_frac_var, [(a, y) for a in AF[::3] for y in X]), (a_int_var, [(a, n) for a in AF[::3] for n in I]), (a_rpow, [(a, x) for a in AF for x in X[::4]]), (a_rint, [(a, n) for a in AF for n in I[::3]])]
 CASES += [(f, [(a,) for a in AI]) for f in (n_two, n_neg, n_float, n_elems, n_big)]
 CASES += [(n_var, [(a, n) for a in AI[::6] for n in I]), (n_rpow, [(a, n) for a in AI for n in I[::3]])]
 CASES += [(d_flag, [(a, x, c) for a in AF[::9] for x in X for c in (0, 1)]), (d_flag_int, [(a, n, c) for a in AI[::6] for n in I for c in (0, 1)])]
-FALLS_BACK = [(fb_frac, (2.0,)), (fb_var, (2.0, 3.0)), (fb_int_var, (2, 3)), (fb_three, (2.0,)), (fb_flag_frac, (np.array([4.0]), 2.0, 0))]
+FALLS_BACK = [(fb_frac, (2.0,)), (fb_var, (2.0, 3.0)), (fb_three, (2.0,)), (fb_flag_frac, (np.array([4.0]), 2.0, 0))]
 
 
 def main():
@@ -151,6 +159,29 @@ def main():
 
 def test_pow_matches_cpython():
     assert main() == []
+
+
+def test_negative_exponent_is_the_documented_difference():
+    """The one place ** differs from Python: an error, never a wrong answer."""
+    for f in (i_var, i_var_aug, i_builtin_var):
+        g = scram(f, fallback=False)
+        for n, k in ((2, -1), (0, -1), (-3, -2), (1, -(1 << 62))):
+            try:
+                g(n, k)
+            except ValueError as e:
+                assert 'negative k' in str(e) and 'float(n) ** k' in str(e)
+            else:
+                raise AssertionError((f.__name__, n, k))
+
+
+def test_the_rewrite_in_the_message_works():
+    g = scram(_float_base, fallback=False)
+    for n, k in ((2, -1), (2, 3), (-3, -2)):
+        assert g(n, k) == _float_base(n, k)
+
+
+def _float_base(n: int, k: int):
+    return float(n) ** k
 
 
 if __name__ == '__main__':

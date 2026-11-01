@@ -1,10 +1,11 @@
 # Semantics
 
-A compiled function returns what CPython returns for the same function undecorated. Where Python and C disagree, scramjit picks a behavior explicitly and tests it against CPython: every compiled function is checked against the undecorated one, including on randomly generated programs within the subset.
+A compiled function returns what CPython returns for the same function undecorated, apart from the few exceptions listed in [Gotchas](gotchas.md). Where Python and C disagree, scramjit picks a behavior explicitly and tests it against CPython: every compiled function is checked against the undecorated one, including on randomly generated programs within the subset.
 
 | Topic | Python | C | scramjit |
 | --- | --- | --- | --- |
-| Integer size | unbounded | fixed | `int64` unless narrowed; overflow wraps |
+| Integer size | unbounded | fixed | `int64` unless narrowed; overflow wraps ([gotcha](gotchas.md#integers-are-64-bit-and-wrap)) |
+| `n ** k`, `k` a negative variable | a float | a C `pow` or a loop | raises `ValueError` ([gotcha](gotchas.md#a-negative-exponent-on-n-k-raises)) |
 | `//` and `%` | round toward negative infinity | truncate toward zero | Python's rule |
 | Negative indices | count from the end | out of bounds | Python's rule |
 | Bounds checks | always | never | on, raising `IndexError`; `boundscheck=False` drops them |

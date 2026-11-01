@@ -108,9 +108,9 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | Numbers and n-D numpy arrays, including dtypes like `uint8` | Dicts, strings, objects |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | Lists that grow with `append` |
 
-`x ** 2` and `a[i] ** 0.5` compile. A Python float to a fractional power (`x ** 0.5`) and an int to a
-variable power (`n ** k`) run as Python, because in Python their result type depends on the values:
-complex for a negative base, float for a negative exponent.
+`x ** 2`, `a[i] ** 0.5` and `n ** k` compile. A Python float to a fractional power (`x ** 0.5`) runs as
+Python, because a negative base gives a complex. A negative `k` in `n ** k` raises `ValueError`, where
+Python gives a float.
 
 A function that can't be compiled runs as Python, with a `FallbackWarning` giving the reason:
 
@@ -174,8 +174,12 @@ ones on a Gray-Scott kernel. `@scram(cache=False)` writes nothing.
 
 Compiled functions are tested against the same functions running undecorated, including on randomly
 generated expressions. This covers floor division and modulo on negatives, `ZeroDivisionError`,
-`IndexError`, `math` domain errors and numpy's scalar rules. The documented difference is that
-integers are 64-bit.
+`IndexError`, `math` domain errors and numpy's scalar rules.
+
+There are two exceptions: integers are 64-bit and wrap, and a negative variable exponent in `n ** k`
+raises `ValueError`. Compiled calls also don't respond to Ctrl-C until they return, skip numpy's
+warnings and `errstate`, and are invisible to debuggers and coverage. See
+[Gotchas](https://www.scramjit.dev/docs/?p=gotchas).
 
 | Option | Default | Effect |
 |:---|:---|:---|

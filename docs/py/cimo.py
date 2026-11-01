@@ -1026,6 +1026,22 @@ def _i_b(a, mn, ops):
     c = _COND[mn[2:] if mn[1] == '.' else mn[1:]]
     a.fixup('CONDBR19', sym, add)
     return 0x54000000 | c
+def _i_csel(a, mn, ops):
+    if len(ops) != 4:
+        raise AssemblerError('%s needs 4 operands' % mn)
+    rd, rn, rm = [_reg(o, 'sd' if mn == 'fcsel' else 'wx') for o in ops[:3]]
+    _same(rd, rn, rm)
+    c = _COND.get(ops[3].strip().lower())
+    if c is None:
+        raise AssemblerError('bad condition %r' % ops[3])
+    if mn == 'fcsel':
+        return 0x1e200c00 | _ftype(rd) << 22 | rm[1] << 16 | c << 12 | rn[1] << 5 | rd[1]
+    return 0x1a800000 | _sf(rd) | rm[1] << 16 | c << 12 | rn[1] << 5 | rd[1]
+def _i_mulh(a, mn, ops):
+    if len(ops) != 3:
+        raise AssemblerError('%s needs 3 operands' % mn)
+    rd, rn, rm = [_reg(o, 'x') for o in ops]
+    return (0x9bc07c00 if mn == 'umulh' else 0x9b407c00) | rm[1] << 16 | rn[1] << 5 | rd[1]
 def _i_cbz(a, mn, ops):
     if len(ops) != 2:
         raise AssemblerError('%s needs 2 operands' % mn)
@@ -1082,7 +1098,7 @@ _INSNS = {
     'and': _i_logic, 'orr': _i_logic, 'eor': _i_logic, 'ands': _i_logic,
     'lsl': _i_shift, 'lsr': _i_shift, 'asr': _i_shift,
     'mul': _i_dp2, 'sdiv': _i_dp2, 'udiv': _i_dp2, 'madd': _i_madd, 'msub': _i_madd,
-    'cbz': _i_cbz, 'cbnz': _i_cbz,
+    'cbz': _i_cbz, 'cbnz': _i_cbz, 'csel': _i_csel, 'fcsel': _i_csel, 'smulh': _i_mulh, 'umulh': _i_mulh,
     'sxtb': _i_ext, 'sxth': _i_ext, 'sxtw': _i_ext, 'uxtb': _i_ext, 'uxth': _i_ext,
     'mov': _i_mov, 'movk': _i_movk, 'movz': _i_movk, 'movn': _i_movk, 'cset': _i_cset,
     'fadd': _i_fp3, 'fsub': _i_fp3, 'fmul': _i_fp3, 'fdiv': _i_fp3, 'fneg': _i_fneg,
@@ -2460,6 +2476,8 @@ omap = [
     (Osltof, Ka, "scvtf %=, %L0"),
     (Oultof, Ka, "ucvtf %=, %L0"),
     (Ocall, Kw, "blr %L0"),
+    (D.Osmulh, Kl, "smulh %=, %0, %1"),
+    (D.Oumulh, Kl, "umulh %=, %0, %1"),
     (Oacmp, Ki, "cmp %0, %1"),
     (Oacmn, Ki, "cmn %0, %1"),
     (Oafcmp, Ka, "fcmpe %0, %1"),
@@ -2810,6 +2828,12 @@ def emitins(i, e):
         e.f.write("\\t%s\\t%s, %s, %s, %s\\n" % ("madd" if op == D.Oamadd else "msub",
                                                rname(rval(i.to), k), rname(rval(m.base), k),
                                                rname(rval(m.index), k), rname(rval(i.arg[0]), k)))
+    elif op == D.Oacsel:
+        m = e.fn.mem[rval(i.arg[1])]
+        k = i.cls
+        e.f.write("\\t%s\\t%s, %s, %s, %s\\n" % ("csel" if KBASE(k) == 0 else "fcsel",
+                                               rname(rval(i.to), k), rname(rval(i.arg[0]), k),
+                                               rname(rval(m.base), k), ctoa[m.offset.i][0]))
     elif op in _FMA:
         m = e.fn.mem[rval(i.arg[1])]
         k = i.cls
@@ -3109,7 +3133,7 @@ from ..defs import (R, RTmp, RCon, NIns, M64, Ins, Con, Mem, CBits, CAddr, SExt,
 from ..util import (err, newtmp, newcon, getcon, chuse, emit, emiti, idup, intern, iscmp,
                     cmpop, salloc, argcls, vgrow)
 from ..parse import printfn
-from ..defs import Tmp0, Oextsw, Oextuw, Osar, Oshr
+from ..defs import Tmp0, Oextsw, Oextuw, Osar, Oshr, Cine
 from .regs import R0
 from .. import ext as _ext
 (Iother, Iplo12, Iphi12, Iplo24, Inlo12, Inhi12, Inlo24) = range(7)
@@ -3492,6 +3516,36 @@ def selmadd(i, fn):
         x.base, x.index = ab
         return True
     return False
+def selcsel(i, fn):
+    d = selpos
+    while selblk.ins[d].op != D.Osel0:
+        d -= 1
+    c = selblk.ins[d].arg[0]
+    cd = _defin(c, d) if rtype(c) == RTmp else None
+    cm = iscmp(cd[1].op) if cd is not None else None
+    k = i.cls
+    x = Mem()
+    fn.nmem += 1
+    vgrow(fn.mem, fn.nmem)
+    fn.mem[fn.nmem - 1] = x
+    x.offset.type = CBits
+    emit(D.Oacsel, k, i.to, i.arg[0], MEM(fn.nmem - 1))
+    iarg = D.insb[D.curi].arg
+    fixarg(iarg, 0, k, 0, fn)
+    b = [i.arg[1]]
+    fixarg(b, 0, k, 0, fn)
+    x.base = b[0]
+    if cm:
+        ck, cc = cm
+        args = list(cd[1].arg)
+        for a in args:
+            chuse(a, +1, fn)
+        if selcmp(args, ck, fn):
+            cc = cmpop(cc)
+    else:
+        cc = Cine
+        selcmp([c, CON_Z], Kw, fn)
+    x.offset.i = cc
 def callable(r, fn):
     if rtype(r) == RTmp:
         return 1
@@ -3525,6 +3579,17 @@ def sel(i, fn):
         return
     if i.op == Ofma1:
         selfma(i, fn)
+        return
+    if i.op == D.Osel1:
+        selcsel(i, fn)
+        return
+    if i.op == D.Osel0:
+        c = i.arg[0]
+        if rtype(c) == RTmp:
+            chuse(c, -1, fn)
+            found = _defin(c, selpos)
+            if found is not None and iscmp(found[1].op):
+                _sweep(c, found[0], fn)
         return
     if i.op == Ofma0:
         return
@@ -4552,8 +4617,8 @@ from .defs import KBASE
 from .cfg import dom
 from .gcm import pinned
 from .gvn import replaceuses
-from .util import newtmp
-_DIV = {D.Odiv: D.Odiv, D.Orem: D.Odiv, D.Oudiv: D.Oudiv, D.Ourem: D.Oudiv}
+from .util import newtmp, getcon
+_DIVOPS = (D.Odiv, D.Orem, D.Oudiv, D.Ourem)
 def nload(fn):
     n = 0
     b = fn.start
@@ -4602,6 +4667,102 @@ def divrem(fn):
             out.append(D.Ins(D.Omul, i.cls, t, d, i.arg[1]))
             out.append(D.Ins(D.Osub, i.cls, i.to, i.arg[0], t))
             changed = True
+        b.ins = out
+        b.nins = len(out)
+    return changed
+def smagic(d, w):
+    ad = abs(d)
+    t = (1 << (w - 1)) + (1 if d < 0 else 0)
+    anc = t - 1 - t % ad
+    p = w - 1
+    while True:
+        p += 1
+        if (1 << p) > anc * (ad - (1 << p) % ad):
+            break
+    m = (1 << p) // ad + 1
+    if m >= 1 << (w - 1):
+        m -= 1 << w
+    return (-m if d < 0 else m), p - w
+def umagic(d, w):
+    l = 0
+    while (1 << l) < d:
+        l += 1
+    for s in range(l):
+        m = -(-(1 << (w + s)) // d)
+        if m < 1 << w and m * d - (1 << (w + s)) <= 1 << s:
+            return m, s, False
+    return ((1 << w) * ((1 << l) - d)) // d + 1, l - 1, True
+def _expand(i, fn, out):
+    c = fn.con[i.arg[1] & D.VMASK] if D.rtype(i.arg[1]) == D.RCon else None
+    if c is None or c.type != D.CBits or D.rtype(i.arg[0]) != D.RTmp:
+        return False
+    k = i.cls
+    wide = k == D.Kl
+    w = 64 if wide else 32
+    signed = i.op in (D.Odiv, D.Orem)
+    d = c.i & ((1 << w) - 1)
+    if signed and d >> (w - 1):
+        d -= 1 << w
+    ad = abs(d)
+    pow2 = ad & (ad - 1) == 0
+    if ad < 2 or (pow2 and not signed):
+        return False
+    a = i.arg[0]
+    def op(o, x, y=D.R, cls=k):
+        r = newtmp('dc', cls, fn)
+        out.append(D.Ins(o, cls, r, x, y))
+        return r
+    def con(n):
+        return getcon(D.s64(n), fn)
+    if pow2:
+        s = 0
+        while (1 << s) < ad:
+            s += 1
+        q = op(D.Oshr, op(D.Osar, a, con(w - 1)), con(w - s))
+        q = op(D.Osar, op(D.Oadd, a, q), con(s))
+        if d < 0:
+            q = op(D.Oneg, q)
+    elif signed:
+        m, s = smagic(d, w)
+        if wide:
+            h = op(D.Osmulh, a, con(m))
+        else:
+            h = op(D.Osar, op(D.Omul, op(D.Oextsw, a, cls=D.Kl), con(m), cls=D.Kl), con(32), cls=D.Kl)
+        q = h
+        if d > 0 > m:
+            q = op(D.Oadd, q, a)
+        elif d < 0 < m:
+            q = op(D.Osub, q, a)
+        if s:
+            q = op(D.Osar, q, con(s))
+        q = op(D.Oadd, q, op(D.Oshr, q, con(w - 1)))
+    else:
+        m, s, add = umagic(d, w)
+        if wide:
+            h = op(D.Oumulh, a, con(m))
+        else:
+            h = op(D.Oshr, op(D.Omul, op(D.Oextuw, a, cls=D.Kl), con(m), cls=D.Kl), con(32), cls=D.Kl)
+        q = h
+        if add:
+            q = op(D.Oadd, op(D.Oshr, op(D.Osub, a, h), con(1)), h)
+        if s:
+            q = op(D.Oshr, q, con(s))
+    if i.op in (D.Orem, D.Ourem):
+        out.append(D.Ins(D.Osub, k, i.to, a, op(D.Omul, q, i.arg[1])))
+    else:
+        out.append(D.Ins(D.Ocopy, k, i.to, q, D.R))
+    return True
+def divconst(fn):
+    changed = False
+    for b in fn.rpo[:fn.nblk]:
+        if not any(i.op in _DIVOPS and KBASE(i.cls) == 0 for i in b.ins[:b.nins]):
+            continue
+        out = []
+        for i in b.ins[:b.nins]:
+            if i.op in _DIVOPS and KBASE(i.cls) == 0 and _expand(i, fn, out):
+                changed = True
+            else:
+                out.append(i)
         b.ins = out
         b.nins = len(out)
     return changed
@@ -4760,7 +4921,7 @@ _OPS = [
     ('blit0', ((Km, Ke, Ke, Ke), (Km, Ke, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1),
     ('blit1', ((Kw, Ke, Ke, Ke), (Kx, Ke, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1),
     ('sel0', ((Kw, Ke, Ke, Ke), (Kx, Ke, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1),
-    ('sel1', ((Kw, Kl, Ke, Ke), (Kw, Kl, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1),
+    ('sel1', ((Kw, Kl, Ks, Kd), (Kw, Kl, Ks, Kd)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1),
     ('swap', ((Kw, Kl, Ks, Kd), (Kw, Kl, Ks, Kd)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
     ('sign', ((Kw, Kl, Ke, Ke), (Kx, Kx, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
     ('salloc', ((Ke, Kl, Ke, Ke), (Ke, Kx, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
@@ -4849,8 +5010,11 @@ _OPS += [('getsp', ((Kx, Kx, Kx, Kx), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0,
 _OPS += [(_n, ((Kw, Kl, Ke, Ke), (Kx, Kx, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
          for _n in ('bclz', 'bctz', 'bpopcnt', 'bswap')]
 _OPS += [('bswap16', ((Kw, Ke, Ke, Ke), (Kx, Kx, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]
+_OPS += [(_n, ((Ke, Kl, Ke, Ke), (Ke, Kl, Ke, Ke)), 0, 0, 0, 1, 0, 0, 0, 0, 0, 0)
+         for _n in ('smulh', 'umulh')]
 _OPS += [(_n, ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
          for _n in ('amadd', 'amsub')]
+_OPS += [('acsel', ((Kw, Kl, Ks, Kd), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]
 class Op:
     __slots__ = ('name', 'argcls', 'canfold', 'hasid', 'idval', 'commutes', 'assoc',
                  'idemp', 'cmpeqwl', 'cmplgtewl', 'eqval', 'pinned')
@@ -6397,17 +6561,19 @@ def gvn(fn):
 'backend/ifopt.py': '''\
 import sys
 from . import defs as D
-from .defs import R, Ins, KBASE, Kw, Jjmp, Odbgloc, Onop, Osel0, Osel1
+from .defs import R, RTmp, Ins, KBASE, Kw, Jjmp, Odbgloc, Onop, Osel0, Osel1, rtype, rval
+from . import ext as _ext
 from .util import addins, phiarg
-from .cfg import ifgraph
+from .cfg import ifgraph, fillloop
 from .gcm import pinned
 MaxIns = 2
 MaxPhis = 2
+_COSTLY = (D.Odiv, D.Orem, D.Oudiv, D.Ourem, D.Ofsqrt)
 def okbranch(b):
     n = 0
     for i in b.ins[:b.nins]:
         if i.op != Odbgloc:
-            if pinned(i):
+            if pinned(i) or (_ext.isel and i.op in _COSTLY):
                 return 0
             if i.op != Onop:
                 n += 1
@@ -6416,11 +6582,15 @@ def okjoin(b):
     n = 0
     p = b.phi
     while p:
-        if KBASE(p.cls) != 0:
+        if KBASE(p.cls) != 0 and not _ext.isel:
             return 0
         n += 1
         p = p.link
     return int(n <= MaxPhis)
+def predictable(fn, ifb):
+    if not ifb.loop or rtype(ifb.jmp.arg) != RTmp:
+        return False
+    return fn.rpo[fn.tmp[rval(ifb.jmp.arg)].bid].loop < ifb.loop
 def okgraph(ifb, thenb, elseb, joinb):
     if joinb.npred != 2 or not okjoin(joinb):
         return 0
@@ -6469,12 +6639,14 @@ def ifconvert(fn):
     from .parse import printfn
     if D.debug['K']:
         sys.stderr.write("\\n> If-conversion:\\n")
+    if _ext.isel:
+        fillloop(fn)
     ifb = fn.start
     while ifb:
         g = ifgraph(ifb)
         if g:
             thenb, elseb, joinb = g
-            if okgraph(ifb, thenb, elseb, joinb):
+            if okgraph(ifb, thenb, elseb, joinb) and not (_ext.isel and predictable(fn, ifb)):
                 if D.debug['K']:
                     sys.stderr.write("    @%s -> @%s, @%s -> @%s\\n"
                                      % (ifb.name, thenb.name, elseb.name, joinb.name))
@@ -7023,17 +7195,21 @@ def load(sl, msk, l):
         a = curf.tmp[rval(r)].alias
         if a.type in (ALoc, AEsc, AUnk):
             r = TMP(a.base)
-            if a.offset:
-                r1 = getcon(a.offset, curf)
+            if a.offset + sl.off:
+                r1 = getcon(a.offset + sl.off, curf)
                 r = iins(Kl, Oadd, r, r1, l)
         elif a.type in (ACon, ASym):
             c = Con()
             c.type = CAddr
             c.sym = a.sym.copy()
-            c.i = a.offset
+            c.i = a.offset + sl.off
             r = newcon(c, curf)
         else:
             die("unreachable")
+    elif rtype(r) == RCon and sl.off:
+        c = curf.con[rval(r)].copy()
+        c.i += sl.off
+        r = newcon(c, curf)
     r = iins(cls, ld, r, R, l)
     if not all_:
         r = mask(cls, r, msk, l)
@@ -7395,8 +7571,9 @@ class _Driver:
             loads = cse.nload(fn)
             cfg.filldom(fn)
             merged = cse.domcse(fn)
-            if T.name.startswith('arm64') and cse.divrem(fn):
-                merged = True
+            if T.name.startswith('arm64'):
+                merged = cse.divconst(fn) or merged
+                merged = cse.divrem(fn) or merged
             ssa.filluse(fn)
             alias.fillalias(fn)
             load.loadopt(fn)
@@ -7414,7 +7591,7 @@ class _Driver:
             D.unvolatile(fn)
             T.emitfn(fn, self.outf)
             return
-        if T.cansel:
+        if T.cansel or (ext.isel and T.name.startswith('arm64')):
             ifopt.ifconvert(fn)
             cfg.fillcfg(fn)
             ssa.filluse(fn)
@@ -22494,6 +22671,7 @@ class Analysis:
 from ..backend import defs as D
 from ..backend.defs import R, Kw, Kl, Ins, rval
 from ..backend.util import newtmp, iscmp
+from ..backend import ext as _ext
 from . import ir
 import cimo.middle as M
 MAXARM = 4
@@ -22536,13 +22714,22 @@ def convert_loop(fn, lp):
             continue
         if joinb.npred != 2 or joinb is lp.header or joinb.phi is None:
             continue
-        if any(p.cls not in (Kw, Kl) for p in ir.phis(joinb)):
+        if any(p.cls not in (Kw, Kl) for p in ir.phis(joinb)) and not _ext.isel:
             continue
         out = ir.ins(ifb)
         for b in (tb, fb):
             if b is not ifb:
                 out = out + ir.ins(b)
         c = ifb.jmp.arg
+        if _ext.isel and D.T.name.startswith('arm64'):
+            for p in ir.phis(joinb):
+                out.append(Ins(D.Osel0, Kw, R, c, R))
+                out.append(Ins(D.Osel1, p.cls, p.to, ir.phiargof(p, tb), ir.phiargof(p, fb)))
+            ir.setins(ifb, out)
+            joinb.phi = None
+            ir.setjmp(ifb, joinb)
+            M.count('ifconv')
+            return True
         if not any(i.to == c and iscmp(i.op) is not None for i in out):
             c2 = newtmp('m', Kw, fn)
             out.append(Ins(D.Ocnew, Kw, c2, c, ir.getcon(0, fn)))
@@ -22956,6 +23143,11 @@ class Fast:
                         env[t] = fresh[id(ch)]
                         continue
                 args = [self.opmap(a, k, env, state, closed) if a != R else R for a in i.arg]
+                if i.op == D.Osel0:
+                    sel0 = args[0]
+                    continue
+                if i.op == D.Osel1:
+                    em.ins(Ins(D.Osel0, Kw, R, sel0, R))
                 if ir.isstore(i.op):
                     lm.store(i, args, k, closed)
                     continue
@@ -23663,7 +23855,7 @@ def _init_ops():
     s = set()
     for name in ('add sub neg mul and or xor sar shr shl extsb extub extsh extuh extsw extuw '
                  'exts truncd stosi stoui dtosi dtoui swtof uwtof sltof ultof cast copy '
-                 'fsqrt fabs fmin fmax ffloor fceil ftrunc fround frint fnearbyint').split():
+                 'fsqrt fabs fmin fmax ffloor fceil ftrunc fround frint fnearbyint smulh umulh').split():
         s.add(getattr(D, 'O' + name))
     for o in range(D.Ocmpw, D.Ocmpd1 + 1):
         s.add(o)
@@ -23675,7 +23867,7 @@ def isstore(op):
 def isload(op):
     return D.Oloadsb <= op <= D.Oload
 def isfma(op):
-    return op in (getattr(D, 'Ofma0', -1), getattr(D, 'Ofma1', -1))
+    return op in (D.Ofma0, D.Ofma1, D.Osel0, D.Osel1)
 def copyable(i):
     op = i.op
     return op in PURE or isload(op) or isstore(op) or isfma(op) or op in (D.Onop, D.Odbgloc)
@@ -24336,10 +24528,10 @@ def optimize(fn):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "6788e78d8a909f1e320c",
-"runtime-arm64": "29f1af823a640c502d8f",
-"runtime-arm64_apple": "f94bab62047065482224",
-"runtime-arm64_win": "9db9100ff5ff6ce16eca"
+"compiler": "6a21a7254591dd05ccad",
+"runtime-arm64": "e497ec44e01e8be3d0e5",
+"runtime-arm64_apple": "8efd6b9ad0c33131ad31",
+"runtime-arm64_win": "473eb4808ad87db0d995"
 }
 ''',
 'onefile.py': '''\

@@ -17,6 +17,7 @@
         ["loops-and-builtins", "Loops and builtins"],
         ["containers", "Arrays, lists and tuples"],
         ["semantics", "Semantics"],
+        ["gotchas", "Gotchas"],
         ["errors", "Fallback and errors"],
         ["profiling", "Preflight"]
       ]

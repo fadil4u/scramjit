@@ -24,7 +24,6 @@ HINTS = [
     (r'^sets|^set comp', 'if the values are small integers, use a boolean array indexed by value'),
     (r'^f-strings|calls (str|print|repr|format)\(\)', 'keep text and printing out of the function: return numbers and format them after the call'),
     (r'fractional exponent', 'use `math.pow(x, y)`, which raises instead of giving a complex, `math.sqrt(x)` for a square root, or `@scram(parity=False)` for NaN'),
-    (r'variable exponent', 'write `1 << n` for powers of two, use a float base, or a constant exponent'),
     (r'slices|views', 'loop over the indices you want: for i in range(lo, hi): a[i]'),
     (r'^calls [\w.]*\.\w+\(\)', 'write it as a loop; methods and numpy calls aren\'t compiled'),
     (r'^calls \w+\(\)', 'put its body here, or decorate and call it from Python; a compiled function can\'t call Python functions'),

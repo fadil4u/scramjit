@@ -246,6 +246,7 @@ class Compiler:
         self.uses_libm = False
         self.helpers = set()      # helpers from _mathlib this kernel uses
         self.checks = {}       # Python line -> bounds checks that run each time (for preflight)
+        self.gotchas = {}      # Python line -> a way this line can differ from Python
         self.hoisted_lines = set()   # Python lines whose checks live only in a versioned loop's slow copy
         self.slow_copy = 0     # inside that slow copy
         self.aliases = {}
@@ -518,9 +519,10 @@ class Compiler:
         return r
 
     def pow_type(self, a, b, node):
-        """a ** b. numpy's rules give one type whatever the values; Python's give a float for an int
-        to a negative power, and a complex for a negative float to a fractional power, so those compile
-        only when the code rules them out."""
+        """a ** b. numpy's rules give one type whatever the values. Python's give a float for an int to
+        a negative power, and a complex for a negative float to a fractional power. An int exponent that
+        isn't a constant is assumed nonnegative, and raises if it isn't (a documented difference from
+        Python); a float that could go complex falls back."""
         r = T.arith_result(a, b, 'Pow')
         if r is None:
             self.fail(node, 'arithmetic on numpy bools')
@@ -529,8 +531,8 @@ class Compiler:
         exp = const_number(node.right if isinstance(node, ast.BinOp) else node.value)
         if r.kind == 'int':
             if exp is None:
-                self.fail(node, 'int ** int with a variable exponent: a negative one gives a float, so the '
-                          'type depends on the data')
+                self.gotchas[self.line(node)] = 'raises ValueError if the exponent is negative, where Python gives a float'
+                return r
             if exp >= 0:
                 return r
             if r.np:
@@ -1763,6 +1765,8 @@ class Compiler:
         def python():
             if rt.kind == 'int':
                 self.helpers.add('ipow')
+                if const_number(right) is None:
+                    self.emit(f'if ((int64_t){b} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 16, 0);')
                 self.emit(f'{out} = sj_ipow((int64_t){a}, (int64_t){b});')
             elif not self.exact:
                 fast()

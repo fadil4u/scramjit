@@ -129,10 +129,10 @@ PYTHON = _Python()
 
 
 class Compiled:
-    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted')
+    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas')
 
-    def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=()):
-        self.checks, self.hoisted = checks or {}, hoisted
+    def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None):
+        self.checks, self.hoisted, self.gotchas = checks or {}, hoisted, gotchas or {}
         self.locals = locals_ or {}           # variable -> inferred type name
         self.kernel = kernel
         self.ret = ret
@@ -289,7 +289,7 @@ class Function:
             import numpy
             self._np = numpy
         return Compiled(kernel, c.ret, key, source, _libm_table() if c.uses_libm else None,
-                        {k: t.name for k, t in c.env.items()}, c.checks, c.hoisted_lines)
+                        {k: t.name for k, t in c.env.items()}, c.checks, c.hoisted_lines, c.gotchas)
 
     def _run(self, entry, args):
         cargs = []

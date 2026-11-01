@@ -32,7 +32,7 @@ ema(x, y, 0.1)     # first call: compiles for these argument types, in about 0.1
 ema(x, y, 0.1)     # 3 ms. The plain Python function takes 250 ms.
 ```
 
-That's the whole API. This is the kind of loop numpy can't help with: each step depends on the one
+That's it. This is the kind of loop numpy can't help with: each step depends on the one
 before. `y` is written in place, with no copying, and the result is the same, bit for bit, as
 running the function undecorated.
 

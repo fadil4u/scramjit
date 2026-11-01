@@ -9,11 +9,11 @@
     <rect width="1000" height="260" fill="#080a12"/>
     <rect width="1000" height="260" fill="url(#glow)"/>
     <g fill="none" stroke="url(#flow)" stroke-linecap="round" opacity=".55">
-      <path d="M0 58C260 58 430 112 560 118S860 118 1000 118" stroke-width="1.6"/>
-      <path d="M0 94C260 94 430 122 560 124S860 124 1000 124" stroke-width="1.2" opacity=".7"/>
-      <path d="M0 202C260 202 430 148 560 142S860 142 1000 142" stroke-width="1.6"/>
-      <path d="M0 166C260 166 430 138 560 136S860 136 1000 136" stroke-width="1.2" opacity=".7"/>
-      <path d="M560 130H1000" stroke-width="2.4"/>
+      <path d="M0 34C300 34 450 112 590 118S860 118 1000 118" stroke-width="1.6"/>
+      <path d="M0 58C300 58 470 122 590 124S860 124 1000 124" stroke-width="1.2" opacity=".7"/>
+      <path d="M0 226C300 226 450 148 590 142S860 142 1000 142" stroke-width="1.6"/>
+      <path d="M0 202C300 202 470 138 590 136S860 136 1000 136" stroke-width="1.2" opacity=".7"/>
+      <path d="M590 130H1000" stroke-width="2.4"/>
     </g>
     <g transform="translate(64 80) scale(3.125)">
       <rect width="32" height="32" rx="8" fill="url(#mark)"/>

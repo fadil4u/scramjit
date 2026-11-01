@@ -28,16 +28,11 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
    `for i in range(a, len(x))` with `arr[i + c]` today).
 3. **Store-to-load forwarding:** `y[i]` written then `y[i - 1]` read next iteration; keeping it in
    a register gives `ema` 2.39 ns against 3.07 (cimo doesn't do it).
-4. **Native arm64 is 2.4x slower than Pyodide on an LLM forward pass.** `bench/llm.py`, a llama2.c forward pass as one
-    function of plain loops over float64 arrays (stories15M, single thread): 27 tok/s native, 64.5 in Pyodide
-    with `boundscheck=False, parity=False`. Native gets 27.3 with the default options too, where Pyodide drops
-    to 13.5, so check that those options take effect natively. The C version through cimo doesn't show the gap
-    (70 native, 75 wasm). Compare the generated C and cimo's arm64 output with `gcc -O3` on the same C.
-5. **Loop lifting (M4):** compile the loops that fit inside a function that doesn't, and let Python run the rest,
+4. **Loop lifting (M4):** compile the loops that fit inside a function that doesn't, and let Python run the rest,
    which makes "partly compiled" real. The risk is matching Python when a loop raises partway: every variable
    must hold what it would in plain Python. Build it in small steps with differential tests from the start. It
    also gives "continue in Python", which could remove the `**` errors below.
-6. **Python data structures, nested, when statically sized and statically typed, after the loop work above:** so
+5. **Python data structures, nested, when statically sized and statically typed, after the loop work above:** so
    that containers don't hide speedups we can still get from loops, each step must leave `bench/` unchanged.
    Dicts, lists, tuples, classes and enums that don't resize at runtime and whose element types don't change. See "Containers" in
    `requirements.md`. Today only flat tuples of numbers and flat local lists compile. In this order, simplest
@@ -58,25 +53,30 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
    (an `int` slot given a float); two names for one object (`[[0] * 3] * 2`, one list passed twice),
    since writes must show through both; the cost of checking and copying a whole structure on every call; and
    results that must come back as real Python objects.
-7. **Call boundary cost:** about 1.4 µs with numbers (was 3.2) and 2.4 µs with an array (was 6.6), through
+6. **Call boundary cost:** about 1.4 µs with numbers (was 3.2) and 2.4 µs with an array (was 6.6), through
    a function generated per signature (`_make_plan`). For numbers: ctypes about 450 ns (the floor), cimo's
    `Kernel.__call__` about 450 (see cimo's `TODO.md`), scramjit about 500. In Pyodide about 13 µs, not yet
    broken down. Break-even is 30 to 50 loop iterations per call. Rejected: caching an array's address (saves
    200 ns, but `resize(refcheck=False)` would corrupt memory silently); `__call__` by argument count (100 to
    150 ns, not worth its keyword edge cases).
-8. **SSA for variables that change type** (`x = 1` then `x = 0.5`): today they fall back.
-9. **Rest of M2:** `for ... else`. Then the M2 acceptance check.
-10. **Rest of M3:** run the M0 kernels in Pyodide as a test, not only through the site; preflight's
+7. **SSA for variables that change type** (`x = 1` then `x = 0.5`): today they fall back.
+8. **Rest of M2:** `for ... else`. Then the M2 acceptance check.
+9. **Rest of M3:** run the M0 kernels in Pyodide as a test, not only through the site; preflight's
    per-loop report once cimo exposes one (cimo's `TODO.md`), and a `disk` label in the compile column,
    which needs cimo to say whether a compile hit its cache.
-11. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x` raise today** (see Gotchas). Rerunning
+10. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x` raise today** (see Gotchas). Rerunning
    in Python, for functions that write nothing, or resuming in Python alongside loop lifting would remove
    the difference.
-12. **A NaN's sign differs from CPython's on Windows** (arm64, the only one tried). `inf % 1.0`, `inf // 1.0`
+11. **A NaN's sign differs from CPython's on Windows** (arm64, the only one tried). `inf % 1.0`, `inf // 1.0`
    and `math.atan2(0.0, nan)` give `7ff8...` where CPython gives `fff8...`, and `nan * -1` gives `fff8...`
    where it gives `7ff8...`; `tests/test_m1.py` and `test_m2.py` fail there on these, 7 in all. The values are
    all NaN, and only `math.copysign` or the raw bytes can tell. Likely fix: call the CRT's `fmod` through the
    libm table, as for `sin`, and make the `* -1` negation depend on the platform. Nothing runs scramjit's tests
    on Windows automatically yet.
-13. **Test Ctrl-C on macOS.** `tests/test_interrupt.py` has run on Linux and Windows arm64, not macOS. It
+12. **Test Ctrl-C on macOS.** `tests/test_interrupt.py` has run on Linux and Windows arm64, not macOS. It
    should work, since it uses `signal.set_wakeup_fd` and sockets, but nothing has checked it.
+13. **`parity=False` asks cimo for FMA, and it never happens.** cimo contracts `a * b + c` within one C
+    expression, and scramjit gives each operation its own temporary. Nothing is lost on reductions:
+    FMA makes them slower on arm64 (a `dot` through cimo: 2.15 ns per element with, 1.81 without;
+    `bench/llm.py` through `gcc -O3`: 63 tok/s with, 82 without), probably the latency of the
+    instruction the sum's next add waits on (not measured). Measure non-reductions (stencils) before making it fire or removing it.

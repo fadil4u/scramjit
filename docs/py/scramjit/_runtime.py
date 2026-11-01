@@ -102,11 +102,12 @@ PRELUDE = r'''
 
 #define SJ_FAIL(st, ln, a, b) do { sj_st = (st); sj_ln = (ln); sj_x = (a); sj_y = (b); goto sj_fail; } while (0)
 
-/* int64 arithmetic that wraps instead of being undefined on overflow */
-static inline int64_t sj_add(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }
-static inline int64_t sj_sub(int64_t a, int64_t b) { return (int64_t)((uint64_t)a - (uint64_t)b); }
-static inline int64_t sj_mul(int64_t a, int64_t b) { return (int64_t)((uint64_t)a * (uint64_t)b); }
-static inline int64_t sj_neg(int64_t a) { return (int64_t)(0 - (uint64_t)a); }
+/* int64 arithmetic that wraps instead of being undefined on overflow. Macros, not functions: a
+ * function stops being inlined once its caller is large, and these are one instruction each. */
+#define sj_add(a, b) ((int64_t)((uint64_t)(int64_t)(a) + (uint64_t)(int64_t)(b)))
+#define sj_sub(a, b) ((int64_t)((uint64_t)(int64_t)(a) - (uint64_t)(int64_t)(b)))
+#define sj_mul(a, b) ((int64_t)((uint64_t)(int64_t)(a) * (uint64_t)(int64_t)(b)))
+#define sj_neg(a) ((int64_t)(0 - (uint64_t)(int64_t)(a)))
 static inline int64_t sj_abs(int64_t a) { return a < 0 ? sj_neg(a) : a; }
 
 /* Python's // and % on ints: round toward negative infinity. b != 0. */

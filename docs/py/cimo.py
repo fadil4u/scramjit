@@ -620,12 +620,31 @@ def _same(*regs):
     for r in regs[1:]:
         if r[0] != k:
             raise AssemblerError('operand size mismatch')
+_SHIFTOP = {'lsl': 0, 'lsr': 1, 'asr': 2, 'ror': 3}
+_EXTOP = {'uxtw': 2, 'sxtw': 6}
+def _shiftop(rest):
+    m = re.fullmatch(r'(lsl|lsr|asr|ror|sxtw|uxtw)(?:\\s*#?\\s*(\\d+))?', rest[0].strip().lower())
+    if m is None or len(rest) != 1:
+        raise AssemblerError('bad shift %r' % rest[0])
+    return m.group(1), int(m.group(2) or 0)
 _ADDSUB = {'add': (0, 0), 'adds': (0, 1), 'sub': (1, 0), 'subs': (1, 1)}
 def _addsub(a, op, s, rd, rn, ops3, ops_rest):
     if _isreg(ops3):
         rm = _reg(ops3)
         if ops_rest:
-            raise AssemblerError('shifted/extended register operands are not supported')
+            how, n = _shiftop(ops_rest)
+            if how in _SHIFTOP:
+                if how == 'ror' or rd[2] or rn[2]:
+                    raise AssemblerError('bad shift %r' % ops_rest[0])
+                _same(rd, rn, rm)
+                if not 0 <= n < (64 if rd[0] == 'x' else 32):
+                    raise AssemblerError('shift amount out of range')
+                return (0x0b000000 | _sf(rd) | op << 30 | s << 29 | _SHIFTOP[how] << 22
+                        | rm[1] << 16 | n << 10 | rn[1] << 5 | rd[1])
+            if how not in _EXTOP or rm[0] != 'w' or rd[0] != 'x' or not 0 <= n <= 4:
+                raise AssemblerError('bad extended register %r' % ops_rest[0])
+            return (0x0b200000 | _sf(rd) | op << 30 | s << 29 | rm[1] << 16 | _EXTOP[how] << 13
+                    | n << 10 | rn[1] << 5 | rd[1])
         if rd[2] or rn[2]:
             _same(rd, rn)
             opt = 3 if rd[0] == 'x' else 2
@@ -690,16 +709,23 @@ def _i_neg(a, mn, ops):
     _same(rd, rm)
     return 0x4b0003e0 | _sf(rd) | rm[1] << 16 | rd[1]
 _LOGIC = {'and': (0x0a000000, 0x12000000), 'orr': (0x2a000000, 0x32000000),
-          'eor': (0x4a000000, 0x52000000), 'ands': (0x6a000000, 0x72000000)}
+          'eor': (0x4a000000, 0x52000000), 'ands': (0x6a000000, 0x72000000),
+          'bic': (0x0a200000, None), 'orn': (0x2a200000, None), 'eon': (0x4a200000, None)}
 def _i_logic(a, mn, ops):
-    if len(ops) != 3:
+    if len(ops) not in (3, 4):
         raise AssemblerError('%s needs 3 register/immediate operands' % mn)
     reg_op, imm_op = _LOGIC[mn]
     rn = _reg(ops[1])
     if _isreg(ops[2]):
         rd, rm = _reg(ops[0]), _reg(ops[2])
         _same(rd, rn, rm)
-        return reg_op | _sf(rd) | rm[1] << 16 | rn[1] << 5 | rd[1]
+        how, n = _shiftop(ops[3:]) if len(ops) == 4 else ('lsl', 0)
+        if how not in _SHIFTOP or not 0 <= n < (64 if rd[0] == 'x' else 32):
+            raise AssemblerError('bad shift %r' % ops[3])
+        return (reg_op | _sf(rd) | _SHIFTOP[how] << 22 | rm[1] << 16 | n << 10 | rn[1] << 5
+                | rd[1])
+    if imm_op is None or len(ops) != 3:
+        raise AssemblerError('%s takes registers' % mn)
     rd = _reg(ops[0], sp=mn != 'ands')
     _same(rd, rn)
     width = 64 if rd[0] == 'x' else 32
@@ -728,6 +754,28 @@ def _i_shift(a, mn, ops):
         immr, imms, base = sh, w - 1, (0x53000000 if mn == 'lsr' else 0x13000000)
     n = 1 if w == 64 else 0
     return base | _sf(rd) | n << 22 | immr << 16 | imms << 10 | rn[1] << 5 | rd[1]
+def _i_bitfield(a, mn, ops):
+    if len(ops) != 4:
+        raise AssemblerError('%s needs 4 operands' % mn)
+    rd, rn = _reg(ops[0]), _reg(ops[1])
+    _same(rd, rn)
+    w = 64 if rd[0] == 'x' else 32
+    lsb, width = _imm(ops[2], True), _imm(ops[3], True)
+    if not (0 <= lsb < w and 1 <= width <= w - lsb):
+        raise AssemblerError('bad bit field in %s' % mn)
+    base = 0x53000000 if mn == 'ubfx' else 0x13000000
+    return (base | _sf(rd) | (w == 64) << 22 | lsb << 16 | (lsb + width - 1) << 10 | rn[1] << 5
+            | rd[1])
+def _i_ror(a, mn, ops):
+    if len(ops) != 3:
+        raise AssemblerError('ror needs 3 operands')
+    rd, rn = _reg(ops[0]), _reg(ops[1])
+    _same(rd, rn)
+    n = _imm(ops[2], True)
+    if not 0 <= n < (64 if rd[0] == 'x' else 32):
+        raise AssemblerError('ror amount out of range')
+    return (0x13800000 | _sf(rd) | (rd[0] == 'x') << 22 | rn[1] << 16 | n << 10 | rn[1] << 5
+            | rd[1])
 def _i_dp2(a, mn, ops):
     base = {'sdiv': 0x1ac00c00, 'udiv': 0x1ac00800, 'mul': 0x1b007c00}[mn]
     if len(ops) != 3:
@@ -804,7 +852,7 @@ def _i_cset(a, mn, ops):
 def _ftype(r):
     return {'s': 0, 'd': 1}[r[0]]
 _FP3 = {'fadd': 0x1e202800, 'fsub': 0x1e203800, 'fmul': 0x1e200800, 'fdiv': 0x1e201800,
-        'fmaxnm': 0x1e206800, 'fminnm': 0x1e207800}
+        'fmaxnm': 0x1e206800, 'fminnm': 0x1e207800, 'fnmul': 0x1e208800}
 def _i_fp3(a, mn, ops):
     if len(ops) != 3:
         raise AssemblerError('%s needs 3 operands' % mn)
@@ -845,9 +893,27 @@ def _i_simd(a, mn, ops):
     if not d or not n:
         raise AssemblerError('unsupported operands for %s' % mn)
     return (0x0e205800 if mn == 'cnt' else 0x0e31b800) | int(n.group(1)) << 5 | int(d.group(1))
+def _fpimm8(v):
+    for imm in range(256):
+        sign = -1.0 if imm & 0x80 else 1.0
+        bcd = (imm >> 4) & 7
+        n = bcd + 1 if bcd < 4 else bcd - 7
+        if sign * (16 + (imm & 15)) / 16 * 2.0 ** n == v:
+            return imm
+    return None
 def _i_fmov(a, mn, ops):
     if len(ops) != 2:
         raise AssemblerError('fmov needs 2 operands')
+    if not _isreg(ops[1]):
+        rd = _reg(ops[0], 'sd')
+        t = ops[1].strip().lstrip('#')
+        try:
+            imm = _fpimm8(float(t))
+        except ValueError:
+            imm = None
+        if imm is None:
+            raise AssemblerError('fmov immediate %r has no encoding' % t)
+        return 0x1e201000 | _ftype(rd) << 22 | imm << 13 | rd[1]
     rd, rn = _reg(ops[0], 'wxsd'), _reg(ops[1], 'wxsd')
     fd, fn = rd[0] in 'sd', rn[0] in 'sd'
     if fd and fn:
@@ -1096,13 +1162,15 @@ _INSNS = {
     'add': _i_addsub, 'adds': _i_addsub, 'sub': _i_addsub, 'subs': _i_addsub,
     'cmp': _i_cmp, 'cmn': _i_cmp, 'neg': _i_neg,
     'and': _i_logic, 'orr': _i_logic, 'eor': _i_logic, 'ands': _i_logic,
+    'bic': _i_logic, 'orn': _i_logic, 'eon': _i_logic, 'ubfx': _i_bitfield, 'sbfx': _i_bitfield,
+    'ror': _i_ror,
     'lsl': _i_shift, 'lsr': _i_shift, 'asr': _i_shift,
     'mul': _i_dp2, 'sdiv': _i_dp2, 'udiv': _i_dp2, 'madd': _i_madd, 'msub': _i_madd,
     'cbz': _i_cbz, 'cbnz': _i_cbz, 'csel': _i_csel, 'fcsel': _i_csel, 'smulh': _i_mulh, 'umulh': _i_mulh,
     'sxtb': _i_ext, 'sxth': _i_ext, 'sxtw': _i_ext, 'uxtb': _i_ext, 'uxth': _i_ext,
     'mov': _i_mov, 'movk': _i_movk, 'movz': _i_movk, 'movn': _i_movk, 'cset': _i_cset,
     'fadd': _i_fp3, 'fsub': _i_fp3, 'fmul': _i_fp3, 'fdiv': _i_fp3, 'fneg': _i_fneg,
-    'fminnm': _i_fp3, 'fmaxnm': _i_fp3, 'fabs': _i_fneg, 'fsqrt': _i_fneg, 'frintp': _i_fneg,
+    'fminnm': _i_fp3, 'fmaxnm': _i_fp3, 'fnmul': _i_fp3, 'fabs': _i_fneg, 'fsqrt': _i_fneg, 'frintp': _i_fneg,
     'frintm': _i_fneg, 'frintz': _i_fneg, 'frinta': _i_fneg, 'frintx': _i_fneg,
     'frinti': _i_fneg,
     'clz': _i_dp1, 'rbit': _i_dp1, 'rev16': _i_dp1, 'rev': _i_dp1, 'cnt': _i_simd,
@@ -1869,7 +1937,10 @@ def argsclass(ins, i0, i1, carg, winva=0):
             c.class_ |= Cstk
         elif op in (Oparc, Oargc):
             typclass(c, D.typ[rval(i.arg[0])], gp, fp, winva)
-            if c.align == 16 and c.ngp == 2 and gp & 1 and ngp:
+            if va:
+                c.class_ |= Cstk
+                continue
+            if c.align == 16 and c.ngp == 2 and gp & 1 and ngp and not D.T.apple:
                 c.hole = gpreg[gp]
                 gp += 1
                 ngp -= 1
@@ -2374,6 +2445,7 @@ from ..defs import (R, RTmp, RCon, RSlot, RMem, CBits, CAddr, SGlo, SThr, SExt, 
                     Ocast, Ostosi, Ostoui, Odtosi, Odtoui, Oswtof, Ouwtof, Osltof, Oultof,
                     Ocall, Oacmp, Oacmn, Oafcmp, Onop, Oaddr, Osalloc, Odbgloc, Oafmadd,
                     Oafmsub, Oafnmadd, Oafnmsub)
+from ..defs import bitsd, bitsf
 from ..util import die, isreg, str_
 from ..emit import emitfnlnk, emitdbgloc, elf_emitfnfin
 from .regs import R0, R18, IP1, FP, LR, SP, V0, V30
@@ -2476,6 +2548,7 @@ omap = [
     (Osltof, Ka, "scvtf %=, %L0"),
     (Oultof, Ka, "ucvtf %=, %L0"),
     (Ocall, Kw, "blr %L0"),
+    (D.Oafnmul, Ka, "fnmul %=, %0, %1"),
     (D.Osmulh, Kl, "smulh %=, %0, %1"),
     (D.Oumulh, Kl, "umulh %=, %0, %1"),
     (Oacmp, Ki, "cmp %0, %1"),
@@ -2502,6 +2575,10 @@ omap = [
 ]
 V31 = 0x1fffffff
 _FMA = {Oafmadd: "fmadd", Oafmsub: "fmsub", Oafnmadd: "fnmadd", Oafnmsub: "fnmsub"}
+def _zr(r, k):
+    if rtype(r) == RCon:
+        return "wzr" if k == Kw else "xzr"
+    return rname(rval(r), k)
 def rname(r, k):
     if r == SP:
         assert k == Kl
@@ -2597,8 +2674,12 @@ def emitf(s, i, e):
                 f.write(rname(V31, k))
         elif c == '=' or c == '0':
             r = i.to if c == '=' else i.arg[0]
-            assert isreg(r) or req(r, TMP(V31))
-            f.write(rname(rval(r), k))
+            if c == '0' and rtype(r) == RCon:
+                assert e.fn.con[rval(r)].i == 0
+                f.write("wzr" if k == Kw else "xzr")
+            else:
+                assert isreg(r) or req(r, TMP(V31))
+                f.write(rname(rval(r), k))
         elif c == '1':
             r = i.arg[1]
             t = rtype(r)
@@ -2827,7 +2908,34 @@ def emitins(i, e):
         k = i.cls
         e.f.write("\\t%s\\t%s, %s, %s, %s\\n" % ("madd" if op == D.Oamadd else "msub",
                                                rname(rval(i.to), k), rname(rval(m.base), k),
-                                               rname(rval(m.index), k), rname(rval(i.arg[0]), k)))
+                                               rname(rval(m.index), k), _zr(i.arg[0], k)))
+    elif op == D.Oaalu:
+        m = e.fn.mem[rval(i.arg[1])]
+        k = i.cls
+        how = m.scale >> 4
+        x = rname(rval(m.base), Kw if how >= 4 else k)
+        n = m.offset.i
+        e.f.write("\\t%s\\t%s, %s, %s%s\\n" % (
+            ("add", "sub", "and", "orr", "eor", "bic", "orn", "eon")[m.scale & 15],
+            rname(rval(i.to), k), _zr(i.arg[0], k), x,
+            (", %s #%d" % (("lsl", "lsr", "asr", "ror", "sxtw", "uxtw")[how], n)) if n or how >= 4 else ""))
+    elif op == D.Oaubfx or op == D.Oasbfx:
+        k = i.cls
+        c = e.fn.con[rval(i.arg[1])].i
+        e.f.write("\\t%s\\t%s, %s, #%d, #%d\\n" % ("ubfx" if op == D.Oaubfx else "sbfx", rname(rval(i.to), k),
+                                                 rname(rval(i.arg[0]), k), c & 255, c >> 8))
+    elif op == D.Oaror:
+        k = i.cls
+        e.f.write("\\tror\\t%s, %s, #%d\\n" % (rname(rval(i.to), k), rname(rval(i.arg[0]), k),
+                                             e.fn.con[rval(i.arg[1])].i))
+    elif op == D.Oafcon:
+        k = i.cls
+        bits = e.fn.con[rval(i.arg[0])].i
+        if bits == 0:
+            e.f.write("\\tfmov\\t%s, %s\\n" % (rname(rval(i.to), k), "xzr" if k == Kd else "wzr"))
+        else:
+            v = bitsd(bits) if k == Kd else bitsf(bits)
+            e.f.write("\\tfmov\\t%s, #%s\\n" % (rname(rval(i.to), k), repr(v)))
     elif op == D.Oacsel:
         m = e.fn.mem[rval(i.arg[1])]
         k = i.cls
@@ -2898,7 +3006,7 @@ def emitinsl(ins, e):
     k = 0
     n = len(ins)
     while k < n:
-        if _ext.ldp and k + 1 < n and emitpair(ins[k], ins[k + 1], e):
+        if _ext.ldp and not e.fn.hasvolatile and k + 1 < n and emitpair(ins[k], ins[k + 1], e):
             k += 2
             continue
         emitins(ins[k], e)
@@ -3120,6 +3228,7 @@ def arm64_emitfn(fn, out):
         elf_emitfnfin(fn.name, out)
 ''',
 'backend/arm64/isel.py': '''\
+import struct
 import sys
 from .. import defs as D
 from ..defs import (R, RTmp, RCon, NIns, M64, Ins, Con, Mem, CBits, CAddr, SExt, SThr,
@@ -3133,7 +3242,7 @@ from ..defs import (R, RTmp, RCon, NIns, M64, Ins, Con, Mem, CBits, CAddr, SExt,
 from ..util import (err, newtmp, newcon, getcon, chuse, emit, emiti, idup, intern, iscmp,
                     cmpop, salloc, argcls, vgrow)
 from ..parse import printfn
-from ..defs import Tmp0, Oextsw, Oextuw, Osar, Oshr, Cine
+from ..defs import Tmp0, Oextsw, Oextuw, Osar, Oshr, Cine, Kd
 from .regs import R0
 from .. import ext as _ext
 (Iother, Iplo12, Iphi12, Iplo24, Inlo12, Inhi12, Inlo24) = range(7)
@@ -3209,8 +3318,20 @@ def _newfpcon(s, fn):
     fn.con[fn.ncon - 1] = c
     c.sym.id = intern("\\"%sfp%d\\"" % (D.T.asloc, s))
     return fn.ncon - 1
+_FPIMM = {Kd: {}, D.Ks: {}}
+for _i in range(256):
+    _e = (_i >> 4) & 7
+    _v = (-1.0 if _i & 0x80 else 1.0) * (16 + (_i & 15)) / 16 * 2.0 ** (_e + 1 if _e < 4 else _e - 7)
+    _FPIMM[Kd][struct.unpack('<q', struct.pack('<d', _v))[0]] = _v
+    _FPIMM[D.Ks][struct.unpack('<I', struct.pack('<f', _v))[0]] = _v
+del _i, _e, _v
 def emitfcon(fn):
     for n in range(nfcon):
+        if _ext.isel:
+            bits = fcon[n].bits
+            if bits == 0 or bits in _FPIMM[fcon[n].k]:
+                emit(D.Oafcon, fcon[n].k, fcon[n].tmp, getcon(bits, fn), R)
+                continue
         s = _stashbits(fcon[n].bits, 8 if KWIDE(fcon[n].k) else 4)
         ci = _newfpcon(s, fn)
         r = newtmp("isel", Kl, fn)
@@ -3516,6 +3637,180 @@ def selmadd(i, fn):
         x.base, x.index = ab
         return True
     return False
+ALU = {Oadd: 0, Osub: 1, Oand: 2, Oor: 3, Oxor: 4}
+ALU_NOT = {Oand: 5, Oor: 6, Oxor: 7}
+SH_LSL, SH_LSR, SH_ASR, SH_ROR, SH_SXTW, SH_UXTW = range(6)
+def _only(r, fn):
+    if not _plain(r, fn) or fn.tmp[rval(r)].nuse != 1:
+        return None
+    return _defin(r, selpos)
+def _conbits(r, fn):
+    if rtype(r) != RCon or fn.con[rval(r)].type != CBits:
+        return None
+    return fn.con[rval(r)].i
+def _shifted(r, k, wantext, fn):
+    found = _only(r, fn)
+    if found is None:
+        return None
+    di = found[1]
+    if di.cls != k or not _plain(di.arg[0], fn):
+        return None
+    w = 64 if k == Kl else 32
+    if wantext and k == Kl and di.op in (Oextsw, Oextuw):
+        return di.arg[0], SH_SXTW if di.op == Oextsw else SH_UXTW, 0, di
+    n = _conbits(di.arg[1], fn)
+    if n is None:
+        return None
+    if di.op == Omul:
+        l = log2p(n)
+        return (di.arg[0], SH_LSL, l, di) if l > 0 else None
+    how = {Oshl: SH_LSL, Oshr: SH_LSR, Osar: SH_ASR}.get(di.op)
+    if how is None or not 0 < n & (w - 1):
+        return None
+    if wantext and k == Kl and how == SH_LSL and n <= 4:
+        ex = _only(di.arg[0], fn)
+        if ex is not None and ex[1].op in (Oextsw, Oextuw) and _plain(ex[1].arg[0], fn):
+            e = ex[1]
+            kind = SH_SXTW if e.op == Oextsw else SH_UXTW
+            x = e.arg[0]
+            e.set(Ins(Onop))
+            chuse(x, 0, fn)
+            return x, kind, n, di
+    return di.arg[0], how, n & (w - 1), di
+def _aalu(i, a, alu, how, n, x, fn):
+    m = Mem()
+    fn.nmem += 1
+    vgrow(fn.mem, fn.nmem)
+    fn.mem[fn.nmem - 1] = m
+    m.base = x
+    m.scale = alu | how << 4
+    m.offset.type = CBits
+    m.offset.i = n
+    emit(D.Oaalu, i.cls, i.to, a, MEM(fn.nmem - 1))
+def selalu(i, fn):
+    k = i.cls
+    if i.op == Oxor and _conbits(i.arg[1], fn) in (-1, 0xffffffff if k == Kw else -1) \\
+            and _plain(i.arg[0], fn):
+        _aalu(i, CON_Z, 6, SH_LSL, 0, i.arg[0], fn)
+        return True
+    order = ((1, 0),) if i.op == Osub else ((1, 0), (0, 1))
+    for bn, an in order:
+        a, b = i.arg[an], i.arg[bn]
+        if not _plain(a, fn):
+            continue
+        if i.op in ALU_NOT:
+            found = _only(b, fn)
+            if found is not None and found[1].op == Oxor and found[1].cls == k \\
+                    and _conbits(found[1].arg[1], fn) in (-1, 0xffffffff if k == Kw else -1) \\
+                    and _plain(found[1].arg[0], fn):
+                x = found[1].arg[0]
+                found[1].set(Ins(Onop))
+                _aalu(i, a, ALU_NOT[i.op], SH_LSL, 0, x, fn)
+                return True
+        s = _shifted(b, k, i.op in (Oadd, Osub), fn) if selblk.loop <= 1 else None
+        if s is not None:
+            x, how, n, di = s
+            di.set(Ins(Onop))
+            _aalu(i, a, ALU[i.op], how, n, x, fn)
+            return True
+    return False
+def selbits(i, fn):
+    k = i.cls
+    w = 64 if k == Kl else 32
+    if i.op == Oand:
+        m = _conbits(i.arg[1], fn)
+        if m is None:
+            return False
+        m &= (1 << w) - 1
+        if m == 0 or m & (m + 1):
+            return False
+        width = 0
+        while m >> width:
+            width += 1
+        found = _only(i.arg[0], fn)
+        if found is None or found[1].op not in (Oshr, Osar) or found[1].cls != k \\
+                or not _plain(found[1].arg[0], fn):
+            return False
+        lsb = _conbits(found[1].arg[1], fn)
+        if lsb is None or not 0 < lsb < w or lsb + width > w:
+            return False
+        x = found[1].arg[0]
+        found[1].set(Ins(Onop))
+        emit(D.Oaubfx, k, i.to, x, getcon(lsb | width << 8, fn))
+        return True
+    if i.op in (Osar, Oshr):
+        b = _conbits(i.arg[1], fn)
+        found = _only(i.arg[0], fn)
+        if b is None or found is None or found[1].op != Oshl or found[1].cls != k \\
+                or not _plain(found[1].arg[0], fn):
+            return False
+        a = _conbits(found[1].arg[1], fn)
+        if a is None or not 0 < a <= b < w:
+            return False
+        x = found[1].arg[0]
+        found[1].set(Ins(Onop))
+        emit(D.Oasbfx if i.op == Osar else D.Oaubfx, k, i.to, x, getcon((b - a) | (w - b) << 8, fn))
+        return True
+    if i.op == Oor:
+        for l, r in ((i.arg[0], i.arg[1]), (i.arg[1], i.arg[0])):
+            fl, fr = _only(l, fn), _only(r, fn)
+            if fl is None or fr is None or fl[1].op != Oshl or fr[1].op != Oshr \\
+                    or fl[1].cls != k or fr[1].cls != k or fl[1].arg[0] != fr[1].arg[0] \\
+                    or not _plain(fl[1].arg[0], fn):
+                continue
+            a, b = _conbits(fl[1].arg[1], fn), _conbits(fr[1].arg[1], fn)
+            if a is None or b is None or not 0 < a < w or a + b != w:
+                continue
+            x = fl[1].arg[0]
+            fl[1].set(Ins(Onop))
+            fr[1].set(Ins(Onop))
+            chuse(x, -1, fn)
+            emit(D.Oaror, k, i.to, x, getcon(b, fn))
+            return True
+    return False
+_EXTLOAD = {Oextsw: {Oloadsw: Oloadsw, Oloaduw: Oloadsw, Oloadsb: Oloadsb, Oloadsh: Oloadsh,
+                     Oloadub: Oloadub, Oloaduh: Oloaduh},
+            Oextuw: {Oloadsw: Oloaduw, Oloaduw: Oloaduw, Oloadub: Oloadub, Oloaduh: Oloaduh},
+            D.Oextsb: {Oloadsb: Oloadsb}, D.Oextub: {Oloadub: Oloadub},
+            D.Oextsh: {Oloadsh: Oloadsh}, D.Oextuh: {Oloaduh: Oloaduh}}
+def selextload(i, fn):
+    found = _only(i.arg[0], fn)
+    if found is None or found[1].cls != Kw:
+        return False
+    op = _EXTLOAD[i.op].get(found[1].op)
+    if op is None:
+        return False
+    di = found[1]
+    di.op = op
+    di.cls = i.cls
+    di.to = i.to
+    return True
+def selneg(i, fn):
+    found = _only(i.arg[0], fn)
+    if found is None or found[1].op != Omul or found[1].cls != i.cls:
+        return False
+    di = found[1]
+    if KBASE(i.cls) == 1:
+        a, b = list(di.arg)
+        di.set(Ins(Onop))
+        emit(D.Oafnmul, i.cls, i.to, a, b)
+        iarg = D.insb[D.curi].arg
+        fixarg(iarg, 0, i.cls, 0, fn)
+        fixarg(iarg, 1, i.cls, 0, fn)
+        return True
+    if any(rtype(a) == RCon and log2p(fn.con[rval(a)].i) >= 0 for a in di.arg):
+        return False
+    ab = list(di.arg)
+    di.set(Ins(Onop))
+    x = Mem()
+    fn.nmem += 1
+    vgrow(fn.mem, fn.nmem)
+    fn.mem[fn.nmem - 1] = x
+    emit(D.Oamsub, i.cls, i.to, CON_Z, MEM(fn.nmem - 1))
+    fixarg(ab, 0, i.cls, 0, fn)
+    fixarg(ab, 1, i.cls, 0, fn)
+    x.base, x.index = ab
+    return True
 def selcsel(i, fn):
     d = selpos
     while selblk.ins[d].op != D.Osel0:
@@ -3544,6 +3839,7 @@ def selcsel(i, fn):
             cc = cmpop(cc)
     else:
         cc = Cine
+        chuse(c, +1, fn)
         selcmp([c, CON_Z], Kw, fn)
     x.offset.i = cc
 def callable(r, fn):
@@ -3594,8 +3890,30 @@ def sel(i, fn):
     if i.op == Ofma0:
         return
     immarg = False
-    if _ext.isel and i.op in (Oadd, Osub) and KBASE(i.cls) == 0 and selmadd(i, fn):
-        return
+    if _ext.isel:
+        if i.op in (Oadd, Osub) and KBASE(i.cls) == 0 and selmadd(i, fn):
+            return
+        if i.op in ALU and KBASE(i.cls) == 0:
+            if selbits(i, fn) or selalu(i, fn):
+                return
+        elif i.op in (Oshr, Osar) and selbits(i, fn):
+            return
+        elif i.op == Oneg and selneg(i, fn):
+            return
+        elif i.op in _EXTLOAD and KBASE(i.cls) == 0 and (i.cls == Kl or i.op not in (Oextsw, Oextuw)) \\
+                and selextload(i, fn):
+            return
+        if isstore(i.op) and _conbits(i.arg[0], fn) == 0:
+            if i.op == Ostores:
+                i.op = Ostorew
+            elif i.op == Ostored:
+                i.op = Ostorel
+            foldaddr(i.arg, 1, accsize(i), fn)
+            foldindex(i.arg, 1, accsize(i), fn)
+            emiti(i)
+            iarg = D.insb[D.curi].arg
+            fixarg(iarg, 1, Kl, 0, fn)
+            return
     if KBASE(i.cls) == 0 and rtype(i.arg[1]) == RCon \\
             and fn.con[rval(i.arg[1])].type == CBits:
         c = fn.con[rval(i.arg[1])]
@@ -3713,7 +4031,7 @@ def arm64_isel(fn):
         if b is fn.start:
             break
         b = b.link
-    if _ext.ldp:
+    if _ext.ldp and not fn.hasvolatile:
         from .pair import schedule
         schedule(fn)
     if D.debug['I']:
@@ -5045,6 +5363,12 @@ _OPS += [(_n, ((Ke, Kl, Ke, Ke), (Ke, Kl, Ke, Ke)), 0, 0, 0, 1, 0, 0, 0, 0, 0, 0
          for _n in ('smulh', 'umulh')]
 _OPS += [(_n, ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
          for _n in ('amadd', 'amsub')]
+_OPS += [('aalu', ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('aubfx', ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('asbfx', ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('aror', ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('afnmul', ((Ke, Ke, Ks, Kd), (Ke, Ke, Ks, Kd)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('afcon', ((Kx, Kx, Kx, Kx), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]
 _OPS += [('acsel', ((Kw, Kl, Ks, Kd), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]
 class Op:
     __slots__ = ('name', 'argcls', 'canfold', 'hasid', 'idval', 'commutes', 'assoc',
@@ -5098,11 +5422,13 @@ def unvolatile(fn, sink=None):
     while b:
         for i in b.ins:
             if Ovloadsb <= i.op <= Ovload:
+                fn.hasvolatile = True
                 i.op = Oloadsb + i.op - Ovloadsb
                 if sink is not None and rtype(i.to) == RTmp and fn.tmp[rval(i.to)].nuse == 0:
                     i.to = sink
                     i.cls = Kw if i.cls in (Kw, Ks) else Kl
             elif Ovstoreb <= i.op <= Ovstored:
+                fn.hasvolatile = True
                 i.op = Ostoreb + i.op - Ovstoreb
         b = b.link
 def isalloc(o): return Oalloc4 <= o <= Oalloc16
@@ -5349,12 +5675,13 @@ class Lnk:
 class Fn:
     __slots__ = ('start', 'tmp', 'con', 'mem', 'ntmp', 'ncon', 'nmem', 'nblk', 'retty',
                  'retr', 'rpo', 'reg', 'slot', 'salign', 'vararg', 'dynalloc', 'leaf',
-                 'name', 'lnk', 'concache')
+                 'name', 'lnk', 'concache', 'hasvolatile')
     def __init__(self):
         self.start = None
         self.tmp = []
         self.con = []
         self.concache = None
+        self.hasvolatile = False
         self.mem = []
         self.ntmp = 0
         self.ncon = 0
@@ -7103,7 +7430,7 @@ def filllive(f):
 import sys
 from functools import cmp_to_key
 from . import defs as D
-from .defs import (R, RTmp, RCon, RInt, M64, CAddr, Con, Ins, Phi, Kw, Kl, Ks, Kd,
+from .defs import (R, RTmp, RCon, RInt, M64, KBASE, CAddr, Con, Ins, Phi, Kw, Kl, Ks, Kd,
                    ALoc, AEsc, AUnk, ACon, ASym, NoAlias, MayAlias, MustAlias,
                    Oloadsb, Oloadub, Oloadsh, Oloaduh, Oloadsw, Oloaduw, Oload,
                    Ostoreb, Ostoreh, Ostorew, Ostorel, Ostores, Ostored, Ocast, Oextuw,
@@ -7221,6 +7548,8 @@ def load(sl, msk, l):
         cls = sl.cls
     else:
         cls = Kl if sl.sz > 4 else Kw
+    if KBASE(cls) == 1:
+        ld = Oload
     r = sl.ref
     if rtype(r) == RTmp:
         a = curf.tmp[rval(r)].alias
@@ -7335,7 +7664,8 @@ def def_(sl, msk, b, i, il):
             if (msk1 & msk) == 0:
                 continue
             if ins.op == Oblit0:
-                r = def_(sl1, MASK(sz), b, i, il)
+                il1 = il if il.type != LLoad else Loc(LNoLoad, il.off, il.blk)
+                r = def_(sl1, MASK(sz), b, i, il1)
                 if r == R:
                     return Load()
             if off:
@@ -11686,7 +12016,9 @@ import sys
 import time
 from .parse import Command, UsageError
 from . import report
-_PY = {'w': 'int32', 'l': 'int64|pointer', 's': 'float32', 'd': 'float64', '...': '...'}
+_PY = {'w': 'int32', 'l': 'int64|pointer', 's': 'float32', 'd': 'float64', '...': '...',
+       'W': 'uint32', 'L': 'uint64',
+       'sb': 'int8', 'ub': 'uint8', 'sh': 'int16', 'uh': 'uint16'}
 def _pytype(k):
     return _PY.get(k, 'struct' if k.startswith(':') else k)
 def build_tree():
@@ -12134,10 +12466,13 @@ def version_text():
                                            sys.platform, platform.machine())
 ''',
 'cli/completion.py': '''\
-BASH = r\'''# cimo completion for bash: add to ~/.bashrc, or: source <(cimo completion bash)
+BASH = r\'''# cimo completion for bash: add to ~/.bashrc, or: eval "$(cimo completion bash)"
 _cimo() {
-    local cur=${COMP_WORDS[COMP_CWORD]} IFS=$'\\n' kind=
-    local out=($(cimo __complete "${COMP_WORDS[@]:1:COMP_CWORD}" 2>/dev/null))
+    local cur=${COMP_WORDS[COMP_CWORD]} kind= out
+    # sliced before IFS changes: bash 3.2 (macOS's) joins a quoted slice into one word
+    # when IFS has no space
+    local words=("${COMP_WORDS[@]:1:COMP_CWORD}") IFS=$'\\n'
+    out=($(cimo __complete "${words[@]}" 2>/dev/null))
     if (( ${#out[@]} )) && [[ ${out[${#out[@]}-1]} == __*__ ]]; then
         kind=${out[${#out[@]}-1]}
         unset "out[${#out[@]}-1]"
@@ -12893,7 +13228,9 @@ int __cimo_overflow(int, unsigned long long, int, unsigned long long, int, void 
 #define __builtin_umull_overflow(a, b, r) __cimo_ovft(2, unsigned long, a, b, r)
 #define __builtin_umulll_overflow(a, b, r) __cimo_ovft(2, unsigned long long, a, b, r)
 \'''
-_CTYPE = {'w': ctypes.c_int32, 'l': ctypes.c_int64, 's': ctypes.c_float, 'd': ctypes.c_double}
+_CTYPE = {'w': ctypes.c_int32, 'l': ctypes.c_int64, 's': ctypes.c_float, 'd': ctypes.c_double,
+          'W': ctypes.c_uint32, 'L': ctypes.c_uint64,
+          'sb': ctypes.c_int8, 'ub': ctypes.c_uint8, 'sh': ctypes.c_int16, 'uh': ctypes.c_uint16}
 _SIG = re.compile(r'^export\\s*\\nfunction\\s+(?:([wlsd]|:[\\w.]+)\\s+)?\\$(\\w+)\\(([^)]*)\\)', re.M)
 class CompileError(Exception):
     pass
@@ -13071,11 +13408,16 @@ def _check_machine():
 def _preprocess(src, filename='<string>', include_dirs=(), host_headers=False, defines=(),
                 target=None):
     from .preprocessor import preprocess, PreprocessError
+    warn = None
     if host_headers:
         include_dirs = tuple(include_dirs) + tuple(_host_include_dirs())
+    if (target or TARGET) == 'arm64_apple':
+        def warn(msg):
+            if not msg.endswith('#warning "Unsupported compiler detected"'):
+                sys.stderr.write(msg + '\\n')
     try:
         return preprocess(_PRELUDE + '#line 1\\n' + src, filename, include_dirs=include_dirs,
-                          defines=list(defines) or None,
+                          defines=list(defines) or None, warn=warn,
                           target=target or TARGET, keep_attributes=True)
     except PreprocessError as e:
         raise CompileError(_hint(str(e), host_headers)) from None
@@ -13108,15 +13450,17 @@ def _compile(pp, filename, host_headers):
     with _compile_lock:
         ssa, params = _ir(pp, filename, host_headers)
         text = _qbe(ssa, params, stkchk=_exe.stack_checked(ssa))
-        sigs = _sigs(ssa)
+        sigs = _sigs(ssa, params)
         if _WINDOWS:
             from .frontend.diag import longexterns
             names = longexterns()
             if names:
                 sigs += ('\\n' if sigs else '') + '#long ' + ' '.join(names)
     return text, sigs
-def _sigs(ssa):
-    return '\\n'.join('%s %s %s' % (m.group(2), m.group(1) or '-',
+def _sigs(ssa, params=None):
+    unsigned = (params or {}).get('#unsigned', ())
+    return '\\n'.join('%s %s %s' % (m.group(2), (m.group(1) or '-').upper() if m.group(2) in unsigned
+                                   else m.group(1) or '-',
                                    ','.join(a.split()[0] for a in m.group(3).split(',')
                                             if a.strip()))
                      for m in _SIG.finditer(ssa))
@@ -14240,8 +14584,9 @@ class Bitfield(tuple):
     after = property(lambda self: self[1])
 BITS0 = Bitfield(0, 0)
 class Member(object):
-    __slots__ = ('name', 'type', 'qual', 'offset', 'bits', 'next')
+    __slots__ = ('name', 'type', 'qual', 'offset', 'bits', 'next', 'alignas')
     def __init__(self):
+        self.alignas = 0
         self.name = None
         self.type = None
         self.qual = 0
@@ -14263,13 +14608,14 @@ def listremove(lst):
     lst.prev.next = lst.next
     lst.next = lst.prev = None
 class Type(object):
-    __slots__ = ('kind', 'prop', 'align', 'size', 'value', 'base', 'link', 'qual', 'incomplete',
+    __slots__ = ('fieldalign', 'kind', 'prop', 'align', 'size', 'value', 'base', 'link', 'qual', 'incomplete',
                  'issigned', 'iscomplex', 'width', 'length', 'ptrqual', 'asize',
                  'isvararg', 'params', 'nparam', 'tag', 'members')
     def __init__(self, kind=TYPENONE, prop=0, size=0, align=0, issigned=False, width=0,
                  base=None, incomplete=False, tag=None):
         self.kind = kind
         self.prop = prop
+        self.fieldalign = None
         self.align = align
         self.size = size
         self.value = None
@@ -14607,8 +14953,15 @@ def tagspec(s):
         if not t.members:
             error(tok.loc, "struct/union has no members")
         next()
-        if not b.pack:
-            t.size = ALIGNUP(t.size, t.align)
+        ta = Attr()
+        ta.kind = 0
+        if A.gnuattr(ta, allowedattr | ATTRALIGNED):
+            if ta.kind & ATTRPACKED and not b.pack:
+                _repack(t)
+            t.fieldalign = t.align
+            if ta.kind & ATTRALIGNED and ta.align > t.align:
+                t.align = ta.align
+        t.size = ALIGNUP(t.size, t.align)
     elif t.kind == TYPEENUM:
         enumconsts = None
         if et:
@@ -15130,6 +15483,7 @@ def addmember(b, mt, name, align, width):
         before = 0
         after = 0
         m.bits = BITS0
+        m.alignas = align
         if align < mt.type.align:
             if align:
                 error(tok.loc, "specified alignment of struct member '%s' is less strict than is required by type", name)
@@ -15173,6 +15527,29 @@ def addmember(b, mt, name, align, width):
                 t.size = mt.type.size
     if m and t.align < align:
         t.align = align
+def _repack(t):
+    end = 0
+    size = 0
+    align = 1
+    m = t.members
+    while m:
+        if m.bits != BITS0:
+            error(tok.loc, "bit-field '%s' in packed struct is not supported", m.name)
+        al = m.alignas or 1
+        if t.kind == TYPESTRUCT:
+            if m.offset != ALIGNUP(end, max(al, m.type.align)):
+                error(tok.loc, "bit-field padding before member '%s' in packed struct is not "
+                      "supported", m.name)
+            end = m.offset + m.type.size
+            m.offset = ALIGNUP(size, al)
+            size = m.offset + m.type.size
+        elif size < m.type.size:
+            size = m.type.size
+        if align < al:
+            align = al
+        m = m.next
+    t.size = size
+    t.align = align
 def _short(v):
     v &= 0xffff
     return v - 0x10000 if v & 0x8000 else v
@@ -17329,7 +17706,8 @@ def _run(inputs, target, pponly):
         while tok.kind != TEOF:
             if not D.decl(SC.filescope, None):
                 if tok.kind == TSEMICOLON:
-                    TK.error(tok.loc, "unexpected ';' at top-level")
+                    PP.next()
+                    continue
                 if U.diagnostics:
                     DG.unknowntype()
                 TK.error(tok.loc, "expected declaration or function definition")
@@ -18294,6 +18672,11 @@ def qbetype(t):
     if sz == 16:
         U.fatal("long double is not yet supported")
     assert 0
+def abiclass(t):
+    qt = qbetype(t)
+    if qt.data in ('b', 'h') and TG.targ.name == 'aarch64-apple':
+        return ('s' if t.issigned else 'u') + qt.data
+    return qt.base
 def functemp(f, v):
     v.kind = VALUE_TEMP
     v.name = None
@@ -18949,7 +19332,8 @@ def funcexpr(f, e):
             if ftype.isvararg and i == ftype.nparam:
                 funcinst(f, IVARARG, 0, None, None)
             t = arg.type
-            funcinst(f, IARG, qbetype(t).base, argvals[i], t.value)
+            funcinst(f, IARG, abiclass(t) if i < ftype.nparam else qbetype(t).base,
+                     argvals[i], t.value)
             arg = arg.next
             i += 1
         if ftype.isvararg and i <= ftype.nparam and TG.targ.name == 'aarch64-windows':
@@ -19284,8 +19668,11 @@ def emittype(t):
     if t.size > ((end + qalign - 1) & -qalign):
         out.append("b %d, " % (t.size - end) if t.kind == TYPESTRUCT
                    else "{ b %d } " % t.size)
-    t.value.qalign = max(qalign, t.align)
-    w(" = align %d { " % t.align if t.align > qalign else " = { ")
+    align = t.align
+    if t.fieldalign is not None and TG.targ.name == 'aarch64':
+        align = t.fieldalign
+    t.value.qalign = max(qalign, align)
+    w(" = align %d { " % align if align > qalign else " = { ")
     w("".join(out))
     w("}\\n")
 def emitinst(insts, i, n):
@@ -19382,6 +19769,9 @@ def _recordparams(f):
         p = p.next
         vi += 1
     paraminfo[f.decl.value.name] = out
+    r = f.type.base
+    if r.prop & PROPINT and not r.issigned and r.size >= 4:
+        paraminfo.setdefault('#unsigned', set()).add(f.decl.value.name)
 def emitfunc(f, glob):
     if f.end.jump_kind == JUMP_NONE:
         v = None
@@ -19415,7 +19805,7 @@ def emitfunc(f, glob):
     while p:
         if p is not f.type.params:
             w(", ")
-        emitclass(qbetype(p.type).base, p.type.value)
+        emitclass(abiclass(p.type), p.type.value)
         w(' ')
         emitname(f.paramtemps[vi])
         p = p.next
@@ -21904,6 +22294,7 @@ _MAC = sys.platform == 'darwin'
 _WIN = sys.platform == 'win32'
 MAP_ANON = 0x1000 if _MAC else 0x20
 MAP_JIT = 0x800
+MAP_FIXED = 0x10
 PAGE = _mmap.PAGESIZE
 _ARM64 = platform.machine().lower() in ('arm64', 'aarch64')
 _FAILED = (1 << (8 * ctypes.sizeof(ctypes.c_void_p))) - 1
@@ -22226,10 +22617,15 @@ class Image:
         csize, dsize = self.code_size, self.data_size
         if _MAC:
             try:
-                code = _map(csize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_JIT) if csize else 0
-                self._maps.append((code, csize))
-                data = _map(dsize, PROT_READ | PROT_WRITE, 0, code + csize) if dsize else 0
-                self._maps.append((data, dsize))
+                if csize:
+                    code = _map(csize + dsize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_JIT)
+                    self._maps.append((code, csize + dsize))
+                    data = _map(dsize, PROT_READ | PROT_WRITE, MAP_FIXED, code + csize) \\
+                        if dsize else 0
+                else:
+                    code = 0
+                    data = _map(dsize, PROT_READ | PROT_WRITE) if dsize else 0
+                    self._maps.append((data, dsize))
                 cimg, dimg = build(code, data)
                 jw = _libc.pthread_jit_write_protect_np
                 jw.restype = None
@@ -24571,10 +24967,10 @@ def optimize(fn):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "e077254c4fb8b07c5493",
-"runtime-arm64": "799488fbfb36617a1c2a",
-"runtime-arm64_apple": "40d3bdeb18a708eed941",
-"runtime-arm64_win": "c63f486d832f0e636875"
+"compiler": "0d28d7a273a09c46a290",
+"runtime-arm64": "5dd20f3a50eb62311971",
+"runtime-arm64_apple": "f0dc83a386259a75f0b9",
+"runtime-arm64_win": "68a93204e668bb3dfe11"
 }
 ''',
 'onefile.py': '''\
@@ -25120,7 +25516,11 @@ TARGETS = {
                                  ('__USER_LABEL_PREFIX__', '')] + _TAIL_DEFINES
               + _LINUX_TYPES),
     'arm64_apple': (_COMMON_DEFINES + [('__APPLE__', None), ('__MACH__', None),
-                                       ('__USER_LABEL_PREFIX__', '_')] + _TAIL_DEFINES
+                                       ('__arm64__', None), ('__arm64', None),
+                                       ('__AARCH64EL__', None), ('__LITTLE_ENDIAN__', None),
+                                       ('__USER_LABEL_PREFIX__', '_')]
+                    + [('_OSSwapInt%d(x)' % n, '__builtin_bswap%d(x)' % n) for n in (16, 32, 64)]
+                    + _TAIL_DEFINES
                     + _APPLE_TYPES),
     'arm64_win': (_COMMON_DEFINES + [('_WIN32', '1'), ('_WIN64', '1'), ('_M_ARM64', '1'),
                                      ('__USER_LABEL_PREFIX__', '')]
@@ -36564,7 +36964,7 @@ def compile_object(src, filename='<string>', include_dirs=(), defines=(), runtim
                                   diagnostics=not runtime, prune=True, vastruct='slots', bitops=False)
     except FrontendError as e:
         raise d.CompileError(str(e)) from None
-    return d._qbe_wasm(ssa, params), ssa
+    return d._qbe_wasm(ssa, params), ssa, params
 class Runtime:
     def __init__(self):
         from .. import linker as L
@@ -36644,8 +37044,8 @@ def build(src, filename='<string>', include_dirs=(), defines=()):
     hit = _cache_get(key)
     if hit is not None:
         return hit
-    obj, ssa = compile_object(src, filename, include_dirs, defines)
-    sigs = d._sigs(ssa)
+    obj, ssa, params = compile_object(src, filename, include_dirs, defines)
+    sigs = d._sigs(ssa, params)
     names = [line.split(' ')[0] for line in sigs.splitlines()]
     try:
         objs, undefined = _link.resolve([obj, glue()], runtime().provide)
@@ -37013,7 +37413,7 @@ import pyodide_js
 from pyodide.ffi import create_proxy, to_js
 from ..execution import (KernelError, E_ABORT, E_ASSERT, E_TRAP, E_EXIT)
 _ids = itertools.count()
-_PY = {'w': int, 'l': int, 's': float, 'd': float}
+_PY = {'w': int, 'l': int, 's': float, 'd': float, 'W': int, 'L': int}
 _wrapper = None
 def _wrap():
     global _wrapper
@@ -37154,6 +37554,10 @@ class WasmKernel:
                 m._flush()
         if self._ret == 'l':
             return int(r)
+        if self._ret == 'W':
+            return int(r) & 0xffffffff
+        if self._ret == 'L':
+            return int(r) & 0xffffffffffffffff
         return r
     def __repr__(self):
         return '<cimo kernel %s (wasm)>' % self.__name__

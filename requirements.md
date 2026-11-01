@@ -366,8 +366,11 @@ are benchmarked against pure CPython. **Done 2026-11-01** (see "M1 findings").
 **M1 findings.** Differential tests (`tests/`) plus 2000-program random expression runs (about
 9,500 checks, numpy scalars included) found zero mismatches. CPython quirks reproduced: `float *
 int` with the int equal to -1 is computed as a negation (a NaN's sign flips; other ints and
-numpy scalars don't). cimo doesn't inline `static inline` functions (5.15 vs 3.07 ns on `ema`),
-so hot helpers were macros, until cimo learned to inline (now `static inline`, no slowdown). Facts from unit-step `range` loops (index non-negative, below
+numpy scalars don't). The wrapping `sj_add`, `sj_sub`, `sj_mul` and `sj_neg` are macros, not
+`static inline`: cimo stops inlining into a function once it reaches 4000 IR instructions, in source
+order, so in a large function the later loops call one-instruction helpers. A llama2.c forward pass
+as one function (`bench/llm.py`) ran 28 tok/s natively with them as functions, 89 as macros; the M1
+kernels don't change. Other small helpers can still hit that limit (proposed to cimo). Facts from unit-step `range` loops (index non-negative, below
 `len(a)`) drop negative-index adjustment and bounds checks, and loop versioning (one test before
 the loop, checked copy otherwise) removes the rest without changing where an `IndexError` is
 raised. With those, parity and bounds checks cost nothing measurable on the M1 kernels:

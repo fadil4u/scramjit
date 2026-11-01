@@ -201,9 +201,17 @@ h3.where{margin-top:44px;font-size:20px}
 .lower .code{display:flex;flex-direction:column}.lower .code pre{flex:1}
 @media(max-width:960px){.lower .split{grid-template-columns:minmax(0,1fr)}.arrow{transform:rotate(90deg)}}
 /* visibility */
-.split.vis{align-items:center}
-.vis .pts li{font-size:14.5px}
-.vis .pts code{font-size:.84em}
+.wf{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:40px;align-items:center;margin-top:44px}
+.wf.flip{grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr)}
+.wf.flip .wf-cap{order:2}
+.wf-cap{position:relative;padding-left:52px}
+.wf-n{position:absolute;left:0;top:0;width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font:600 14px var(--mono);color:#fff;background:var(--flow)}
+.wf-when{display:block;font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin-bottom:6px;line-height:36px;margin-top:-2px}
+.wf-cap h3{font-size:18px;margin-top:-4px}.wf-cap h3 code{font-size:.9em;padding:2px 7px}
+.wf-cap p{margin-top:10px;font-size:15px;color:var(--ink3)}.wf-cap p code{white-space:nowrap}
+.wf .code{min-width:0}
+#visibility .note{margin-top:34px}
+@media(max-width:960px){.wf,.wf.flip{grid-template-columns:minmax(0,1fr);gap:18px;margin-top:36px}.wf.flip .wf-cap{order:0}}
 .term pre,.xp{font-size:12.5px;line-height:1.65;white-space:pre}
 .prof{min-height:330px}
 .prof .pl{display:block;opacity:0;transform:translateY(3px);transition:opacity .25s,transform .25s}
@@ -211,9 +219,6 @@ h3.where{margin-top:44px;font-size:20px}
 .prof .caret{display:inline-block;width:7px;height:1.1em;vertical-align:-2px;background:#ffb072;animation:caret 1s steps(2) infinite}
 @keyframes caret{to{visibility:hidden}}
 .t-pr,.t-dim{color:#6e7681}.t-ok{color:#4ade80}.t-hd{color:#fff;font-weight:600}.t-hint{color:#ffb072;font-weight:600}.t-an{color:#93b4ff}
-.split.vis2{margin-top:16px;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);align-items:stretch}
-.vis2 .code{display:flex;flex-direction:column}.vis2 .code pre{flex:1}
-@media(max-width:960px){.split.vis2{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:600px){.code pre.prof,.code pre.xp{font-size:10.5px;white-space:pre;overflow-wrap:normal;overflow-x:auto}.prof{min-height:0}}
 @media (prefers-reduced-motion:reduce){.prof .pl{transition:none}.prof .caret{animation:none}}
 .st{display:inline-block;width:.62em;height:.62em;border-radius:50%;margin-right:.55em;vertical-align:.04em}
@@ -480,56 +485,52 @@ for (int64_t i = 0; i &lt; a_len; i++)
 <section class="s" id="visibility"><div class="wrap">
   <span class="k">Visibility</span>
   <h2>See what was compiled</h2>
-  <p class="lede">Code scramjit can't compile runs as plain Python, so nothing breaks. Every decorated function is in one of three states, and the tools show which, down to the line.</p>
+  <p class="lede">Code scramjit can't compile runs as plain Python, so nothing breaks. Every decorated function is in one of three states, and preflight shows which, down to the line.</p>
   <div class="legend"><span><i class="st g"></i><b>compiled</b> everything native</span><span><i class="st a"></i><b>partly compiled</b> some loops native</span><span><i class="st r"></i><b>Python</b> nothing compiled</span></div>
-  <div class="split vis">
-    <ul class="pts">
-      <li><b><code>scramjit preflight src/</code></b> shows every function's state before anything runs, and which lines stay in Python and why. It fails CI on anything less than compiled.</li>
-      <li><b><code>scramjit profile app.py</code></b> runs your program like <code>cProfile</code> and reports each function's state, compile time, time in native code, and how much of the whole run was native.</li>
-      <li><b><code>f.explain()</code></b> marks each line native or Python, with the compiler's decisions: types, bounds checks, loops optimized or not.</li>
-      <li><b><code>FallbackWarning</code></b> fires once for each fallback, naming the line. <b><code>@scram(fallback=False)</code></b> turns it into an error for code that must be native.</li>
-      <li><b>Hints name the line</b> and the fix: move the dict out of the loop, annotate an argument that arrives as two types, pass an array instead of a list.</li>
-    </ul>
-    <div class="code term">
-      <div class="bar"><span class="dots"><i></i><i></i><i></i></span>terminal</div>
-<pre class="prof"><span class="t-pr">$</span> <span class="prof-cmd">scramjit profile simulate.py</span><span class="pl"><span class="t-dim">… simulate.py output …</span></span><span class="pl"> </span><span class="pl"><b class="t-hd">scramjit</b> · 4.21 s run · <span class="t-ok">96% in native code</span></span><span class="pl t-dim">   function     calls   compile   native   share</span><span class="pl"><i class="st g"></i> step         2,000   <span class="t-dim">disk</span>      3.70 s     88%</span><span class="pl"><i class="st g"></i> flood          120   0.14 s    0.22 s      5%</span><span class="pl"><i class="st a"></i> tally           40   0.03 s    0.09 s      2%</span><span class="pl"><i class="st g"></i> ema ×2           2   0.07 s    0.02 s     &lt;1%</span><span class="pl"> </span><span class="pl"><b class="t-hint">hints</b></span><span class="pl">  tally, line 9: loop stays in Python (writes a</span><span class="pl">    dict); build the dict after the loop</span><span class="pl">  ema: a arrives as int and float; annotate a: float</span></pre>
-    </div>
-  </div>
-  <div class="split vis2">
-    <div class="code">
-      <div class="bar"><span class="dots"><i></i><i></i><i></i></span>python</div>
-<pre class="xp"><span class="t-pr">&gt;&gt;&gt;</span> tally.explain()
-<b class="t-hd">tally</b>(uint8[:], int64[:])  <span class="t-amb">partly compiled</span> <span class="t-dim">· 38 ms</span>
 
-<span class="t-dim"> 6</span> <i class="st r"></i>labels = {}                  <span class="t-py">Python: a dict</span>
-<span class="t-dim"> 7</span> <i class="st g"></i>for i in range(len(px)):     <span class="t-an">native: lifted loop</span>
-<span class="t-dim"> 8</span> <i class="st g"></i>    hist[px[i]] += 1         <span class="t-an">bounds checked</span>
-<span class="t-dim"> 9</span> <i class="st r"></i>for k in range(len(hist)):   <span class="t-py">Python: writes labels</span>
-<span class="t-dim">10</span> <i class="st r"></i>    if hist[k]:
-<span class="t-dim">11</span> <i class="st r"></i>        labels[k] = f"…"
-<span class="t-dim">12</span> <i class="st r"></i>return labels
-
-<b class="t-hint">hints</b>  line 9: keep the loop numeric and
-       build the dict after it</pre>
-    </div>
-    <div class="code">
-      <div class="bar"><span class="dots"><i></i><i></i><i></i></span>terminal</div>
+  <div class="wf">
+    <div class="wf-cap"><span class="wf-n" style="background:#2563eb">1</span><span class="wf-when">Before you run</span><h3><code>scramjit preflight src/</code></h3><p>Reads every <code>@scram</code> function without running anything, and shows its state and which lines stay in Python, and why.</p></div>
+    <div class="code"><div class="bar"><span class="dots"><i></i><i></i><i></i></span>terminal</div>
 <pre class="xp"><span class="t-pr">$</span> scramjit preflight src/
 <span class="t-dim">src/sim.py</span>
-  <i class="st g"></i>step         compiled
   <i class="st g"></i>flood        compiled
-<span class="t-dim">src/stats.py</span>
-  <i class="st a"></i>tally        partly compiled
-      <span class="t-dim">9</span>   loop stays in Python:
-          writes labels, a dict
+  <i class="st g"></i>ema          compiled
+  <i class="st a"></i>step         partly compiled
+      <span class="t-dim"> 8</span>  loop stays in Python:
+          line 11 grows a list
+<span class="t-dim">src/report.py</span>
   <i class="st r"></i>summarize    Python
       <span class="t-dim">18</span>  iterates a dict
 
-2 compiled · 1 partly · 1 Python
-<span class="t-err">preflight failed</span></pre>
-    </div>
+2 compiled · 1 partly · 1 Python</pre></div>
   </div>
-  <p class="doclink"><a href="docs/?p=profiling">Docs: profiling and visibility →</a> <span class="sep">·</span> <a href="docs/?p=errors">fallback and errors →</a></p>
+
+  <div class="wf flip">
+    <div class="wf-cap"><span class="wf-n" style="background:#e8702a">2</span><span class="wf-when">While it runs</span><h3><code>scramjit preflight --run app.py</code></h3><p>Runs your program, or your tests with <code>--run -m pytest</code>, and reports what happened with the real argument types: state, compile time, time in native code and in Python, and how much of the run was native. It fails CI if anything fell back.</p></div>
+    <div class="code term"><div class="bar"><span class="dots"><i></i><i></i><i></i></span>terminal</div>
+<pre class="prof"><span class="t-pr">$</span> <span class="prof-cmd">scramjit preflight --run simulate.py</span><span class="pl"><span class="t-dim">… simulate.py output …</span></span><span class="pl"> </span><span class="pl"><b class="t-hd">scramjit</b> · 4.21 s run · <span class="t-amb">61% native</span></span><span class="pl t-dim">   function   calls  compile  native  python</span><span class="pl"><i class="st g"></i>flood        120  0.14 s   0.22 s       –</span><span class="pl"><i class="st g"></i>ema ×2         2  0.07 s   0.02 s       –</span><span class="pl"><i class="st a"></i>step       2,000  <span class="t-dim">disk</span>     2.35 s  <span class="t-py">1.52 s</span></span><span class="pl"> </span><span class="pl"><b class="t-hint">hints</b></span><span class="pl">  step, line 11: events.append keeps the loop</span><span class="pl">    on line 8 in Python; collect the events after</span><span class="pl">    it with np.flatnonzero(y &gt; 1.0)</span><span class="pl">  ema: a arrives as int and float; annotate a: float</span><span class="pl"> </span><span class="pl"><span class="t-err">failed:</span> step is partly compiled</span></pre></div>
+  </div>
+
+  <div class="wf">
+    <div class="wf-cap"><span class="wf-n" style="background:#dc2626">3</span><span class="wf-when">One function</span><h3><code>f.explain()</code></h3><p>Prints the function with each line marked native or Python and what the compiler decided: types, bounds checks, which loops were optimized. Works in any REPL or notebook.</p></div>
+    <div class="code"><div class="bar"><span class="dots"><i></i><i></i><i></i></span>terminal · python</div>
+<pre class="xp"><span class="t-pr">&gt;&gt;&gt;</span> step.explain()
+<b class="t-hd">step</b>(float64[:], float64[:], list)
+<span class="t-amb">partly compiled</span> <span class="t-dim">· sim.py · compiled in 38 ms</span>
+<span class="t-dim">─────────────────────────────────────────────</span>
+<span class="t-dim"> 6</span> <i class="st g"></i>for i in range(len(x)):      <span class="t-an">native, lifted</span>
+<span class="t-dim"> 7</span> <i class="st g"></i>  x[i] = x[i] * 0.99 + 0.01  <span class="t-an">bounds proven</span>
+<span class="t-dim"> 8</span> <i class="st r"></i>for i in range(1, len(x)):   <span class="t-py">Python: line 11</span>
+<span class="t-dim"> 9</span> <i class="st r"></i>  y[i] = 0.9 * y[i - 1] + …
+<span class="t-dim">10</span> <i class="st r"></i>  if y[i] &gt; 1.0:
+<span class="t-dim">11</span> <i class="st r"></i>    events.append(i)         <span class="t-py">grows a list</span>
+<span class="t-dim">─────────────────────────────────────────────</span>
+<b class="t-hint">hint</b>  collect the events after the loop with
+      np.flatnonzero(y &gt; 1.0)</pre></div>
+  </div>
+
+  <p class="note">Each fallback also raises a <code>FallbackWarning</code> once, naming the line. <code>@scram(fallback=False)</code> makes it an error for code that must be native.</p>
+  <p class="doclink"><a href="docs/?p=profiling">Docs: preflight and explain →</a> <span class="sep">·</span> <a href="docs/?p=errors">fallback and errors →</a></p>
 </div></section>
 
 <section class="s" id="semantics"><div class="wrap">

@@ -12,7 +12,7 @@ Each decorated function is, for each signature it is called with, in one of thre
 | **Partly compiled** (amber) | some loops were lifted out and run native; the rest runs as Python |
 | **Python** (red) | nothing compiled: the function runs as the original Python |
 
-[Preflight, the profiler and `explain()`](profiling.md) all show these states with the same colors, and show which lines run as Python and why.
+[Preflight and `explain()`](profiling.md) all show these states with the same colors, and show which lines run as Python and why.
 
 ## Loops are lifted out
 
@@ -65,7 +65,7 @@ With `fallback=False`, anything less than compiled raises `scramjit.CompileError
 scramjit.CompileError: sim.py:24: step(float64[:, :], float64[:, :], float) is partly compiled: line 24 calls print()
 ```
 
-Use it for functions that must be fast, and in tests. [Preflight](profiling.md#preflight) checks the same thing for a whole codebase before anything runs.
+Use it for functions that must be fast, and in tests. [Preflight](profiling.md#in-ci) checks the same thing for a whole codebase before anything runs.
 
 ## Errors at the call boundary
 

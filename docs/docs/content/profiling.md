@@ -1,6 +1,6 @@
-# Profiling and visibility
+# Preflight and explain
 
-Code scramjit can't compile runs as Python, so nothing breaks, but speed can go missing quietly. These tools show the state of every decorated function, which lines run as Python and why, what compiling cost, and what to change.
+Code scramjit can't compile runs as Python, so nothing breaks, but speed can go missing quietly. Preflight and `explain()` show the state of every decorated function, which lines run as Python and why, what compiling cost, and what to change.
 
 Every function is in one of three states, shown with the same colors everywhere:
 
@@ -10,9 +10,9 @@ Every function is in one of three states, shown with the same colors everywhere:
 | 🟡 | **partly compiled** | some loops run native, the rest as Python |
 | 🔴 | **Python** | nothing compiled |
 
-The tools are subcommands of the `scramjit` command, which is installed with the package. `python -m scramjit` works the same.
+`scramjit` is a command installed with the package; `python -m scramjit` works the same.
 
-## Preflight
+## Preflight, before you run
 
 ```console
 $ scramjit preflight src/
@@ -22,65 +22,74 @@ reads every `@scram` function under the path, without importing or running anyth
 
 ```text
 src/sim.py
-  🟢 step         compiled
   🟢 flood        compiled
-src/stats.py
-  🟡 tally        partly compiled
-      9   loop stays in Python: writes labels, a dict
+  🟢 ema          compiled
+  🟡 step         partly compiled
+       8  loop stays in Python: line 11 grows a list
+src/report.py
   🔴 summarize    Python
-      18  for k, v in d.items(): iterates a dict
+      18  iterates a dict
 
-2 compiled · 1 partly compiled · 1 Python
+2 compiled · 1 partly · 1 Python
 ```
 
-- Annotations are used. Unannotated arguments are assumed to be numbers or arrays, so a fallback caused by the argument types of an actual call (a `str`, say) shows up at runtime instead, as a `FallbackWarning`.
-- It exits non-zero when any function is less than compiled, so it fits in CI. `--allow-partial` accepts partly compiled functions too.
+Annotations are used. Unannotated arguments are assumed to be numbers or arrays, so a fallback caused by the types of an actual call (a `str`, say) needs `--run`.
 
-## Profile a whole program
+## Preflight while it runs
 
 ```console
-$ scramjit profile simulate.py --steps 2000
+$ scramjit preflight --run simulate.py --steps 2000
+$ scramjit preflight --run -m pytest tests/
 ```
 
-runs the script like `python -m cProfile` would, then prints a report:
+runs the script, or a module such as your test suite, and reports what actually happened, with the real argument types:
 
 ```text
-scramjit · 4.21 s run · 96% in native code
-   function       calls   compile   native   share
-🟢 step           2,000   disk      3.70 s     88%
-🟢 flood            120   0.14 s    0.22 s      5%
-🟡 tally             40   0.03 s    0.09 s      2%
-🟢 ema ×2             2   0.07 s    0.02 s     <1%
+scramjit · 4.21 s run · 61% native
+   function   calls  compile  native  python
+🟢 flood        120  0.14 s   0.22 s       –
+🟢 ema ×2         2  0.07 s   0.02 s       –
+🟡 step       2,000  disk     2.35 s  1.52 s
 
 hints
-  tally, line 9: loop stays in Python (writes a dict); keep the loop numeric and build the dict after it
-  ema: a arrives as int and float (2 specializations); annotate a: float
+  step, line 11: events.append keeps the loop on line 8 in Python;
+    collect the events after it with np.flatnonzero(y > 1.0)
+  ema: a arrives as int and float; annotate a: float
+
+failed: step is partly compiled
 ```
 
-- **native share** is the part of the whole run spent in compiled code; the rest is Python, your own and the parts of decorated functions that fell back. If a hot loop isn't in the table, it isn't decorated.
-- **compile** is the time spent compiling, or `disk` when the code came from the [disk cache](caching.md).
-- **×2** means the function was compiled for two signatures.
+- **native** and **python** are the time each function spent in compiled code and in code that fell back. The native share at the top is native time over the whole run; the rest is your own Python and fallbacks.
+- **compile** is the time spent compiling, or `disk` when the code came from the [disk cache](caching.md). **×2** means two signatures.
+- Functions that weren't called don't appear; run the static mode for those.
 
-Arguments after the script name are passed to it. `scramjit profile -m package.module` profiles a module.
+Arguments after the script or module are passed to it.
+
+## In CI
+
+Both modes exit non-zero when any function is less than compiled; `--allow-partial` accepts partly compiled ones. The strongest check runs your tests, so every function is checked with the types it really gets:
+
+```console
+$ scramjit preflight --run -m pytest
+```
 
 ## Explain one function
 
-`f.explain()` prints the function's source with each line marked native or Python, and what the compiler decided:
+`f.explain()` prints the function with each line marked native or Python, and what the compiler decided. It works in any REPL or notebook:
 
 ```text
->>> tally.explain()
-tally(uint8[:], int64[:])  partly compiled · 38 ms
-
- 6 🔴 labels = {}                      Python: a dict
- 7 🟢 for i in range(len(px)):         native: lifted loop
- 8 🟢     hist[px[i]] += 1             hist[...]: bounds checked
- 9 🔴 for k in range(len(hist)):       Python: writes labels
-10 🔴     if hist[k]:
-11 🔴         labels[k] = f"{k}: {hist[k]}"
-12 🔴 return labels
-
-hints
-  line 9: keep the loop numeric and build the dict after it
+>>> step.explain()
+step(float64[:], float64[:], list)
+partly compiled · sim.py · compiled in 38 ms
+─────────────────────────────────────────────
+ 6 🟢 for i in range(len(x)):         native, lifted
+ 7 🟢     x[i] = x[i] * 0.99 + 0.01   bounds proven
+ 8 🔴 for i in range(1, len(x)):      Python: line 11
+ 9 🔴     y[i] = 0.9 * y[i - 1] + 0.1 * x[i]
+10 🔴     if y[i] > 1.0:
+11 🔴         events.append(i)        grows a list
+─────────────────────────────────────────────
+hint  collect the events after the loop with np.flatnonzero(y > 1.0)
 ```
 
 It reports:

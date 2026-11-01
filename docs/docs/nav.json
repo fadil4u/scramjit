@@ -18,7 +18,7 @@
         ["containers", "Arrays, lists and tuples"],
         ["semantics", "Semantics"],
         ["errors", "Fallback and errors"],
-        ["profiling", "Profiling and visibility"]
+        ["profiling", "Preflight and explain"]
       ]
     },
     {

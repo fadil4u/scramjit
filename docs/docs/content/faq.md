@@ -6,7 +6,7 @@ If one works for you, it has a head start. LLVM-based JITs are mature and vector
 
 ## How do I know my function was compiled?
 
-`scramjit preflight src/` shows every decorated function as compiled, partly compiled or Python, before you run anything, and which lines stay in Python. At runtime, each fallback emits a `FallbackWarning`, and `scramjit profile app.py` shows how much of a run was native. See [Profiling and visibility](profiling.md).
+`scramjit preflight src/` shows every decorated function as compiled, partly compiled or Python, before you run anything, and which lines stay in Python. `scramjit preflight --run app.py` (or `--run -m pytest`) shows what happened with real argument types, and how much of the run was native. Each fallback also emits a `FallbackWarning`. See [Preflight and explain](profiling.md).
 
 ## Is it only for numeric code?
 

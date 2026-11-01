@@ -155,8 +155,10 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
 - **Python data structures, nested, as much as possible** (decided 2026-11-01): dicts, lists, tuples, classes
   and enums compile when they are **statically sized** (nothing resizes them at runtime) and **statically
   typed** (the element types they start with don't change). Enums and module-level constants are their
-  values. Classes and fixed-key dicts become structs. Open: what a runtime value that breaks the rule does,
-  aliasing, and the cost of checking and copying at the call. Not built yet; see `TODO.md`.
+  values. Classes and dicts become structs; only fixed dicts for now, so a function that could add a key runs
+  as Python. Loop optimizations and loop lifting come first, so that containers don't hide speedups still to
+  be had from loops. Open: what a runtime value that breaks the rule does, aliasing, and the cost of checking
+  and copying at the call. Not built yet; see `TODO.md`.
 - **Later:** growable lists, dicts, sets and strings as typed C containers: each needs allocation and a runtime.
 
 ## Semantics

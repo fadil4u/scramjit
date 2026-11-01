@@ -17,7 +17,7 @@
         ["loops-and-builtins", "Loops and builtins"],
         ["containers", "Arrays, lists and tuples"],
         ["semantics", "Semantics"],
-        ["errors", "Errors"],
+        ["errors", "Fallback and errors"],
         ["profiling", "Profiling and visibility"]
       ]
     },

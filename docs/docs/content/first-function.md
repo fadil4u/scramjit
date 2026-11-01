@@ -63,3 +63,4 @@ def ema(x, y, a: float):
 | --- | --- | --- |
 | `boundscheck` | `True` | Check every index and raise `IndexError` as Python does. `False` drops the checks in loops you have verified. |
 | `cache` | `True` | Keep compiled code on disk so other processes reuse it. Code is always cached in memory. |
+| `fallback` | `True` | Run what can't be compiled as Python, with a `FallbackWarning`. `False` raises `CompileError` instead; see [Fallback and errors](errors.md). |

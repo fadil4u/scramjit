@@ -6,11 +6,15 @@ If one works for you, it has a head start. LLVM-based JITs are mature and vector
 
 ## How do I know my function was compiled?
 
-If the call returned, it ran native code: there is no fallback that runs on Python objects. `f.signatures` lists what was compiled, and `python -m scramjit app.py` shows how much of a run was spent in compiled code. See [Profiling and visibility](profiling.md).
+`scramjit preflight src/` shows every decorated function as compiled, partly compiled or Python, before you run anything, and which lines stay in Python. At runtime, each fallback emits a `FallbackWarning`, and `scramjit profile app.py` shows how much of a run was native. See [Profiling and visibility](profiling.md).
 
 ## Is it only for numeric code?
 
 The supported types are numeric: scalars, arrays, tuples and fixed-size lists. But the target is any loop the interpreter is slow at, not only math: searches, flood fills, dynamic programming and scans over byte buffers fit as long as they work on those types.
+
+## What if it can't compile my function?
+
+It runs as Python, so your program still works and gives the same results; you just don't get the speedup for that part. You get a `FallbackWarning` naming the line. Add `@scram(fallback=False)` to make that an error instead.
 
 ## Does it help with the GIL?
 
@@ -18,11 +22,11 @@ Yes: compiled code releases the GIL while it runs, so threads calling it run in 
 
 ## Is it a new language?
 
-No. Decorated functions are ordinary Python and run unchanged without scramjit. scramjit compiles a subset of Python; outside the subset you get a compile error, not a dialect.
+No. Decorated functions are ordinary Python and run unchanged without scramjit. scramjit compiles a subset of Python, and runs the rest as Python. There is no dialect to learn.
 
 ## What does it not compile?
 
-Anything that needs Python objects at runtime: classes, arbitrary objects, strings, dicts, sets and growable lists. See [Arrays, lists and tuples](containers.md#not-supported).
+Anything that needs Python objects at runtime: classes, arbitrary objects, strings, dicts, sets and growable lists. That code runs as Python, and the loops around it still compile. See [Fallback and errors](errors.md).
 
 ## Will it vectorize my loop?
 

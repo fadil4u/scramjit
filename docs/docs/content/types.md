@@ -4,7 +4,7 @@
 
 scramjit infers a type for every variable over the whole function, seeded by the types of the arguments at call time. A new combination of argument types (a `float32` array instead of `float64`, say) compiles a new specialization; each one is cached by its signature.
 
-A variable that takes several types unifies by Python's rules: `int` and `float` give `float`. Types that don't unify, such as a variable that is sometimes a number and sometimes an array, are a compile error that points at the line.
+A variable that takes several types unifies by Python's rules: `int` and `float` give `float`. Types that don't unify, such as a variable that is sometimes a number and sometimes an array, keep that code in Python; see [Fallback and errors](errors.md).
 
 ## Annotations are contracts
 
@@ -42,4 +42,4 @@ Without a proof, integers are `int64` and floats `float64`. The payoff is mainly
 
 Generated code never touches a Python object. Arguments are unboxed at the call: Python numbers into C scalars, numpy arrays into a pointer, shape and strides (without copying). The body runs on C values only, and the result is boxed on return.
 
-Anything that can't be unboxed is a compile error that says why. There is no fallback to running on Python objects: it would be slow, and it can't work without libpython, which cimo doesn't link and Pyodide has none of to link.
+Compiled code never falls back to Python objects inside itself: that would be slow, and it can't work without libpython, which cimo doesn't link and Pyodide has none of to link. Code that needs Python objects stays in Python instead, around the compiled parts; see [Fallback and errors](errors.md).

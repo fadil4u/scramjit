@@ -11,6 +11,10 @@ Python source → ast → type inference → typed IR → lowering → C (#line)
 5. **Emit C** with `#line` directives pointing back at the Python file.
 6. **cimo** compiles the C to machine code in the process (native) or to WebAssembly (Pyodide).
 
+## What doesn't compile
+
+Before emitting C, scramjit decides what can be compiled. A function that fits entirely is compiled whole. Otherwise each loop that fits is lifted into a function of its own and compiled, and the rest stays as Python that calls it. If nothing fits, the original function runs. See [Fallback and errors](errors.md).
+
 ## Why generate C
 
 Generating C rather than cimo's internal IR keeps the output readable and debuggable, and reuses cimo's tested frontend and loop optimizer. scramjit aims to emit the kind of C cimo optimizes best: canonical counted loops, affine indexing, and `restrict` where no aliasing is proven.

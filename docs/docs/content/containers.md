@@ -36,6 +36,6 @@ def blur3(src, dst):
 
 A homogeneous numeric list argument is copied into an array at the call and copied back if the function mutated it. That is O(n) per call, so pass large data as numpy arrays.
 
-## Not supported
+## What stays in Python
 
-Growable lists, dicts, sets and strings. Each would need allocation and a runtime inside compiled code; a function that needs them is a compile error that says so. Keep that code in Python and call the compiled function from it.
+Growable lists, dicts, sets and strings. Each would need allocation and a runtime inside compiled code, so code that uses them runs as Python, and the loops around it that don't are still compiled. See [Fallback and errors](errors.md).

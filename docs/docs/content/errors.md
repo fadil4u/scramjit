@@ -17,3 +17,7 @@ There is no object mode. A construct that can't be compiled is an error, never a
 ## Errors at the call boundary
 
 A call whose arguments contradict an annotation raises `TypeError` before any native code runs, as described in [Types and annotations](types.md#annotations-are-contracts).
+
+## Before running
+
+`python -m scramjit check src/` finds constructs outside the subset in every `@scram` function without running anything. See [Profiling and visibility](profiling.md#check-before-you-run).

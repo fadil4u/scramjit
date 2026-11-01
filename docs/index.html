@@ -200,6 +200,22 @@ h3.where{margin-top:44px;font-size:20px}
 .lower .split{grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:14px;align-items:stretch;margin-top:18px}
 .lower .code{display:flex;flex-direction:column}.lower .code pre{flex:1}
 @media(max-width:960px){.lower .split{grid-template-columns:minmax(0,1fr)}.arrow{transform:rotate(90deg)}}
+/* visibility */
+.split.vis{align-items:center}
+.vis .pts li{font-size:14.5px}
+.vis .pts code{font-size:.84em}
+.term pre,.xp{font-size:12.5px;line-height:1.65;white-space:pre}
+.prof{min-height:330px}
+.prof .pl{display:block;opacity:0;transform:translateY(3px);transition:opacity .25s,transform .25s}
+.prof .pl.on,.prof.shown .pl{opacity:1;transform:none}
+.prof .caret{display:inline-block;width:7px;height:1.1em;vertical-align:-2px;background:#ffb072;animation:caret 1s steps(2) infinite}
+@keyframes caret{to{visibility:hidden}}
+.t-pr,.t-dim{color:#6e7681}.t-ok{color:#4ade80}.t-hd{color:#fff;font-weight:600}.t-hint{color:#ffb072;font-weight:600}.t-an{color:#93b4ff}
+.split.vis2{margin-top:16px;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);align-items:stretch}
+.vis2 .code{display:flex;flex-direction:column}.vis2 .code pre{flex:1}
+@media(max-width:960px){.split.vis2{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:600px){.code pre.prof,.code pre.xp{font-size:10.5px;white-space:pre;overflow-wrap:normal;overflow-x:auto}.prof{min-height:0}}
+@media (prefers-reduced-motion:reduce){.prof .pl{transition:none}.prof .caret{animation:none}}
 /* semantics table */
 .tblw{overflow-x:auto;scrollbar-width:none;margin-top:26px;border-radius:12px}
 .tbl{width:100%;border-collapse:collapse;background:var(--white);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:14.5px}
@@ -227,6 +243,7 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
     <li class="hide-sm"><a href="#usage">Usage</a></li>
     <li class="hide-sm"><a href="#why">Motivation</a></li>
     <li class="hide-sm"><a href="#how">How it works</a></li>
+    <li class="hide-sm"><a href="#visibility">Visibility</a></li>
     <li class="hide-sm"><a href="#semantics">Semantics</a></li>
     <li class="hide-sm"><a href="#platforms">Platforms</a></li>
     <li><a href="docs/">Docs</a></li>
@@ -454,6 +471,56 @@ for (int64_t i = 0; i &lt; a_len; i++)
   <p class="doclink"><a href="docs/?p=how-it-works">Docs: how it works →</a> · <a href="docs/?p=loops-and-builtins">loops and builtins →</a></p>
 </div></section>
 
+<section class="s" id="visibility"><div class="wrap">
+  <span class="k">Visibility</span>
+  <h2>See what was compiled</h2>
+  <p class="lede">There is no fallback: if a call returns, it ran native code. These tools show what was compiled, what it cost, what the compiler decided, and what to change.</p>
+  <div class="split vis">
+    <ul class="pts">
+      <li><b><code>python -m scramjit app.py</code></b> runs your program like <code>cProfile</code>, then reports calls, compile time and time in native code per function, and how much of the whole run was native.</li>
+      <li><b><code>f.explain()</code></b> annotates your source with the compiler's decisions: types, bounds checks proven or hoisted, loops optimized or not, and why.</li>
+      <li><b><code>python -m scramjit check src/</code></b> finds what won't compile before you run anything.</li>
+      <li><b><code>f.signatures</code>, <code>f.c()</code></b> and <b><code>SCRAMJIT_LOG=1</code></b> list the specializations, show the generated C, and log every compile and cache hit.</li>
+      <li><b>Hints name the line</b> and the fix: annotate an argument that arrives as two types, pass an array instead of a list, keep a bounds check out of a hot loop.</li>
+    </ul>
+    <div class="code term">
+      <div class="bar"><span class="dots"><i></i><i></i><i></i></span>terminal</div>
+<pre class="prof"><span class="t-pr">$</span> <span class="prof-cmd">python -m scramjit simulate.py</span><span class="pl"><span class="t-dim">… simulate.py output …</span></span><span class="pl"> </span><span class="pl"><b class="t-hd">scramjit</b> · 4.21 s run · <span class="t-ok">96% in native code</span></span><span class="pl t-dim">  function        calls   compile   native   share</span><span class="pl">  step            2,000   <span class="t-dim">disk</span>      3.81 s     91%</span><span class="pl">  flood             120   0.14 s    0.22 s      5%</span><span class="pl">  ema ×2              2   0.07 s    0.02 s     &lt;1%</span><span class="pl"> </span><span class="pl"><b class="t-hint">hints</b></span><span class="pl">  ema: a arrives as int and float (2 specializations);</span><span class="pl">       annotate a: float</span><span class="pl">  flood, line 12: list seeds is copied in and out on</span><span class="pl prof-end">       each call; pass a numpy array</span></pre>
+    </div>
+  </div>
+  <div class="split vis2">
+    <div class="code">
+      <div class="bar"><span class="dots"><i></i><i></i><i></i></span>python</div>
+<pre class="xp"><span class="t-pr">&gt;&gt;&gt;</span> mandel_rows.explain()
+<b class="t-hd">mandel_rows</b>(int32[:, :], int, int, int)  <span class="t-dim">38 ms · disk</span>
+
+<span class="t-dim"> 7</span>  h, w = out.shape
+<span class="t-dim"> 8</span>  for j in range(y0, y1):        <span class="t-an">j: int64</span>
+<span class="t-dim"> 9</span>      ci = 2.4 * j / h - 1.2     <span class="t-an">ci: float64</span>
+<span class="t-dim">10</span>      for i in range(w):         <span class="t-an">i: proven in bounds</span>
+<span class="t-dim">14</span>          while n &lt; iters and …  <span class="t-an">not unrolled: exit</span>
+                                   <span class="t-an">depends on the data</span>
+<span class="t-dim">17</span>          out[j, i] = n          <span class="t-an">j: checked once per</span>
+                                   <span class="t-an">call, not per pixel</span>
+<b class="t-hint">hints</b>  <span class="t-ok">none</span>: no boxing, no copies</pre>
+    </div>
+    <div class="code">
+      <div class="bar"><span class="dots"><i></i><i></i><i></i></span>terminal</div>
+<pre class="xp"><span class="t-pr">$</span> python -m scramjit check src/
+<span class="t-dim">src/regions.py:41</span>  flood
+  <span class="t-err">queue.append()</span> grows a list; growable
+  lists aren't supported. Use a numpy
+  array as a stack.
+<span class="t-dim">src/stats.py:18</span>  summarize
+  <span class="t-err">{}</span> creates a dict; dicts aren't
+  supported.
+
+2 of 9 @scram functions won't compile</pre>
+    </div>
+  </div>
+  <p class="doclink"><a href="docs/?p=profiling">Docs: profiling and visibility →</a></p>
+</div></section>
+
 <section class="s" id="semantics"><div class="wrap">
   <span class="k">Semantics</span>
   <h2>Same results as CPython</h2>
@@ -628,6 +695,27 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
     if (es[0].isIntersecting) { ob.disconnect(); play(frames[i], 1600); arm(); }
   }, { threshold: 0.4 }).observe(wrap);
   else { play(frames[i], 1600); arm(); }
+})();
+// Profiling terminal: type the command, then the report appears line by line (once, when in view)
+(function () {
+  var pre = document.querySelector('pre.prof'); if (!pre) return;
+  var cmd = pre.querySelector('.prof-cmd'), lines = pre.querySelectorAll('.pl'), text = cmd.textContent;
+  var caret = document.createElement('span'); caret.className = 'caret';
+  if (matchMedia('(prefers-reduced-motion:reduce)').matches || !('IntersectionObserver' in window)) { pre.classList.add('shown'); return; }
+  cmd.textContent = ''; cmd.after(caret);
+  new IntersectionObserver(function (es, ob) {
+    if (!es[0].isIntersecting) return;
+    ob.disconnect();
+    var i = 0;
+    (function type() {
+      cmd.textContent = text.slice(0, ++i);
+      if (i < text.length) return setTimeout(type, 40 + Math.random() * 40);
+      setTimeout(function () {
+        caret.remove();
+        lines.forEach(function (el, k) { setTimeout(function () { el.classList.add('on'); }, (k < 2 ? 300 : 1100) + k * 110); });
+      }, 250);
+    })();
+  }, { threshold: 0.5 }).observe(pre);
 })();
 // The heat line under the top bar fills as you scroll down the page.
 (function () {

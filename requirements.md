@@ -168,6 +168,29 @@ compiler pipeline, dispatch and the on-disk cache, and error reporting. Record h
 adopt, change or reject and why. "Better" means measurable: faster code, faster compiles,
 clearer errors or fewer surprises.
 
+## Visibility and profiling
+
+There is no fallback, so "was it compiled?" is never in doubt: a call that returns ran native code;
+anything else is a compile error at the Python line. What users need to see is what was compiled,
+what it cost, what the compiler decided and what to change. Tools, all pure Python:
+
+- **`f.signatures`:** the specializations compiled so far.
+- **`SCRAMJIT_LOG=1`:** one line per compile or cache hit (function, signature, time, memory or
+  disk). Makes recompile churn visible.
+- **`python -m scramjit script.py`:** runs the script like `cProfile`, then reports per function and
+  signature: calls, compile time or cache hit, time in native code, and the native share of the
+  whole run (the "JIT coverage" number). Ends with hints.
+- **`f.explain()`:** the Python source annotated per line with the compiler's decisions: inferred
+  and narrowed types, bounds checks proven, hoisted or kept (and why), loops cimo optimized or
+  didn't (and why), copies at the call boundary. Ends with hints.
+- **`python -m scramjit check PATH`:** static, before running: constructs outside the subset in
+  `@scram` functions, with file and line. Type errors still need a call.
+- **`f.c()`:** the generated C for a signature.
+
+Hints must be actionable and name the line: annotate an argument that arrives as several types
+(several specializations), pass a numpy array instead of a list (copied per call), make an array
+contiguous (strided access), and when a bounds check stays in a hot loop, what would let it go.
+
 ## What scramjit needs from cimo
 
 Planned cimo features; scramjit is their first consumer:
@@ -176,6 +199,9 @@ Planned cimo features; scramjit is their first consumer:
 - `#line` directives honored in diagnostics and debug info.
 - A defined calling convention for numpy buffers and scalars.
 - Low compile latency and a cache key scramjit can use.
+- The per-loop optimization report (`cimo report`: optimized or not, and why) as data, mapped to
+  `#line`, for `f.explain()`.
+- Symbols for profilers (perf map, jitdump) so `perf` names compiled functions.
 - Possibly: a way to state no-alias guarantees scramjit can prove (`restrict`).
 - Auto-vectorization (cimo's SIMD v2). C users can write vector types by hand; scramjit users
   write plain loops. Until it lands, claim "C speed for scalar loops", not parity with LLVM-based JITs.

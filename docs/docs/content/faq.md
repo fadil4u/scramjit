@@ -4,6 +4,10 @@
 
 If one works for you, it has a head start. LLVM-based JITs are mature and vectorize via LLVM, but need LLVM wheels, don't run in Pyodide and take time to support new CPython releases. Pythran, Cython's pure-Python mode and Shed Skin need a C or C++ toolchain on the target. scramjit needs neither, because it and its compiler are pure Python.
 
+## How do I know my function was compiled?
+
+If the call returned, it ran native code: there is no fallback that runs on Python objects. `f.signatures` lists what was compiled, and `python -m scramjit app.py` shows how much of a run was spent in compiled code. See [Profiling and visibility](profiling.md).
+
 ## Is it only for numeric code?
 
 The supported types are numeric: scalars, arrays, tuples and fixed-size lists. But the target is any loop the interpreter is slow at, not only math: searches, flood fills, dynamic programming and scans over byte buffers fit as long as they work on those types.

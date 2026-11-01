@@ -170,7 +170,7 @@ section.s{padding:76px 0 8px}
 .cm-s-sj .CodeMirror-cursor{border-left:2px solid #ffb072}
 .cm-s-sj .CodeMirror-selected,.cm-s-sj.CodeMirror-focused .CodeMirror-selected{background:#2a2f45}
 .cm-s-sj .cm-keyword{color:#ff7b72}.cm-s-sj .cm-builtin{color:#ffa657}.cm-s-sj .cm-number{color:#79c0ff}.cm-s-sj .cm-string{color:#a5d6ff}
-.cm-s-sj .cm-comment{color:#6e7681}.cm-s-sj .cm-def{color:#d2a8ff}.cm-s-sj .cm-variable-2{color:#c9d1d9}.cm-s-sj .cm-operator{color:#c9d1d9}
+.cm-s-sj .cm-comment{color:#6e7681}.cm-s-sj .cm-meta{color:#8b949e}.cm-s-sj .cm-type,.cm-s-sj .cm-variable-3{color:#ffa657}.cm-s-sj .cm-atom{color:#79c0ff}.cm-s-sj .cm-variable-2{color:#d2a8ff}.cm-s-sj .cm-qualifier{color:#ff7b72}.cm-s-sj .cm-def{color:#d2a8ff}.cm-s-sj .cm-variable-2{color:#c9d1d9}.cm-s-sj .cm-operator{color:#c9d1d9}
 .lab-local{position:absolute;top:12px;left:12px;z-index:2;display:flex;align-items:center;gap:7px;font:500 11.5px var(--mono);color:#c9d1e2;background:rgba(8,10,18,.6);border:1px solid #2a3042;padding:5px 10px;border-radius:999px;cursor:help;opacity:0;visibility:hidden;transition:opacity .4s,visibility .4s}
 .lab.fast .lab-local{opacity:1;visibility:visible}
 .lab-sw{display:none}
@@ -184,24 +184,26 @@ section.s{padding:76px 0 8px}
 .lab.is-full{position:fixed;inset:0;z-index:100;margin:0;border-radius:0;border:0;height:100vh;height:100dvh;grid-template-columns:clamp(600px,38vw,760px) minmax(0,1fr)}
 .lab:fullscreen{position:static}
 /* thin dark scrollbars in the editor and the stage panel (CodeMirror draws its own bars) */
-.lab .CodeMirror-vscrollbar,.lab .CodeMirror-hscrollbar,.lab-panel pre{scrollbar-width:thin;scrollbar-color:#2d3448 transparent}
-.lab .CodeMirror-vscrollbar::-webkit-scrollbar,.lab .CodeMirror-hscrollbar::-webkit-scrollbar,.lab-panel pre::-webkit-scrollbar{width:8px;height:8px}
-.lab .CodeMirror-vscrollbar::-webkit-scrollbar-track,.lab .CodeMirror-hscrollbar::-webkit-scrollbar-track,.lab-panel pre::-webkit-scrollbar-track{background:transparent}
-.lab .CodeMirror-vscrollbar::-webkit-scrollbar-thumb,.lab .CodeMirror-hscrollbar::-webkit-scrollbar-thumb,.lab-panel pre::-webkit-scrollbar-thumb{background:#2d3448;border-radius:4px;border:2px solid var(--code)}
-.lab .CodeMirror-vscrollbar::-webkit-scrollbar-thumb:hover,.lab .CodeMirror-hscrollbar::-webkit-scrollbar-thumb:hover,.lab-panel pre::-webkit-scrollbar-thumb:hover{background:#465070}
+.lab .CodeMirror-vscrollbar,.lab .CodeMirror-hscrollbar,.lab-tree{scrollbar-width:thin;scrollbar-color:#2d3448 transparent}
+.lab .CodeMirror-vscrollbar::-webkit-scrollbar,.lab .CodeMirror-hscrollbar::-webkit-scrollbar{width:8px;height:8px}
+.lab .CodeMirror-vscrollbar::-webkit-scrollbar-track,.lab .CodeMirror-hscrollbar::-webkit-scrollbar-track{background:transparent}
+.lab .CodeMirror-vscrollbar::-webkit-scrollbar-thumb,.lab .CodeMirror-hscrollbar::-webkit-scrollbar-thumb{background:#2d3448;border-radius:4px;border:2px solid var(--code)}
+.lab .CodeMirror-vscrollbar::-webkit-scrollbar-thumb:hover,.lab .CodeMirror-hscrollbar::-webkit-scrollbar-thumb:hover{background:#465070}
 .lab .CodeMirror-scrollbar-filler,.lab .CodeMirror-gutter-filler{background:transparent}
 .lab-err{margin:8px 12px 0;padding:7px 10px;border-radius:6px;font:12px var(--mono);color:#fecdd3;background:rgba(190,18,60,.2);white-space:pre-wrap}
-.lab-tabs{display:flex;align-items:center;gap:2px;padding:6px 10px;border-bottom:1px solid #232838;overflow-x:auto;scrollbar-width:none}
+.lab-tabs{display:flex;align-items:flex-end;gap:0;padding:6px 8px 0;background:var(--code2);border-bottom:1px solid #232838;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
 .lab-tabs::-webkit-scrollbar{display:none}
-.lab-tab{flex:none;border:0;background:none;color:#7d869c;font:600 11.5px var(--mono);padding:4px 10px;border-radius:6px;cursor:pointer;white-space:nowrap;transition:background .25s,color .25s,max-width .45s,padding .45s,opacity .35s}
-.lab-tab:hover{color:#d6deeb}
-.lab-tab.open{color:#fff;background:#1d2436}
-.lab-tab[data-s=python].open{background:linear-gradient(90deg,#1e40af,#2563eb)}
-.lab.fast .lab-tab.lab-more.open{background:linear-gradient(90deg,#9a3412,#b91c1c)}
-.lab-more{max-width:0;padding-left:0;padding-right:0;opacity:0;overflow:hidden;pointer-events:none}
-.lab.sj .lab-more{max-width:140px;padding-left:10px;padding-right:10px;opacity:1;pointer-events:auto}
+.lab-tab{position:relative;flex:none;display:inline-flex;align-items:center;gap:6px;margin-bottom:-1px;border:1px solid transparent;border-bottom:0;border-radius:7px 7px 0 0;background:none;color:#7d869c;font:500 11.5px var(--mono);padding:7px 13px 8px;cursor:pointer;white-space:nowrap;transition:color .2s,background .2s,max-width .45s,padding .45s,opacity .35s}
+.lab-tab svg{width:13px;height:13px;flex:none;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linejoin:round;opacity:.8}
+.lab-tab:hover{color:#d6deeb;background:#141927}
+.lab-tab.open{color:#fff;background:var(--code);border-color:#232838}
+.lab-tab.open::before{content:"";position:absolute;left:-1px;right:-1px;top:-1px;height:2px;border-radius:7px 7px 0 0;background:#3b82f6}
+.lab.fast .lab-tab.lab-more.open::before{background:linear-gradient(90deg,#f97316,#dc2626)}
+.lab-tab.open::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--code)}
+.lab-more{max-width:0;padding-left:0;padding-right:0;border-width:0;opacity:0;overflow:hidden;pointer-events:none}
+.lab.sj .lab-more{max-width:170px;padding-left:13px;padding-right:13px;border-width:1px;opacity:1;pointer-events:auto}
 .lab.sj .lab-more:nth-of-type(3){transition-delay:.08s}.lab.sj .lab-more:nth-of-type(4){transition-delay:.16s}
-.lab-note{margin-left:auto;padding-left:10px;font:500 11px var(--mono);color:#6f7891;white-space:nowrap}
+.lab-note{margin-left:auto;align-self:center;padding:0 4px 6px 10px;font:500 11px var(--mono);color:#6f7891;white-space:nowrap}
 .lab-note.busy::before{content:"";display:inline-block;width:8px;height:8px;margin-right:7px;border-radius:50%;background:#f97316;animation:labblink .8s ease-in-out infinite alternate}
 @keyframes labblink{to{opacity:.25}}
 .lab-pane{position:relative;flex:1;min-height:0;--p:0}
@@ -231,7 +233,7 @@ section.s{padding:76px 0 8px}
 .lab-pane.sweep .lab-scan{opacity:1}
 .lab-code,.lab-panel{position:absolute;inset:0}
 .lab-code[hidden],.lab-panel[hidden]{display:none}
-.lab-panel pre{margin:0;height:100%;box-sizing:border-box;overflow:auto;padding:10px 14px;font:11.5px/1.55 var(--mono);color:#b9c2d6;white-space:pre}
+.lab-panel .CodeMirror{height:100%;background:transparent;color:#c9d1d9;font:11.5px/1.55 var(--mono)}
 .lab-right{position:relative;min-height:0;background:radial-gradient(ellipse at 50% 30%,#141a2c,#080a12 70%)}
 .lab-right canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:grab}
 .lab-cover{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;background:rgba(8,10,18,.55)}
@@ -262,7 +264,7 @@ section.s{padding:76px 0 8px}
 @media(max-width:960px){.lab{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,44fr) minmax(0,56fr);height:min(calc(100svh - 84px),860px)}
 .lab-right{order:-1}.lab-left{border-right:0;border-top:1px solid #232838}
 .lab.is-full{grid-template-columns:minmax(0,1fr)}}
-@media(max-width:600px){.lab-lw{display:none}.lab-sw{display:inline}.lab-bar{padding:8px 10px}.lab-tabs{padding:5px 8px}.lab-note{display:none}.lab-sj{padding:7px 10px 7px 12px;font-size:13px}.lab-hud{left:10px;bottom:10px}.lab-stats{font-size:11.5px}}
+@media(max-width:600px){.lab-lw{display:none}.lab-sw{display:inline}.lab-bar{padding:8px 10px}.lab-tabs{padding:5px 6px 0}.lab-tab{padding:6px 10px 7px}.lab.sj .lab-more{padding-left:10px;padding-right:10px}.lab-note{display:none}.lab-sj{padding:7px 10px 7px 12px;font-size:13px}.lab-hud{left:10px;bottom:10px}.lab-stats{font-size:11.5px}}
 /* cards */
 .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-top:28px}
 .card{position:relative;background:var(--white);border:1px solid var(--line);border-radius:12px;padding:20px 20px 22px;transition:border-color .12s,transform .12s,box-shadow .12s;overflow:hidden}
@@ -550,16 +552,16 @@ void mandel_rows(int32_t *out, int64_t h, int64_t w,
         <button type="button" class="lab-reset"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 20 9 8l4 6.5"/><path d="m11 17 5-8 6 11H2"/><path d="m7.4 10.7 1.6 1.3 1.4-1.2"/></svg>New terrain</button>
       </div>
       <div class="lab-tabs" role="tablist" aria-label="The code, and what scramjit makes of it">
-        <button type="button" class="lab-tab open" data-s="python">Python</button>
-        <button type="button" class="lab-tab lab-more" data-s="tree">AST &amp; types</button>
-        <button type="button" class="lab-tab lab-more" data-s="c">C</button>
-        <button type="button" class="lab-tab lab-more" data-s="wasm">Wasm</button>
+        <button type="button" class="lab-tab open" role="tab" data-s="python"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2h6l3 3v9H5z"/><path d="M11 2v3h3"/></svg><span class="lab-tname">erosion.py</span></button>
+        <button type="button" class="lab-tab lab-more" role="tab" data-s="tree"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="3" r="1.6"/><circle cx="3.5" cy="12.5" r="1.6"/><circle cx="12.5" cy="12.5" r="1.6"/><path d="M8 4.6v3M8 7.6 3.5 11M8 7.6l4.5 3.4"/></svg>AST &amp; types</button>
+        <button type="button" class="lab-tab lab-more" role="tab" data-s="c"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2h6l3 3v9H5z"/><path d="M11 2v3h3"/></svg><span class="lab-tname">erode.c</span></button>
+        <button type="button" class="lab-tab lab-more" role="tab" data-s="wasm"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2h6l3 3v9H5z"/><path d="M11 2v3h3"/></svg><span class="lab-tname">erode.wat</span></button>
         <span class="lab-note"></span>
       </div>
       <div class="lab-err" role="status" hidden></div>
       <div class="lab-pane">
         <div class="lab-code"><textarea aria-label="Python code"></textarea></div>
-        <div class="lab-panel" hidden><pre></pre></div>
+        <div class="lab-panel" hidden></div>
         <div class="lab-tree" hidden></div>
         <i class="lab-scan" aria-hidden="true"></i>
       </div>
@@ -876,7 +878,10 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/clike/clike.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/mode/simple.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/wast/wast.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="lab.js?v=11" defer></script>
+<script src="lab.js?v=13" defer></script>
 </body>
 </html>

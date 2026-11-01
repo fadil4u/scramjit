@@ -4,6 +4,7 @@
   'use strict';
   const PYODIDE = 'https://cdn.jsdelivr.net/pyodide/v0.27.7/full/';
   const PRESETS = { erosion: 'Hydraulic erosion', beacon: 'Beacon (viewshed)', landslides: 'Landslides' };
+  const ENTRY = { erosion: 'erode', beacon: 'viewshed', landslides: 'slide' };
   const UNITS = { erosion: 'droplets/s', beacon: 'sightlines/s', landslides: 'cells/s' };
   const SJ_FILES = ['__init__.py', '_compiler.py', '_dispatch.py', '_errors.py', '_runtime.py', '_types.py'];
   const root = document.getElementById('lab-demo');
@@ -11,7 +12,7 @@
   const $ = s => root.querySelector(s);
   const RM = matchMedia('(prefers-reduced-motion:reduce)').matches;
 
-  let py = null, lab = null, editor = null, preset = 'erosion', compiled = false, running = false;
+  let py = null, lab = null, editor = null, viewer = null, preset = 'erosion', compiled = false, running = false;
   let sources = {}, info = {}, stage = 'python', pyRate = {}, rate = 0, editTimer = null, presetsLoaded = null;
   let nudged = false, startedAt = 0;
 
@@ -64,17 +65,25 @@
     $('.lab-tree').hidden = s !== 'tree';
     if (s === 'python') { if (editor) editor.refresh(); return; }
     if (s === 'tree') { renderTree(); return; }
-    const pre = $('.lab-panel pre');
-    if (info.state === 'error') { pre.textContent = info.error; return; }
-    if (info.state === 'fallback') { pre.textContent = 'scramjit runs this as Python:\n\n' + info.reason; return; }
-    if (s === 'c') { pre.textContent = info.c || ''; return; }
+    if (info.state === 'error') return view(info.error, null);
+    if (info.state === 'fallback') return view('scramjit runs this as Python:\n\n' + info.reason, null);
+    if (s === 'c') return view(info.c || '', 'text/x-csrc');
     if (!info.wat) {                                    // disassemble when asked, then keep it
-      pre.textContent = ';; disassembling…';
+      view(';; disassembling…', 'wast');
       setTimeout(() => {
         try { info.wat = lab.wasm_text(); } catch (e) { info.wat = ';; could not disassemble: ' + e.message; }
-        if (stage === 'wasm') pre.textContent = info.wat;
+        if (stage === 'wasm') view(info.wat, 'wast');
       }, 30);
-    } else pre.textContent = info.wat;
+    } else view(info.wat, 'wast');
+  }
+  // the read-only viewer for the C and the WebAssembly text; kept as is (and scrolled) if unchanged
+  function view(text, mode) {
+    if (viewer.getValue() !== text || viewer.getOption('mode') !== mode) {
+      viewer.setOption('mode', mode);
+      viewer.setValue(text);
+      viewer.scrollTo(0, 0);
+    }
+    viewer.refresh();
   }
 
   const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -100,14 +109,14 @@
     el.innerHTML = `<p class="lab-tree-head">The function's syntax tree, statement by statement, with the type scramjit inferred for each name it binds. Click a statement for its expressions.</p><ul>${stmtHTML(info.tree)}</ul>`;
   }
 
-  function note(t, busy) { const n = $('.lab-note'); n.textContent = t; n.classList.toggle('busy', !!busy); }
+  function note(t, busy, title) { const n = $('.lab-note'); n.textContent = t; n.title = title || ''; n.classList.toggle('busy', !!busy); }
   // the raster line sweeps down the editor; the C replaces the Python line by line, then the C tab opens
   function sweep() {
     const pane = $('.lab-pane');
-    $('.lab-panel pre').textContent = info.c;
-    $('.lab-panel pre').scrollTop = 0;
     editor.scrollTo(0, 0);
     $('.lab-code').hidden = false; $('.lab-panel').hidden = false; $('.lab-tree').hidden = true;
+    view(info.c, 'text/x-csrc');
+    viewer.scrollTo(0, 0);
     pane.style.setProperty('--p', 0);
     pane.classList.add('sweep');
     const t0 = performance.now(), d = RM ? 0 : 1500;
@@ -131,11 +140,12 @@
       if (stage !== 'python') showStage('python');
       return;
     }
-    note('scramjit is compiling…', true);
+    note('compiling…', true);
     requestAnimationFrame(() => setTimeout(() => {     // compiling blocks the page, so paint first
       if (!compiled) return;
       info = JSON.parse(lab.set_code(preset, src, true));
-      note(info.state === 'compiled' ? `compiled in ${(info.compile_ms / 1000).toFixed(1)} s` : info.state === 'fallback' ? 'runs as Python' : '');
+      const sec = (info.compile_ms / 1000).toFixed(1);
+      note(info.state === 'compiled' ? sec + ' s' : '', false, info.state === 'compiled' ? `scramjit and cimo compiled this in ${sec} s, in this page` : '');
       finish();
       if (info.state === 'compiled' && intro) sweep();
       else if (info.state === 'fallback' && intro) showStage('c');
@@ -257,6 +267,11 @@
     const ta = $('textarea');
     editor = CodeMirror.fromTextArea(ta, { mode: 'python', theme: 'sj', lineNumbers: true, indentUnit: 4, viewportMargin: Infinity });
     editor.setValue('# loading the code…');
+    viewer = CodeMirror($('.lab-panel'), { theme: 'sj', lineNumbers: true, readOnly: true, mode: 'text/x-csrc' });
+    const names = () => {                               // the tabs are named after the files
+      const t = root.querySelectorAll('.lab-tname');
+      t[0].textContent = preset + '.py'; t[1].textContent = ENTRY[preset] + '.c'; t[2].textContent = ENTRY[preset] + '.wat';
+    };
     presetsLoaded = Promise.all(Object.keys(PRESETS).map(async p => { sources[p] = await text('lab/' + p + '.py'); }))
       .then(() => { if (!running) editor.setValue(sources[preset]); })
       .catch(e => editor.setValue('# could not load the presets: ' + e.message));
@@ -264,7 +279,7 @@
     const sel = $('.lab-preset');
     for (const [k, v] of Object.entries(PRESETS)) sel.add(new Option(v, k));
     sel.addEventListener('change', () => {
-      preset = sel.value; rate = 0;
+      preset = sel.value; rate = 0; names();
       if (sources[preset]) editor.setValue(sources[preset]);
       if (running) { lab.reset(); clearTimeout(editTimer); setCode(compiled); }
     });
@@ -288,7 +303,7 @@
       row.nextElementSibling.hidden = !row.classList.contains('on');
     });
     // full screen: the Fullscreen API where it works on elements, a fixed full-window layout elsewhere
-    const relayout = () => { resize(); if (editor) editor.refresh(); };
+    const relayout = () => { resize(); if (editor) editor.refresh(); if (viewer) viewer.refresh(); };
     const setFull = on => { root.classList.toggle('is-full', on); $('.lab-full').setAttribute('aria-label', on ? 'Exit full screen' : 'Full screen'); requestAnimationFrame(relayout); };
     $('.lab-full').addEventListener('click', () => {
       if (document.fullscreenElement) document.exitFullscreen();

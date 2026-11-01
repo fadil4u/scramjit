@@ -90,9 +90,9 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
     building a training loop around generated environments, where it is the main obstacle.
 16. **Compile time jumps on large functions.** In a generated 200-line training loop, adding a 4-line nested
     copy (`rec[t, y, x] = grid[y, x]` under one `if`) took the compile from about 3 s to 11 to 15 s on a loaded
-    machine. Find out whether it comes from versioning duplicating the outer loop or from cimo's backend passes,
-    where a profile puts most of the time. Compile time decides whether generated code is practical, since each
-    candidate compiles once.
+    machine. The cause is bounds-check versioning: a planner over the same world is 4,410 lines of C and 205 loops
+    with checks (16.4 s in cimo), 1,611 lines and 50 loops without (2.5 s). Limit how many copies versioning makes
+    in one function. Compile time decides whether generated code is practical, since each candidate compiles once.
 17. **float32 arithmetic falls back, with a misleading reason:** "arithmetic on numpy bools", because
     `arith_result` returns None for narrow types too. Say what is actually unsupported, then compile it:
     float64 doubles the memory of anything with float32 weights.

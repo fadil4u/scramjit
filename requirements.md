@@ -74,8 +74,8 @@ def saxpy(a: float, x, y):
         y[i] += a * x[i]
 ```
 
-The decorator is the whole user-facing API. Options (bounds checks, cache control) are keyword
-arguments to it. It is named `scram` (to scram: to go, fast) and imported as
+The decorator is the whole user-facing API. Options (`boundscheck`, `cache`, `fallback`) are
+keyword arguments to it. It is named `scram` (to scram: to go, fast) and imported as
 `from scramjit import scram`; a callable module (`@scramjit`) was rejected because mypy and Pyright
 report "module not callable" for every variant of the trick. The undecorated
 function stays reachable for debugging.
@@ -86,9 +86,29 @@ Generated code never touches a `PyObject`. Arguments are unboxed at the call bou
 scalars into C scalars, numpy arrays into pointer + shape + strides, without copying), the body
 runs on C values only, and the result is boxed on return.
 
-Anything that can't be unboxed is a compile error that points at the Python line and says why.
-There is no fallback to running on Python objects: it would be slow, and it can't work without
-libpython (cimo links none, and Pyodide has none to link).
+Compiled code never falls back to Python objects *inside* itself: that would be slow, and it can't
+work without libpython (cimo links none, and Pyodide has none to link).
+
+## Fallback: compiled, partly compiled, Python
+
+What can't be compiled runs as plain Python instead, at two granularities:
+
+- **Loop lifting.** Loops that fit the subset are lifted out of a function that otherwise doesn't
+  and compiled on their own; the interpreter runs the rest and calls the compiled loop, passing in
+  the variables it reads and taking back the ones it writes. Those must be unboxable.
+- **Whole function.** If nothing compiles, or a call's argument types can't be unboxed (a `str`,
+  say), that function and signature run as the original Python (`f.__wrapped__`).
+
+So each decorated function, per signature, is in one of three states, shown everywhere with the
+same colours: **compiled** (green, everything native), **partly compiled** (amber, some loops
+native) or **Python** (red, nothing native). Fallback can't change results: the fallback is
+CPython itself.
+
+- Each fallback emits `scramjit.FallbackWarning` once per function and signature, naming the
+  line and the reason. Standard `warnings` filters silence it or make it an error
+  (`-W error::scramjit.FallbackWarning`).
+- `@scram(fallback=False)` makes anything but compiled a `scramjit.CompileError` at the line.
+  For code that must be native, and for CI.
 
 ## Builtins are lowering rules, not functions
 
@@ -108,7 +128,8 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
 
 - **Inference** over the whole function, seeded by the argument types seen at call time and by
   type annotations. A variable that takes several types unifies by Python's rules (`int` and
-  `float` → `float`); types that don't unify are a compile error.
+  `float` → `float`); types that don't unify keep that code
+  in Python (a fallback; a `CompileError` under `fallback=False`).
 - **Annotations** are used, not ignored: as contracts checked at the call boundary, and as
   information for narrowing. Accepted: `int`, `float`, `bool`, numpy dtypes (`np.int8`,
   `np.float32`). Open: scramjit's own spellings for sized scalars and arrays (e.g. `i32`,
@@ -170,26 +191,25 @@ clearer errors or fewer surprises.
 
 ## Visibility and profiling
 
-There is no fallback, so "was it compiled?" is never in doubt: a call that returns ran native code;
-anything else is a compile error at the Python line. What users need to see is what was compiled,
-what it cost, what the compiler decided and what to change. Tools, all pure Python:
+Fallback makes speed silent to lose, so the state of every function, and of every line in it, must
+be easy to see. Tools, all pure Python, behind one `scramjit` command (also `python -m scramjit`):
 
-- **`f.signatures`:** the specializations compiled so far.
-- **`SCRAMJIT_LOG=1`:** one line per compile or cache hit (function, signature, time, memory or
-  disk). Makes recompile churn visible.
-- **`python -m scramjit script.py`:** runs the script like `cProfile`, then reports per function and
-  signature: calls, compile time or cache hit, time in native code, and the native share of the
-  whole run (the "JIT coverage" number). Ends with hints.
-- **`f.explain()`:** the Python source annotated per line with the compiler's decisions: inferred
-  and narrowed types, bounds checks proven, hoisted or kept (and why), loops cimo optimized or
-  didn't (and why), copies at the call boundary. Ends with hints.
-- **`python -m scramjit check PATH`:** static, before running: constructs outside the subset in
-  `@scram` functions, with file and line. Type errors still need a call.
-- **`f.c()`:** the generated C for a signature.
+- **`scramjit preflight PATH`:** static, before running. Every `@scram` function under the path
+  with its state (compiled, partly compiled, Python), and line by line what stays in Python and why.
+  Annotations are used; unannotated arguments are assumed numeric or arrays, so type-driven
+  fallbacks show only at runtime. Exits non-zero on anything but compiled, for CI.
+- **`scramjit profile script.py`:** runs the script like `cProfile`, then reports per function and
+  signature: state, calls, compile time or cache hit, time in native code, and the native share of
+  the whole run (the coverage number). Ends with hints.
+- **`f.explain()`:** the Python source annotated per line: state (native or Python, and why),
+  inferred and narrowed types, bounds checks proven, hoisted or kept, loops cimo optimized or not,
+  copies at the call boundary. Ends with hints.
+- **`f.signatures`, `f.c()`, `SCRAMJIT_LOG=1`:** the specializations and their states, the
+  generated C, and one log line per compile, cache hit or fallback.
 
-Hints must be actionable and name the line: annotate an argument that arrives as several types
-(several specializations), pass a numpy array instead of a list (copied per call), make an array
-contiguous (strided access), and when a bounds check stays in a hot loop, what would let it go.
+Hints must be actionable and name the line: what stops a loop compiling and how to rewrite it,
+annotate an argument that arrives as several types, pass a numpy array instead of a list (copied per
+call), make an array contiguous, and when a bounds check stays in a hot loop, what would let it go.
 
 ## What scramjit needs from cimo
 
@@ -224,8 +244,13 @@ dtypes and range analysis. Done when each rule has differential tests and the ge
 each M0 kernel contains no iterator or boxing code.
 
 **M3: n-D arrays, errors, disk cache, Pyodide.** Done when all M0 kernels run in native CPython
-and in Pyodide, a second process reuses the disk cache, and every out-of-subset construct gives an
-error pointing at the Python line.
+and in Pyodide, a second process reuses the disk cache, and every out-of-subset construct is
+reported at its Python line (fallback warning, preflight, and `CompileError` under
+`fallback=False`). Whole-function fallback lands in M1; it is the original function.
+
+**M4: loop lifting.** Compile the loops that fit inside functions that don't. Done when a function
+mixing Python-only setup (dicts, strings) with a numeric loop is partly compiled, matches CPython,
+and preflight, profile and `explain()` show the state per line.
 
 ## Risks
 
@@ -235,5 +260,7 @@ error pointing at the Python line.
   auto-vectorizer exists.
 - **Semantic drift** from CPython in edge cases (overflow, division, indexing, narrowing) breaks
   the "it's still Python" promise. Differential testing is the guard.
+- **Silent slowness** from fallback: a decorated function that quietly runs as Python. The warning,
+  preflight, profile and `fallback=False` are the guard.
 - **Scope creep** into growable lists, dicts and classes pulls in a runtime. Hold the line until
   the numeric subset is solid.

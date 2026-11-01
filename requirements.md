@@ -23,6 +23,9 @@ This is the living spec: what to build, why, what has been measured, and in what
 - **Site and docs** (`docs/`, served by GitHub Pages) are written as for the released product:
   present tense, no roadmap or status notes. They follow this spec; where it is open, they show
   Python's behavior as the default.
+- **Prompt for Agents** (`docs/index.html`, `#agent-prompt`) is the exception: agents act on it, so
+  it states today's behavior, verified by running it. It gives the GitHub install, while PyPI holds
+  placeholders. Update it when the subset, CLI or install changes.
 
 ## Pitch
 

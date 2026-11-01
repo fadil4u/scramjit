@@ -75,6 +75,22 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--hot);outline-offset
 .pip button svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .pip button .i-done,.pip button.done .i-copy{display:none}.pip button.done .i-done{display:block}.pip button.done{color:#7ee2b8}
 .pip button:hover{background:#2b3245;color:#fff}
+.btn .i-robot{width:17px;height:17px;flex:none}
+.i-robot{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.i-robot .eye{fill:currentColor;stroke:none}
+.agent{position:fixed;inset:0;margin:auto;width:min(860px,calc(100vw - 32px));height:min(760px,calc(100dvh - 32px));max-width:none;max-height:none;padding:0;background:var(--code);color:#c9d1d9;border:1px solid var(--codeline);border-radius:12px;box-shadow:0 30px 80px -20px rgba(0,0,0,.7);overflow:hidden}
+.agent[open]{display:flex;flex-direction:column}
+.agent::backdrop{background:rgba(8,10,18,.72);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.agent-bar{display:flex;align-items:center;gap:10px;padding:10px 10px 10px 16px;background:var(--code2);border-bottom:1px solid #232838;flex:none}
+.agent-bar .i-robot{width:20px;height:20px;flex:none;color:#ffb072}
+.agent-bar h2{flex:1;min-width:0;color:#e6edf3;font-size:15px;font-weight:600;letter-spacing:-.01em}
+.agent-bar button{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:32px;min-width:32px;border:0;border-radius:6px;background:#1f2433;color:#c9d1d9;font:600 13px var(--font);cursor:pointer}
+.agent-bar button:hover{background:#2b3245;color:#fff}
+.agent-bar svg{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.agent-copy{padding:0 12px}.agent-copy svg,.agent-close svg{width:15px;height:15px}
+.agent-copy .i-done,.agent-copy.done .i-copy{display:none}.agent-copy.done .i-done{display:block}.agent-copy.done{color:#7ee2b8}
+.agent-note{padding:10px 16px;font-size:13px;color:#8e94a3;border-bottom:1px solid #232838;flex:none}
+.agent pre{flex:1;min-height:0;margin:0;padding:14px 16px;overflow:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:4;scrollbar-color:#2d3243 transparent}
+.agent pre:focus-visible{outline:2px solid #ffb072;outline-offset:-2px}
 .hero-note{margin-top:14px;font-size:13px;color:#7d879e;max-width:46ch}
 .hero-note a{color:#ffb072}.hero-note a:hover{color:#ffd2ad}
 @media(max-width:900px){
@@ -415,6 +431,7 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
       <div class="hero-cta">
         <div class="pip"><span>pip install scramjit</span><button type="button" data-copy="pip install scramjit" aria-label="Copy" title="Copy"><svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg><svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button></div>
         <a class="btn btn-d" href="docs/">Read the docs</a>
+        <button type="button" class="btn btn-d" data-agent-open><svg class="i-robot" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v4"/><circle cx="12" cy="3" r=".6"/><rect x="4" y="7" width="16" height="13" rx="3"/><path d="M1.5 12.5v3M22.5 12.5v3M9 16h6"/><circle class="eye" cx="9" cy="11.5" r="1.2"/><circle class="eye" cx="15" cy="11.5" r="1.2"/></svg>Prompt for Agents</button>
       </div>
       <p class="hero-note">Pure Python, with cimo as its only dependency. CPython 3.9+ on Linux, macOS and Windows, and Pyodide in the browser.</p>
     </div>
@@ -752,6 +769,79 @@ for (int64_t i = 0; i &lt; a_len; i++)
 </div></section>
 </main>
 
+<dialog class="agent" id="agent-prompt" aria-labelledby="agent-title">
+  <div class="agent-bar"><svg class="i-robot" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v4"/><circle cx="12" cy="3" r=".6"/><rect x="4" y="7" width="16" height="13" rx="3"/><path d="M1.5 12.5v3M22.5 12.5v3M9 16h6"/><circle class="eye" cx="9" cy="11.5" r="1.2"/><circle class="eye" cx="15" cy="11.5" r="1.2"/></svg><h2 id="agent-title">Prompt for Agents</h2>
+    <button type="button" class="agent-copy" aria-label="Copy prompt"><svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg><svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Copy</span></button>
+    <button type="button" class="agent-close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
+  <p class="agent-note">Paste this into your coding agent. It covers everything needed to use scramjit.</p>
+  <pre id="agent-text" tabindex="0"># scramjit
+JIT for Python hot loops, written in pure Python.
+Repo: https://github.com/farizrahman4u/scramjit
+Docs: https://www.scramjit.dev/docs/ (where they differ, this prompt reflects actual behavior)
+
+## What
+On the first call per argument-type signature, `@scram` generates C for the function and compiles it in-process with cimo, a pure-Python C compiler. No LLVM, C toolchain or binary wheels. Arrays aren't copied. The GIL is released, so threads run in parallel. Source stays plain Python. Pre-release, MIT.
+
+## Install
+From GitHub; the PyPI packages are placeholders:
+pip install numpy "cimo @ git+https://github.com/farizrahman4u/cimo#subdirectory=python" "scramjit @ git+https://github.com/farizrahman4u/scramjit"
+CPython 3.9+ or Pyodide. numpy is only needed for arrays. Tested on arm64 Linux and Pyodide; x86-64, macOS and Windows are less tested.
+
+## When
+Use: loops over numbers or arrays that don't vectorize (recurrences, data-dependent branches, DP, flood fill, simulation, byte scans); threads blocked by the GIL; environments that forbid native packages. Measured 11x-540x over CPython.
+Skip: numpy already vectorizes it; the work is strings, dicts or objects; ints may exceed 64 bits; the process is too short to repay about 0.1 s of compiling per signature (a disk cache serves later processes).
+
+## API
+from scramjit import scram, CompileError, FallbackWarning
+
+@scram
+def ema(x, y, a: float):
+    y[0] = x[0]
+    for i in range(1, len(x)):
+        y[i] = a * x[i] + (1 - a) * y[i - 1]
+
+Options, all default True: @scram(boundscheck=, cache=, fallback=, parity=)
+boundscheck=False: no index checks; out of bounds corrupts memory.
+cache=False: nothing written to disk.
+fallback=False: raise CompileError instead of running as Python.
+parity=False: faster; inf/nan instead of ZeroDivisionError and math errors.
+Function members: f.preflight(), f.signatures, f.c(), f.__wrapped__ (the original).
+Annotations int, float, bool are enforced at the call (TypeError).
+
+## Subset
+A function compiles whole, or all of it runs as Python with a FallbackWarning. Results don't change, only speed. Keep each hot loop in its own module-level function.
+Arguments: int, float, bool; contiguous n-D numpy arrays of int8-int64, uint8-uint32, float32, float64. Anything else falls back; convert first with np.asarray(list), np.frombuffer(bytes, np.uint8), np.ascontiguousarray(a).
+Compiles: for, while, if, break, continue, ternary; a[i, j], negative indices, a.shape, a.ndim; tuples; lists of fixed size; comprehensions; range, enumerate, zip, reversed, map, filter, len, abs, min, max, any, all, int, float, round; sum of ints or sum(gen, 0.0); math.*.
+Falls back, with the fix:
+- calling any other function, even @scram, or recursing: inline it
+- global variables: pass as arguments
+- a[1:], a[i][j], a * 2, a.sum(), np.*: index elements with a[i, j]; allocate arrays outside, pass them in
+- arithmetic on elements narrower than 64 bits: int(a[i]) or float(a[i]); comparing and storing them is fine
+- changing a variable's type, s = 0 then s += 0.5: start with s = 0.0
+- sum(floats) without a start: sum(gen, 0.0)
+- x ** 0.5 on a float: math.sqrt(x); int ** variable int: use a loop
+- dict, set, str, print, append, class, self, try, raise, assert, for-else, nested def, lambda outside map/filter, default parameters: move outside the function
+
+## Semantics
+Matches CPython bit for bit: // and % on negatives, negative indices, IndexError, ZeroDivisionError, math. Exception: ints are 64-bit and wrap silently. No sandbox; compiled code has the process's privileges.
+
+## CLI
+scramjit preflight [paths]  # static, imports nothing: state of each @scram function, blocking lines with hints, undecorated loops that would compile; -q, --json, --no-suggest
+scramjit preflight FILE:FUNC  # line by line: state, types, bounds checks
+scramjit preflight --run app.py [args] | --run -m pytest  # real types; compile, native and Python time; report on stderr
+scramjit c FILE:FUNC  # generated C; --runtime for a standalone file
+scramjit cache info|clear|path
+preflight exits 1 if any @scram function runs as Python, so it works in CI. SCRAMJIT_LOG=1 logs each compile and fallback. Every command has --help.
+
+## Workflow
+1. Profile. Move the hot loop into a module-level function of numbers and arrays.
+2. Add @scram; run `scramjit preflight FILE`; apply the hints until it reports compiled.
+3. Run `scramjit preflight --run -m pytest`: static analysis can't see real argument types.
+4. Compare results with f.__wrapped__ and measure from the second call.
+5. Guard the speed: @scram(fallback=False) or preflight in CI.</pre>
+</dialog>
+
 <footer class="site"><div class="wrap foot">
   <span>scramjit · MIT. Built on <a href="https://www.cimo.dev">cimo</a>.</span>
   <nav class="foot-links" aria-label="Footer"><a href="docs/">Docs</a><a href="https://github.com/farizrahman4u/scramjit">GitHub</a><a href="https://github.com/farizrahman4u/scramjit/blob/main/requirements.md">Design spec</a><a href="https://github.com/farizrahman4u/scramjit/blob/main/LICENSE">License</a></nav>
@@ -765,6 +855,20 @@ document.querySelectorAll('[data-copy]').forEach(function (b) {
     if (navigator.clipboard) navigator.clipboard.writeText(b.dataset.copy).then(done, function () {});
   });
 });
+// Prompt for Agents
+(function () {
+  var dlg = document.getElementById('agent-prompt'), copy = dlg.querySelector('.agent-copy'), label = copy.querySelector('span');
+  document.querySelector('[data-agent-open]').addEventListener('click', function () { dlg.showModal(); });
+  dlg.querySelector('.agent-close').addEventListener('click', function () { dlg.close(); });
+  dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
+  copy.addEventListener('click', function () {
+    if (!navigator.clipboard) return;
+    navigator.clipboard.writeText(document.getElementById('agent-text').textContent).then(function () {
+      copy.classList.add('done'); label.textContent = 'Copied';
+      setTimeout(function () { copy.classList.remove('done'); label.textContent = 'Copy'; }, 1400);
+    }, function () {});
+  });
+})();
 // Highlighter for the small Python and C samples on this page.
 (function () {
   var esc = function (t) { return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };

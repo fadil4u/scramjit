@@ -133,6 +133,8 @@ def exception(status, io):
         import numpy
         return _numpys_error(numpy.linspace, (0.0, 1.0, io[2]))
     if status == INT_BOUNDS_ERROR:      # numpy (NEP 50): a Python int stored into a narrower dtype
+        if not -(1 << 8 * struct.calcsize('l') - 1) <= io[2] < 1 << 8 * struct.calcsize('l') - 1:    # 32 bits on wasm32 and Windows
+            return OverflowError('Python int too large to convert to C long')
         return OverflowError(f'Python integer {io[2]} out of bounds for {NARROW_INT_DTYPES[io[3]]}')
     return SystemError(f'scramjit: unknown status {status}')
 
@@ -185,6 +187,23 @@ static inline double sj_fmod_py(double a, double b) {
     if (m != 0.0) { if ((b < 0) != (m < 0)) m += b; }
     else m = copysign(0.0, b);
     return m;
+}
+static inline float sj_fmod_py32(float a, float b) {
+    float m = (float)fmod(a, b);
+    if (m != 0.0f) { if ((b < 0) != (m < 0)) m += b; }
+    else m = (float)copysign(0.0, b);
+    return m;
+}
+static inline float sj_ffloordiv32(float a, float b) {
+    float m = (float)fmod(a, b);
+    float div = (a - m) / b;
+    if (m != 0.0f) { if ((b < 0) != (m < 0)) div -= 1.0f; }
+    if (div != 0.0f) {
+        float f = (float)floor(div);
+        if (div - f > 0.5f) f += 1.0f;
+        return f;
+    }
+    return (float)copysign(0.0, a / b);
 }
 static inline double sj_ffloordiv(double a, double b) {
     double m = fmod(a, b);

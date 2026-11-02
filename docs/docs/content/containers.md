@@ -49,7 +49,7 @@ A shape that doesn't broadcast raises numpy's `ValueError`. An array can go into
 | Functions on one number | [these](loops-and-builtins.md#numpy-functions-on-single-numbers) | `np.tanh`, `np.power` |
 | Reductions to one number | [`sum`, `mean`, `std`, `var`, `max`, `argmax` and the rest](loops-and-builtins.md#numpy-reductions) | `axis=` on more than one dimension, `keepdims=True` |
 | Making arrays | [`np.zeros`, `x.copy()`, `np.arange` and the rest](#making-arrays) | `x * 2`, `a + b`, `np.sqrt(x)`, `x.reshape(...)`, `np.eye(n)` |
-| Element types | `float64`, `int64`, and reading and storing smaller ones | arithmetic on `float32`, `int32`, `uint8` and friends |
+| Element types | `float64`, `int64`, and [`float32`, `int32`, `uint8` and friends](types.md#narrow-dtypes), with arithmetic | `uint64`, and on narrow dtypes `**`, `sum()`, numpy functions and reductions |
 | Other | `len()`, `.shape`, `.size`, `.ndim`, returning arrays and views, alone or in a tuple | `np.dot`, `np.linalg`, `np.sort`, `np.cumsum` |
 
 Anything in the right column runs as Python with numpy's own result, and the loops around it still compile if they fit.

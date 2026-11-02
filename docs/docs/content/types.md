@@ -40,13 +40,43 @@ for v in x:          # x holds floats
 
 As in Python, `s` is the int `0` if the loop doesn't run, and a float otherwise. That works when the int is a literal or an argument, and `s` is only combined with floats, compared with them, or returned. Any other use, such as `s + 1`, `-s`, `t = s` or `if s:`, could differ between the two, so it runs as Python.
 
+## Narrow dtypes
+
+Arithmetic on `float32`, `int32`, `int16`, `int8`, `uint32`, `uint16` and `uint8` compiles, as array elements and as numpy scalars passed in, and gives what numpy gives:
+
+```python
+@scram
+def brighten(image, amount):
+    for i in range(len(image)):
+        image[i] = image[i] + amount    # 250 + 10 wraps to 4
+```
+
+| With a `uint8` or `float32` | Result |
+|:---|:---|
+| a Python int | the same dtype; on an integer dtype an int that doesn't fit raises `OverflowError`, except with `/` |
+| a Python float | `float32` stays `float32`; an integer dtype gives `float64` |
+| another numpy scalar | numpy's promotion: `uint8` with `int8` is `int16`, `int32` with `float32` is `float64` |
+| `/` of two integers | `float64` |
+
+Comparisons follow the same rules, so `x[i] == 0.1` on a `float32` is true when `x[i]` is `np.float32(0.1)`.
+
+Half the memory per element also means twice the numbers in each vector register. On arm64, `y[i] = a * x[i] + y[i]` takes 0.15 ns per element on `float32` against 0.26 on `float64`. Bytes and shorts compile but don't vectorize yet. A running float total doesn't vectorize on any dtype, since parity keeps the order of its additions.
+
+A total may start as a literal, and is numpy's from the first `+=`:
+
+```python
+total = 0.0              # the Python float 0.0 if the loop doesn't run
+for i in range(len(x)):
+    total += x[i] * y[i]     # np.float32 from here on
+```
+
+The literal must have the same kind as the array and fit its dtype exactly: `0.0` or `0.5`, not `0.1`, on `float32`, and not `0` either. Such a variable can then only meet numpy scalars, or be compared with an int if it holds ints. Anything else keeps the function in Python.
+
+Also in Python, with numpy's result: `**`, `sum()`, and [numpy functions and reductions](loops-and-builtins.md#numpy-functions-on-single-numbers) on these dtypes.
+
 ## The narrowest type that is proven sufficient
 
-The compiler picks the smallest type that holds every value a variable can take, from annotations, array dtypes and value-range analysis:
-
-- a loop index bounded by an array length,
-- `x % 256`,
-- an element read from a `uint8` array.
+The compiler takes narrow types from annotations and array dtypes, such as an element read from a `uint8` array. It doesn't yet narrow from value ranges, such as a loop index bounded by an array length or `x % 256`.
 
 Without a proof, integers are `int64` and floats `float64`. The payoff is mainly in arrays and SIMD (smaller elements, more lanes per vector); narrowing scalars rarely helps on 64-bit CPUs.
 

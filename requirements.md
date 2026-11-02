@@ -238,8 +238,10 @@ Each decision is explicit and tested against CPython:
 - **numpy scalars are numpy's, not Python's.** A value read from an array is a numpy scalar:
   dividing it by zero gives inf, nan or 0 instead of raising, and int with np.int64 gives
   np.int64 (NEP 50). Types record numpy-ness; a variable holding both kinds (`total = 0.0`, then
-  `total += x[i]`) carries a runtime flag. Narrow dtypes (float32, uint8) follow NEP 50 too
-  (M2).
+  `total += x[i]`) carries a runtime flag. Narrow dtypes (float32, uint8) follow NEP 50 too: a Python
+  int must fit the dtype or raises `OverflowError`, except with `/`, and with `float32` a Python number is rounded
+  to `float32` first, in comparisons as well (`np.float32(0.1) == 0.1` is true). A literal that becomes narrow (`total = 0.0`,
+  then `total += x[i]`) is held in the narrow type with the flag, so it must fit exactly.
 
 ## Execution model
 
@@ -465,8 +467,7 @@ with Python's list errors; `math` functions bit-exact, calling the host libm CPy
 wrapped in `mathmodule.c`'s logic. Findings: `sum()` of floats with the default int start
 returns the int 0 when empty, so it falls back with a hint to write `sum(..., 0.0)`; numpy ints
 have no `__floor__`, so `math.floor(np.int64(x))` goes through float (precision lost above 2**53)
-and `math.trunc` of one raises. Not yet: arithmetic on narrow dtypes (NEP 50), value-range
-narrowing, `map`/`filter`.
+and `math.trunc` of one raises. Not yet: value-range narrowing, `map`/`filter`.
 
 **M0 kernels compiled (2026-11-01).** With C-contiguous n-D arrays (numpy's per-axis IndexError),
 `a.shape`/`ndim`/`size`, narrow dtypes loaded, compared and stored (a Python int that doesn't
@@ -532,8 +533,7 @@ results identical to CPython's, natively and in Pyodide.
 
 **M2 acceptance (2026-11-02).** Met as written: every rule has differential tests (`tests/test_m2.py`, `test_lazy.py`,
 `test_for_else.py`), `tests/test_m2_acceptance.py` finds no iterator or boxing code in each M0 kernel's C, and `math` matches CPython
-natively and in Pyodide (28,019 cases there). Not built, and not in that check: narrow types. Reads and stores of narrow
-dtypes work, but arithmetic on them falls back, and range analysis picks no narrow types. Its payoff needs SIMD. `for ... else`
+natively and in Pyodide (28,019 cases there). Arithmetic on narrow dtypes came later, with differential tests over every pair of dtypes (`tests/test_narrow.py`). `axpy` on float32 is 0.15 ns per element against 0.26 on float64 (arm64). Range analysis still picks no narrow types: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, so only temporary arrays could benefit. `for ... else`
 needed definite assignment to follow breaks: `found` assigned before each break and in the else is assigned after the loop.
 
 Found on the way, in code emitted before this: a size from the user could wrap (`[1.5] * (2**61 + 1)`: 8 times that is 8 bytes), so

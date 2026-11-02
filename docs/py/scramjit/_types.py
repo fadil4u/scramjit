@@ -5,6 +5,8 @@ of the same value: np.float64(1) / 0 is inf where 1.0 / 0 raises, and int + np.i
 So every scalar type records whether it is a Python number or a numpy scalar.
 """
 
+import struct
+
 
 class Type:
     __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable', 'ndim', 'strided')
@@ -40,8 +42,7 @@ FLOAT_DYN = Type('float | np.float64', 'double', 'float', np='dyn')
 BOOL_DYN = Type('bool | np.bool', 'int', 'bool', np='dyn')
 NONE = Type('None', 'void', 'none')
 
-# numpy scalars of the narrow dtypes: values read from such arrays. Loaded, compared and stored;
-# arithmetic on them follows numpy's NEP 50 rules, not compiled yet.
+# numpy scalars of the narrow dtypes. Arithmetic on them follows numpy's NEP 50 rules: see narrow_result.
 NARROW = {
     'float32': Type('np.float32', 'float', 'float', np=True),
     'int32': Type('np.int32', 'int32_t', 'int', np=True),
@@ -55,8 +56,49 @@ INT_RANGE = {'int32': (-(1 << 31), (1 << 31) - 1), 'int16': (-(1 << 15), (1 << 1
              'uint32': (0, (1 << 32) - 1), 'uint16': (0, 65535), 'uint8': (0, 255)}
 
 
+# A variable that starts as a literal and becomes a narrow scalar (total = 0.0, then total += x[i], which is
+# np.float32 from then on): held in the narrow type, since the literal fits it exactly, plus the runtime flag.
+NARROW_DYN = {n: Type(f'{"float" if t.kind == "float" else "int"} | {t.name}', t.ctype, t.kind, np='dyn', elem=t) for n, t in NARROW.items()}
+
+
 def is_narrow(t):
     return t.np is True and t.name not in ('np.int64', 'np.float64', 'np.bool')
+
+
+def is_narrow_dyn(t):
+    return t.np == 'dyn' and t.elem is not None and t.is_number
+
+
+def as_narrow(t):
+    """The narrow type a value is when it's numpy's: t, or what a narrow-or-literal variable becomes."""
+    return t.elem if is_narrow_dyn(t) else t
+
+
+def holds_exactly(t, v):
+    """Does narrow type t hold the number v exactly? v is None if it isn't a literal."""
+    if v is None:
+        return False
+    if t.kind == 'int':
+        return type(v) is int and INT_RANGE[t.name[3:]][0] <= v <= INT_RANGE[t.name[3:]][1]
+    if v != v or v in (float('inf'), float('-inf')):
+        return True
+    try:
+        return struct.unpack('<f', struct.pack('<f', v))[0] == v
+    except OverflowError:
+        return False
+
+
+def narrow_or_literal(a, b):
+    """The type of a variable assigned a Python number and a narrow scalar of the same kind, or None."""
+    if is_narrow_dyn(a):
+        return a if b in (a.elem, INT if a.kind == 'int' else FLOAT) else None
+    if is_narrow_dyn(b):
+        return narrow_or_literal(b, a)
+    if is_narrow(b):
+        a, b = b, a
+    if is_narrow(a) and b is (INT if a.kind == 'int' else FLOAT):
+        return NARROW_DYN[a.name[3:]]
+    return None
 
 _BY_KIND = {('int', False): INT, ('int', True): NP_INT64, ('int', 'dyn'): INT_DYN,
             ('float', False): FLOAT, ('float', True): NP_FLOAT64, ('float', 'dyn'): FLOAT_DYN,
@@ -80,7 +122,7 @@ def join(a, b):
     """The type of a variable that is assigned values of types a and b, or None."""
     if a is b:
         return a
-    if a.is_number and b.is_number and (is_narrow(a) or is_narrow(b)):
+    if a.is_number and b.is_number and has_narrow(a, b):
         return None
     if a.is_number and b.is_number and a.kind == b.kind:
         return scalar(a.kind, 'dyn')
@@ -160,14 +202,78 @@ def array(elem, writable=True, ndim=1, strided=False):
     return _ARRAYS[key]
 
 
+def _bits(t):
+    return {'int8_t': 8, 'uint8_t': 8, 'int16_t': 16, 'uint16_t': 16, 'int32_t': 32, 'uint32_t': 32}.get(t.ctype, 64)
+
+
+def promote(a, b):
+    """numpy's type for two numpy scalars, at least one of them narrow."""
+    if a.kind == 'float' or b.kind == 'float':
+        x, y = (a, b) if a.kind == 'float' else (b, a)
+        if x is NP_FLOAT64 or y is NP_FLOAT64:
+            return NP_FLOAT64
+        return x if y.kind == 'float' or _bits(y) <= 16 else NP_FLOAT64
+    if a is NP_INT64 or b is NP_INT64:
+        return NP_INT64
+    ua, ub = a.ctype[0] == 'u', b.ctype[0] == 'u'
+    bits = max(_bits(a), _bits(b))
+    if ua != ub:                            # the signed one must hold the unsigned one's values
+        unsigned_bits, signed_bits = (_bits(a), _bits(b)) if ua else (_bits(b), _bits(a))
+        bits = signed_bits if signed_bits > unsigned_bits else unsigned_bits * 2
+        return NP_INT64 if bits > 32 else NARROW[f'int{bits}']
+    return NARROW[f'{"u" if ua else ""}int{bits}']
+
+
+def narrow_result(a, b, op):
+    """NEP 50, with a narrow scalar on at least one side. A Python number takes the numpy scalar's type if it's the
+    same kind or lower: a Python float with a narrow int gives float64, and a Python int must fit (checked when run)."""
+    if a.np == 'dyn' or b.np == 'dyn':
+        # Whichever the variable holds, the other side being numpy's decides. Otherwise the answer depends on the flag.
+        if not (is_narrow_dyn(a) and b.np is True or is_narrow_dyn(b) and a.np is True):
+            return None
+        a, b = as_narrow(a), as_narrow(b)
+    if not a.np or not b.np:
+        n, py = (a, b) if a.np else (b, a)
+        r = NP_FLOAT64 if n.kind == 'int' and py.kind == 'float' else n
+    else:
+        r = promote(a, b)
+    return NP_FLOAT64 if op == 'Div' and r.kind == 'int' else r
+
+
+def has_narrow(a, b):
+    return is_narrow(a) or is_narrow(b) or is_narrow_dyn(a) or is_narrow_dyn(b)
+
+
+def arith_problem(a, b, op):
+    """Why a <op> b doesn't compile, when arith_result says it doesn't."""
+    if (a.np and a.kind == 'bool') or (b.np and b.kind == 'bool'):
+        return 'arithmetic on numpy bools'
+    if op == 'Pow':
+        return f'** on {a.name} and {b.name}: numpy uses the narrow type\'s own pow'
+    return f'{a.name} with {b.name}: the type of the result would depend on what the variable holds at run time'
+
+
+def compare_in(a, b):
+    """The C type numpy compares these in, when an int meets a float or either is np.float32; None when the two are
+    compared as ints. A Python float or int becomes np.float32 first (np.float32(0.1) == 0.1 is true). Nothing
+    else is rounded: numpy's integer comparisons are exact."""
+    if a.kind != 'float' and b.kind != 'float':
+        return None
+    if not has_narrow(a, b):
+        return 'double' if a.kind != b.kind and (a.np is True or b.np is True) else None
+    r = arith_result(as_narrow(a), as_narrow(b), 'Add')
+    return r.ctype if r is not None else 'double'
+
+
 def arith_result(a, b, op):
     """The type of a <op> b for numbers, following Python and numpy's promotion (NEP 50).
 
-    Returns None when the combination isn't compiled (numpy bools in arithmetic, where numpy's
-    rules differ from Python's).
+    Returns None when the combination isn't compiled: see arith_problem.
     """
-    if (a.np and a.kind == 'bool') or (b.np and b.kind == 'bool') or is_narrow(a) or is_narrow(b):
+    if (a.np and a.kind == 'bool') or (b.np and b.kind == 'bool'):
         return None
+    if has_narrow(a, b):
+        return None if op == 'Pow' else narrow_result(a, b, op)
     np = join_np(a.np, b.np)
     if a.kind == 'float' or b.kind == 'float' or op == 'Div':
         return scalar('float', np)

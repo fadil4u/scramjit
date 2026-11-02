@@ -94,6 +94,8 @@ def _arg_type(x):
             return T.NP_INT64
         if t is np.bool_:
             return T.NP_BOOL
+        if issubclass(t, np.generic) and x.dtype.isnative and x.dtype.name in T.NARROW:     # np.intc too
+            return T.NARROW[x.dtype.name]
     return None
 
 
@@ -830,6 +832,6 @@ class Function:
         else:
             v = int.from_bytes(io[at:at + 8], 'little', signed=True)
         if np:
-            name = r.name[3:] if r.np is True else {'int': 'int64', 'float': 'float64', 'bool': 'bool_'}[r.kind]
+            name = T.as_narrow(r).name[3:] if T.is_narrow_dyn(r) or r.np is True else {'int': 'int64', 'float': 'float64', 'bool': 'bool_'}[r.kind]
             return getattr(self._np, 'bool_' if name == 'bool' else name)(v)
         return bool(v) if r.kind == 'bool' else v

@@ -342,6 +342,13 @@ def abs_flips_nan():
 WEB_SUFFIX = re.compile(r'__v\d+\b')
 
 
+def literal_value(node):
+    """The number in the statement x = <literal>, or None."""
+    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+        return const_number(node.value)
+    return None
+
+
 def exact_int_literal(node):
     """Is this statement x = <an int literal a double holds exactly>?"""
     if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
@@ -501,6 +508,7 @@ class Compiler:
         self.split_done = False    # names are split into webs, so a conflict left is within one variable
         self.tagged = set()        # variables holding an exact int or a float: a double and v___int (see may_tag)
         self.not_literal = set()   # variables assigned an int that isn't a literal
+        self.python_values = {}    # each variable's Python numbers: the literal, or None
         self.uses_rerun = False    # the kernel can ask for the call to run as Python, before doing anything
         self.tracks = False        # the function returns an array, so views remember which argument they're of
         self.makes = False         # the function makes arrays, so views remember the block they're in
@@ -649,8 +657,10 @@ class Compiler:
             self.fail(node, f'{name} is {old.name} and later {t.name}; a variable must keep one type')
         if t is T.INT and not exact_int_literal(node):
             self.not_literal.add(name)
+        if t in (T.INT, T.FLOAT):
+            self.python_values.setdefault(name, []).append(literal_value(node))
         if old is not None and old is not t:
-            j = T.join(old, t)
+            j = T.join(old, t) or self.narrow_variable(name, old, t)
             if j is None and self.may_tag(name, old, t):
                 self.tagged.add(name)
                 j = T.scalar('float', 'dyn')
@@ -658,6 +668,14 @@ class Compiler:
                 self.fail(node, f'{name} is {old.name} and later {t.name}; a variable must keep one type')
             t = j
         self.env[name] = t
+
+    def narrow_variable(self, name, old, t):
+        """total = 0.0, then total += x[i] on float32: np.float32 from then on, and after no iterations Python has the
+        float. Only for literals the narrow type holds exactly, so one C variable and a flag are enough."""
+        j = T.narrow_or_literal(old, t) if self.split_done and name not in self.params else None
+        if j is None:
+            return None
+        return j if all(T.holds_exactly(j.elem, v) for v in self.python_values.get(name, [])) else None
 
     def may_tag(self, name, old, t):
         """s = 0, then s += a[i] on floats: one variable with two types, and after no iterations Python has the
@@ -667,7 +685,8 @@ class Compiler:
         if not self.split_done or name in self.not_literal:
             return False
         kinds = {old.kind, t.kind}
-        return kinds == {'int', 'float'} and (old if old.kind == 'int' else t) is T.INT
+        return kinds == {'int', 'float'} and (old if old.kind == 'int' else t) is T.INT \
+            and not T.has_narrow(old, t)
 
     def check_tagged(self):
         if not self.tagged:
@@ -1002,7 +1021,7 @@ class Compiler:
                 return T.BOOL
         r = T.arith_result(a, b, op)
         if r is None:
-            self.fail(node, 'arithmetic on numpy bools')
+            self.fail(node, T.arith_problem(a, b, op))
         return r
 
     def pow_type(self, a, b, node):
@@ -1012,7 +1031,7 @@ class Compiler:
         difference from Python. A constant exponent or base that rules it out has no such case."""
         r = T.arith_result(a, b, 'Pow')
         if r is None:
-            self.fail(node, 'arithmetic on numpy bools')
+            self.fail(node, T.arith_problem(a, b, 'Pow'))
         if r.np is True:
             return r
         exp = const_number(node.right if isinstance(node, ast.BinOp) else node.value)
@@ -1093,6 +1112,8 @@ class Compiler:
                 self.fail(e, 'arithmetic on numpy bools')
             if isinstance(e.op, ast.Invert) and t.kind != 'int':
                 self.fail(e, '~ on a non-int')
+            if T.is_narrow_dyn(t):
+                self.fail(e, f'a unary operator on {t.name}: its result may not fit')
             return T.INT if t is T.BOOL else t
         if isinstance(e, ast.Compare):
             if not all(type(o) in CMP for o in e.ops):
@@ -1100,6 +1121,10 @@ class Compiler:
             ts = [self.typeof(x) for x in [e.left] + e.comparators]
             if not all(t.is_number for t in ts):
                 self.fail(e, 'comparisons of non-numbers')
+            for a, b in zip(ts, ts[1:]):
+                if (T.is_narrow_dyn(a) or T.is_narrow_dyn(b)) and a.np is not True and b.np is not True \
+                        and not (a.kind != 'float' and b.kind != 'float'):
+                    self.fail(e, f'comparing {a.name} with {b.name}: numpy rounds one side and Python doesn\'t')
             return T.scalar('bool', T.join_np(*[T.compare_result(a, b).np for a, b in zip(ts, ts[1:])])
                             if len(ts) == 2 or len({T.compare_result(a, b) for a, b in zip(ts, ts[1:])}) == 1
                             else 'dyn')
@@ -2325,6 +2350,8 @@ class Compiler:
             self.fail(e, 'sum() with this start')
         if el.np and el.kind == 'bool':
             self.fail(e, 'sum() of numpy bools')
+        if T.has_narrow(el, st):
+            self.fail(e, f'sum() of {el.name}: numpy\'s rules wrap or round at each step, not compiled yet')
         if st.np is True:
             return T.arith_result(st, el, 'Add')
         if st.kind == 'int':
@@ -3846,6 +3873,8 @@ class Compiler:
     def coerce(self, c, frm, to):
         if frm.ctype == to.ctype:
             return c
+        if to.ctype == 'float':                  # a Python int goes through a double, in numpy too
+            return f'(float)({c})' if T.is_narrow(frm) or frm.kind == 'float' else f'(float)(double)({c})'
         if to.kind == 'float':
             return f'(double)({c})'
         return f'({to.ctype})({c})'
@@ -3909,13 +3938,14 @@ class Compiler:
             c, f = self.expr(e.operand)
             if isinstance(e.op, ast.Not):
                 return f'!({self.truth(c, t)})', '0'
+            cast = f'({t.ctype})' if T.is_narrow(t) else ''
             if isinstance(e.op, ast.Invert):
-                return f'(~(int64_t)({c}))', f
+                return f'({cast}(~(int64_t)({c})))', f
             if isinstance(e.op, ast.UAdd):
                 return (self.coerce(c, t, T.INT) if t is T.BOOL else c), f
             if t.kind == 'float':
                 return f'(-({c}))', f
-            return f'sj_neg((int64_t)({c}))', f
+            return f'{cast}sj_neg((int64_t)({c}))', f
         if isinstance(e, ast.Compare):
             return self.compare(e)
         if isinstance(e, ast.BoolOp):
@@ -4027,35 +4057,47 @@ class Compiler:
         b, bf = self.hold(bv[0], bt), self.hold_flag(bv[1])
         npf = flag_or(af, bf)              # 1 when numpy's rules apply, not Python's
         line = self.line(node)
+        for n, py, v in ((at, bt, b), (bt, at, a)):       # numpy: a Python int must fit the scalar's dtype, except for /
+            if op != 'Div' and T.is_narrow(n) and n.kind == 'int' and py.kind != 'float' and py.np is False:
+                self.check_fits(node, n, (v, '0'), py)
+        if not (T.is_narrow(rt) and rt.kind == 'int'):
+            return self.arith_as(op, a, at, b, bt, right, rt, npf, line, node), npf
+        if op in ('Add', 'Sub', 'Mult'):   # 32 bits rather than 64, so that the vectorizer keeps its lanes
+            sym = {'Add': '+', 'Sub': '-', 'Mult': '*'}[op]
+            return f'(({rt.ctype})((uint32_t){a} {sym} (uint32_t){b}))', npf
+        return f'(({rt.ctype})({self.arith_as(op, a, at, b, bt, right, rt, npf, line, node)}))', npf
+
+    def arith_as(self, op, a, at, b, bt, right, rt, npf, line, node):
+        """The C for a <op> b, whose result type is rt; integers are computed in 64 bits."""
         if op in ('BitAnd', 'BitOr', 'BitXor'):
             sym = {'BitAnd': '&', 'BitOr': '|', 'BitXor': '^'}[op]
-            return f'((int64_t){a} {sym} (int64_t){b})', npf
+            return f'((int64_t){a} {sym} (int64_t){b})'
         isfloat = rt.kind == 'float'
-        fa, fb = self.coerce(a, at, T.FLOAT), self.coerce(b, bt, T.FLOAT)
+        fa, fb = self.coerce(a, at, rt if isfloat else T.FLOAT), self.coerce(b, bt, rt if isfloat else T.FLOAT)
         if op == 'Pow':
-            return self.power(a, b, fa, fb, rt, npf, line, right), npf
+            return self.power(a, b, fa, fb, rt, npf, line, right)
         if op in ('Add', 'Sub', 'Mult'):
             if op == 'Mult' and self.exact and at.kind == 'float' and bt.kind == 'int' and npf != '1':
                 # CPython computes float * int(-1) as a negation, so a NaN's sign bit flips
                 # (multiplying by -1.0, by any other int, or numpy scalars, leaves it alone)
                 py = f'{b} == -1' if npf == '0' else f'!{npf} && {b} == -1'
-                return f'({py} ? -{a} : {a} * (double){b})', npf
+                return f'({py} ? -{a} : {a} * (double){b})'
             if isfloat:
                 sym = {'Add': '+', 'Sub': '-', 'Mult': '*'}[op]
-                return f'({fa} {sym} {fb})', npf
-            return f'sj_{op.lower()[:3]}((int64_t){a}, (int64_t){b})', npf
+                return f'({fa} {sym} {fb})'
+            return f'sj_{op.lower()[:3]}((int64_t){a}, (int64_t){b})'
         both_int = at.kind != 'float' and bt.kind != 'float'
         wrap = self.wrap_mod(node) if op == 'Mod' and npf == '0' else None
         if wrap and ast.dump(node) in self.hoisted:
-            return self.hoisted[ast.dump(node)], npf
+            return self.hoisted[ast.dump(node)]
         if wrap:                                  # (i + c) % n with 0 <= i < n, |c| <= 1: n >= 1, so
-            return self.wrap_expr(node, a, b), npf    # no division
+            return self.wrap_expr(node, a, b)         # no division
         if both_int and op in ('FloorDiv', 'Mod') and isinstance(right, ast.Constant) \
                 and type(right.value) is int and right.value > 0 and right.value & (right.value - 1) == 0:
             k = right.value.bit_length() - 1      # x // 2**k is an arithmetic shift, x % 2**k a mask:
             if op == 'FloorDiv':                  # exactly Python's floor semantics, for every sign
-                return f'((int64_t){a} >> {k})', npf
-            return f'((int64_t){a} & {right.value - 1}LL)', npf
+                return f'((int64_t){a} >> {k})'
+            return f'((int64_t){a} & {right.value - 1}LL)'
         zero = f'{b} == 0' if both_int else f'{fb} == 0.0'
         msg = {('Div', True): 0, ('Div', False): 1, ('FloorDiv', True): 2, ('FloorDiv', False): 4,
                ('Mod', True): 3, ('Mod', False): 5}[(op, both_int if op == 'Div' else not isfloat)]
@@ -4066,26 +4108,36 @@ class Compiler:
             self.emit(f'if ({cond}) SJ_FAIL({ZERO_DIVISION}, {line}, {msg}, 0);')
         if op == 'Div':
             if not both_int or npf == '1' or not self.exact:
-                return f'({fa} / {fb})', npf
+                return f'({fa} / {fb})'
             exact = f'sj_truediv((int64_t){a}, (int64_t){b})'
-            return (exact if npf == '0' else f'({npf} ? {fa} / {fb} : {exact})'), npf
+            return exact if npf == '0' else f'({npf} ? {fa} / {fb} : {exact})'
         if not isfloat and op in ('FloorDiv', 'Mod'):
             # one division and one remainder (cimo doesn't merge repeated expressions), then
             # Python's floor: adjust when the remainder is nonzero and its sign differs from b's.
             # b == -1 is set apart (INT64_MIN / -1 traps in C); b == 0 is numpy's 0 here.
             q, r, adj = self.temp(), self.temp(), self.temp()
             self.emit(f'int64_t {q} = 0, {r} = 0;')
-            self.emit(f'if ({b} == -1) {q} = sj_neg((int64_t){a}); else if ({b} != 0) {{ {q} = (int64_t){a} / {b}; {r} = (int64_t){a} % {b}; }}')
-            self.emit(f'int {adj} = {r} != 0 && (({r} < 0) != ({b} < 0));')
+            d = f'(int64_t){b}'                   # a narrow unsigned one would never equal -1
+            self.emit(f'if ({d} == -1) {q} = sj_neg((int64_t){a}); else if ({d} != 0) {{ {q} = (int64_t){a} / {d}; {r} = (int64_t){a} % {d}; }}')
+            self.emit(f'int {adj} = {r} != 0 && (({r} < 0) != ({d} < 0));')
             if op == 'FloorDiv':
-                return f'({q} - {adj})', npf
-            return f'({r} + ({adj} ? {b} : 0))', npf
+                return f'({q} - {adj})'
+            return f'({r} + ({adj} ? {d} : 0))'
+        if rt.ctype == 'float':                   # numpy's algorithm, in the type's own precision
+            if op == 'FloorDiv':
+                return f'({fb} == 0.0f ? {fa} / {fb} : sj_ffloordiv32({fa}, {fb}))'
+            return f'({fb} == 0.0f ? (float)fmod({fa}, {fb}) : sj_fmod_py32({fa}, {fb}))'
         if op == 'FloorDiv':
-            return f'({fb} == 0.0 ? {fa} / {fb} : sj_ffloordiv({fa}, {fb}))', npf
-        return f'({fb} == 0.0 ? fmod({fa}, {fb}) : sj_fmod_py({fa}, {fb}))', npf
+            return f'({fb} == 0.0 ? {fa} / {fb} : sj_ffloordiv({fa}, {fb}))'
+        return f'({fb} == 0.0 ? fmod({fa}, {fb}) : sj_fmod_py({fa}, {fb}))'
 
     def cmp(self, a, at, b, bt, op):
         af, bf = at.kind == 'float', bt.kind == 'float'
+        ct = T.compare_in(at, bt)
+        if ct == 'float':
+            return f'({self.coerce(a, at, T.NARROW["float32"])} {op} {self.coerce(b, bt, T.NARROW["float32"])})'
+        if ct == 'double':
+            return f'((double){a} {op} (double){b})'
         if af == bf:
             if af:
                 return f'({a} {op} {b})'

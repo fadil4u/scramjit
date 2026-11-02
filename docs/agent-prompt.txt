@@ -40,7 +40,7 @@ Falls back, with the fix:
 - calling a function without @scram, recursing, default parameter values: decorate it, write a loop, pass every argument. Calling another @scram function at module level compiles, so split a program into functions as usual. So does k.f(x) with k = cimo.compile('...') at module level, for shifts and bit tricks, if its data is const
 - global variables: pass as arguments
 - a * 2, a + b, a[a > 0], np.sqrt(a), a.reshape(...): write the loop over a[i, j]
-- arithmetic on elements narrower than 64 bits: int(a[i]) or float(a[i]); comparing and storing them is fine
+- on elements narrower than 64 bits, ** and sum(): x * x, or a loop; other arithmetic compiles, and wraps as numpy's does
 - changing a variable's type, s = 0 then s += 0.5: start with s = 0.0
 - sum(floats) without a start: sum(gen, 0.0)
 - x ** 0.5 on a float: math.sqrt(x); int ** variable int: use a loop

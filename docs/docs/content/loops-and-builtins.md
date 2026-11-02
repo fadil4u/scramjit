@@ -61,3 +61,21 @@ for (int64_t i = 0; i < a_len; i++)
 ## Reductions and math
 
 `len`, `sum`, `min`, `max`, `abs`, `any`, `all` and `math.*` become inline code or C math calls.
+
+## numpy functions on single numbers
+
+These compile on a single number, such as `np.sqrt(x[i])`, and give numpy's result and type, `np.float64`:
+
+- `np.sqrt`, `np.exp`, `np.exp2`, `np.expm1`, `np.log`, `np.log2`, `np.log10`, `np.log1p`, `np.cbrt`
+- `np.sin`, `np.cos`, `np.tan`, `np.arcsin`, `np.arccos`, `np.arctan`, `np.sinh`, `np.cosh`, `np.arcsinh`, `np.arccosh`, `np.arctanh`
+- `np.abs`, `np.absolute`, `np.fabs`, `np.sign`, `np.square`, `np.floor`, `np.ceil`, `np.trunc`, `np.rint`
+- `np.minimum`, `np.maximum`, `np.fmin`, `np.fmax`, `np.hypot`, `np.arctan2`, `np.fmod`, `np.copysign`
+- `np.isnan`, `np.isinf`, `np.isfinite`, `np.signbit`, `np.float64(x)`, `np.int64(n)`
+- the constants `np.pi`, `np.e`, `np.inf`, `np.nan`
+
+Arguments can be Python ints and floats, `np.int64` and `np.float64`. A few combinations run as Python, because what numpy returns for them depends on the platform or the numpy version:
+
+- `np.abs`, `np.sign`, `np.square`, `np.minimum` and `np.maximum` of Python ints: `np.abs(4)` is `int64` on most platforms and `int32` in Pyodide
+- `np.floor`, `np.ceil` and `np.trunc` of any int: numpy 2.1 changed what these return
+
+Bools and narrow types such as `np.float32` or `np.uint8` run as Python too. So do `np.tanh`, which is numpy's own and doesn't match the C library's in the last bits, and `np.power`, which has shortcuts for some exponents; use `**`. Calls on whole arrays, such as `np.sum(x)` or `np.sqrt(x)`, run as Python for now.

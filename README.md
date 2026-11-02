@@ -108,6 +108,7 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | Numbers and n-D numpy arrays, including dtypes like `uint8` | Strings, objects |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | Lists that grow with `append` |
 | Dicts passed in, reading and writing keys it names | Dicts that gain keys, or built in the function |
+| numpy functions on single numbers: `np.sqrt(x[i])`, `np.sin`, `np.minimum` | numpy functions on whole arrays: `np.sum(x)` |
 
 `**` compiles. Where Python's result would change type, it raises `ValueError`: a negative `k` in
 `n ** k` (Python gives a float) and a negative float `x` in `x ** 0.5` (Python gives a complex).

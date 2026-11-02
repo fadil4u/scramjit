@@ -165,7 +165,10 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   only through a call plan that checks those keys; the general path takes 9). A write goes back at both of the kernel's exits, so
   stores before an exception survive. The kernel's written variables are kept out of web splitting, since every exit reads them.
   Exact `dict` only, since a subclass can run code on a read, and one dict passed twice runs as Python.
-- **numpy calls (decided 2026-11-02, not built; see `TODO.md`):** scalar functions, then reductions, then views. Array-creating
+- **numpy on single numbers (built 2026-11-02).** 25 of 26 functions matched libm bit for bit on 160,024 inputs on arm64 and in Pyodide, so they
+  call it; `np.tanh` doesn't, natively. Types are the trap: `np.abs(4)` is int64 natively and int32 in Pyodide, `np.floor(4)` changed in numpy 2.1,
+  `np.sqrt(True)` is float16, so those stay Python. `np.minimum(0.0, -0.0)` differs by platform, so the compiler asks the numpy present.
+- **numpy calls (decided 2026-11-02; see `TODO.md`):** reductions next, then views. Array-creating
   operations stay in Python, and MKL and BLAS stay out: not pure Python, and their results vary by library, CPU and thread count. A
   plain loop doesn't reproduce `np.sum` (pairwise), and is 6 to 12x slower than numpy on 1,000,000 elements until cimo has SIMD.
 - **Later:** growable lists, dicts, sets and strings as typed C containers: each needs allocation and a runtime.

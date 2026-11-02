@@ -224,6 +224,53 @@ class Lazy(ast.NodeTransformer):
         return ast.copy_location(ast.For(c.target, c.iter, head + s.body, s.orelse), s)
 
 
+# numpy on single numbers. Each of these matched the C library bit for bit on 160,024 inputs, natively on arm64 and in
+# Pyodide. np.tanh didn't, natively: numpy has its own, so it stays Python.
+NP_LIBM1 = {'exp': 'exp', 'exp2': 'exp2', 'expm1': 'expm1', 'log': 'log', 'log2': 'log2', 'log10': 'log10', 'log1p': 'log1p',
+            'sin': 'sin', 'cos': 'cos', 'tan': 'tan', 'arcsin': 'asin', 'arccos': 'acos', 'arctan': 'atan', 'asin': 'asin',
+            'acos': 'acos', 'atan': 'atan', 'sinh': 'sinh', 'cosh': 'cosh', 'arcsinh': 'asinh', 'arccosh': 'acosh',
+            'arctanh': 'atanh', 'asinh': 'asinh', 'acosh': 'acosh', 'atanh': 'atanh', 'cbrt': 'cbrt'}
+NP_DIRECT1 = {'sqrt': 'sqrt', 'fabs': 'fabs', 'rint': 'rint'}
+NP_ROUND = {'floor', 'ceil', 'trunc'}                # numpy 2.1 changed what these do to ints: floats only
+NP_KEEPS_INT = {'abs', 'absolute', 'sign', 'square'}  # of a Python int, the type depends on the platform
+# np.power stays Python: it has shortcuts for some exponents (np.power(-0.0, 0.5) is -0.0, pow's is 0.0)
+NP_LIBM2 = {'arctan2': 'atan2', 'atan2': 'atan2', 'hypot': 'hypot', 'fmod': 'fmod'}
+NP_FLOATS_ONLY2 = {'fmod'}                            # of ints it stays int
+NP_MINMAX = {'minimum', 'maximum', 'fmin', 'fmax'}
+NP_TESTS = {'isnan', 'isinf', 'isfinite', 'signbit'}
+NP_CONVERT = {'float64', 'int64'}
+NP_CONSTANTS = {'pi': math.pi, 'e': math.e, 'inf': math.inf, 'nan': math.nan}
+NP_FUNCS = set(NP_LIBM1) | set(NP_DIRECT1) | NP_ROUND | NP_KEEPS_INT | set(NP_LIBM2) | {'copysign'} | NP_MINMAX | NP_TESTS | NP_CONVERT
+
+
+class StaticNumpy:
+    """numpy, or one of its functions, for preflight reading source without importing anything."""
+
+    def __init__(self, name=None):
+        self.name = name
+
+
+def is_numpy(obj):
+    return isinstance(obj, StaticNumpy) and obj.name is None or (obj is not None and obj is sys.modules.get('numpy'))
+
+
+def zero_rule(name):
+    """Which zero np.minimum gives for 0.0 and -0.0 depends on the platform: always 'negative', always 'positive', or by
+    position, 'first' or 'second'. The compiled code must agree with the numpy it stands in for."""
+    np = sys.modules.get('numpy')
+    if np is None:
+        return 'negative' if name in ('minimum', 'fmin') else 'positive'
+    one = math.copysign(1.0, float(getattr(np, name)(0.0, -0.0))) < 0
+    two = math.copysign(1.0, float(getattr(np, name)(-0.0, 0.0))) < 0
+    return {(True, True): 'negative', (False, False): 'positive', (False, True): 'first', (True, False): 'second'}[one, two]
+
+
+def abs_flips_nan():
+    """Some builds of numpy compute abs(x) as x > 0 ? x : -x, which flips a NaN's sign."""
+    np = sys.modules.get('numpy')
+    return np is not None and math.copysign(1.0, float(np.abs(math.nan))) < 0
+
+
 WEB_SUFFIX = re.compile(r'__v\d+\b')
 
 
@@ -731,7 +778,8 @@ class Compiler:
             self.fail(e, f'uses the global or undefined name {e.id!r}')
         if isinstance(e, ast.Attribute):
             if isinstance(e.value, ast.Name) and e.value.id not in self.env \
-                    and self.globals.get(e.value.id) is math and e.attr in MATH_CONSTANTS:
+                    and ((self.globals.get(e.value.id) is math and e.attr in MATH_CONSTANTS)
+                         or (is_numpy(self.globals.get(e.value.id)) and e.attr in NP_CONSTANTS)):
                 return T.FLOAT
             if isinstance(e.value, ast.Name) and e.value.id in self.env and self.env[e.value.id].kind == 'array':
                 t = self.env[e.value.id]
@@ -917,7 +965,111 @@ class Compiler:
             self.fail(e, 'math.sumprod() of floats returns the int 0 when empty, so its type depends on the data')
         return T.INT if not any(t.np for t in els) else T.INT_DYN
 
+    def numpy_func(self, func):
+        """The name of the numpy function this calls, if it's one that compiles on single numbers."""
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id not in self.env \
+                and is_numpy(self.globals.get(func.value.id)):
+            return func.attr if func.attr in NP_FUNCS else None
+        if isinstance(func, ast.Name) and func.id not in self.env:
+            obj = self.globals.get(func.id)
+            if isinstance(obj, StaticNumpy):
+                return obj.name if obj.name in NP_FUNCS else None
+            np = sys.modules.get('numpy')
+            if np is not None and obj is not None:
+                for n in NP_FUNCS:
+                    if obj is getattr(np, n, None):
+                        return n
+        return None
+
+    def numpy_type(self, e, name):
+        if e.keywords or any(isinstance(a, ast.Starred) for a in e.args):
+            self.fail(e, f'np.{name}() with keyword arguments')
+        ts = [self.typeof(a) for a in e.args]
+        two = name in NP_LIBM2 or name in NP_MINMAX or name == 'copysign'
+        if len(ts) != (2 if two else 1):
+            self.fail(e, f'np.{name}() with {len(ts)} arguments')
+        for t in ts:
+            if t.kind == 'array':
+                self.fail(e, f'np.{name}() of an array: only single numbers compile; write it as a loop')
+            if not (t in (T.INT, T.FLOAT, T.NP_INT64, T.NP_FLOAT64) or (t.np == 'dyn' and t.kind in ('int', 'float'))):
+                self.fail(e, f'np.{name}() of {t.name}')
+        floats = any(t.kind == 'float' for t in ts)
+        if name in NP_TESTS:
+            return T.NP_BOOL
+        if name == 'int64':
+            if ts[0].kind != 'int':
+                self.fail(e, 'np.int64() of a float (it raises on nan and on values too large)')
+            return T.NP_INT64
+        if name in NP_ROUND and not floats:
+            self.fail(e, f'np.{name}() of an int (what it gives depends on the numpy version)')
+        if name in NP_FLOATS_ONLY2 and not floats:
+            self.fail(e, f'np.{name}() of two ints')
+        if (name in NP_KEEPS_INT or name in NP_MINMAX) and not floats:
+            if any(t is not T.NP_INT64 for t in ts):
+                self.fail(e, f'np.{name}() of a Python int (the type it gives depends on the platform)')
+            return T.NP_INT64
+        return T.NP_FLOAT64
+
+    def numpy_call(self, e, name):
+        ts = [self.typeof(a) for a in e.args]
+        vals = [self.expr(a) for a in e.args]          # arguments first, in order
+        vals = [self.hold(c, t) for (c, _), t in zip(vals, ts)]
+        xs = [self.hold(self.coerce(c, t, T.FLOAT), T.FLOAT) for c, t in zip(vals, ts)]
+        rt = self.typeof(e)
+        x = xs[0]
+        if name == 'int64':
+            return f'(int64_t)({vals[0]})', '1'
+        if name == 'float64':
+            return x, '1'
+        if name in NP_TESTS:
+            test = {'isnan': f'{x} != {x}', 'isinf': f'isinf({x})', 'isfinite': f'isfinite({x})', 'signbit': f'signbit({x})'}[name]
+            return f'(({test}) ? 1 : 0)', '1'
+        if rt.kind == 'int':
+            a = f'(int64_t)({vals[0]})'
+            if name in ('abs', 'absolute'):
+                return f'sj_abs({a})', '1'
+            if name == 'sign':
+                return self.hold(f'({a} > 0) - ({a} < 0)', T.INT), '1'
+            if name == 'square':
+                return f'sj_mul({a}, {a})', '1'
+            b = f'(int64_t)({vals[1]})'
+            return self.hold(f'({a} {"<" if name == "minimum" else ">"} {b} ? {a} : {b})', T.INT), '1'
+        if name in NP_DIRECT1 or name in NP_ROUND:
+            return self.hold(f'{name}({x})', T.FLOAT), '1'
+        if name in ('abs', 'absolute'):
+            return self.hold(f'({x} != {x} ? -{x} : fabs({x}))' if abs_flips_nan() else f'fabs({x})', T.FLOAT), '1'
+        if name == 'square':
+            return self.hold(f'{x} * {x}', T.FLOAT), '1'
+        if name == 'sign':                               # a NaN stays that NaN; both zeros give 0.0
+            return self.hold(f'({x} > 0.0 ? 1.0 : {x} < 0.0 ? -1.0 : {x} == 0.0 ? 0.0 : {x})', T.FLOAT), '1'
+        if name == 'copysign':
+            return self.hold(f'copysign({x}, {xs[1]})', T.FLOAT), '1'
+        if name in NP_MINMAX:
+            return self.numpy_minmax(name, x, xs[1]), '1'
+        c = NP_LIBM1.get(name) or NP_LIBM2[name]
+        args = ', '.join(xs)
+        if not self.exact:
+            return self.hold(f'{c}({args})', T.FLOAT), '1'
+        self.uses_libm = True
+        macro = 'SJ_LIBM1' if len(xs) == 1 else 'SJ_LIBM2'
+        return self.hold(f'{macro}({LIBM.index(c)})({args})', T.FLOAT), '1'
+
+    def numpy_minmax(self, name, a, b):
+        op = '<' if name in ('minimum', 'fmin') else '>'
+        rule = zero_rule(name)
+        equal = {'negative': f'(signbit({a}) ? {a} : {b})', 'positive': f'(signbit({a}) ? {b} : {a})', 'first': a, 'second': b}[rule]
+        pick = f'({a} {op} {b} ? {a} : {b} {op} {a} ? {b} : {equal})'
+        if name in ('minimum', 'maximum'):       # a NaN wins
+            return self.hold(f'({a} != {a} ? {a} : {b} != {b} ? {b} : {pick})', T.FLOAT)
+        # a NaN loses, and which of two NaNs comes back depends on the platform
+        np = sys.modules.get('numpy')
+        second = np is not None and math.copysign(1.0, float(getattr(np, name)(math.nan, -math.nan))) < 0
+        return self.hold(f'({a} != {a} ? ({b} != {b} ? {b if second else a} : {b}) : {b} != {b} ? {a} : {pick})', T.FLOAT)
+
     def call_type(self, e):
+        nf = self.numpy_func(e.func)
+        if nf:
+            return self.numpy_type(e, nf)
         mf = self.math_func(e.func)
         if mf:
             return self.math_type(e, mf)
@@ -2285,6 +2437,9 @@ class Compiler:
         return r, rf
 
     def call(self, e):
+        nf = self.numpy_func(e.func)
+        if nf:
+            return self.numpy_call(e, nf)
         mf = self.math_func(e.func)
         if mf:
             return self.math_call(e, mf)

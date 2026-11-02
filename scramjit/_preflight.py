@@ -13,7 +13,7 @@ import re
 
 from . import _lift
 from . import _types as T
-from ._compiler import Compiler
+from ._compiler import Compiler, StaticNumpy
 from ._errors import Unsupported
 
 _OTHER = object()     # a module-level name whose value static analysis can't know
@@ -25,7 +25,7 @@ HINTS = [
     (r'^sets|^set comp', 'if the values are small integers, use a boolean array indexed by value'),
     (r'^f-strings|calls (str|print|repr|format)\(\)', 'keep text and printing out of the function: return numbers and format them after the call'),
     (r'slices|views', 'loop over the indices you want: for i in range(lo, hi): a[i]'),
-    (r'^calls [\w.]*\.\w+\(\)', 'write it as a loop; methods and numpy calls aren\'t compiled'),
+    (r'^calls [\w.]*\.\w+\(\)', 'write it as a loop; methods and numpy calls on whole arrays aren\'t compiled'),
     (r'^calls \w+\(\)', 'put its body here, or decorate and call it from Python; a compiled function can\'t call Python functions'),
     (r'empty list|a list assigned', 'allocate a numpy array of the final size and pass it in'),
     (r'must keep one type', 'use a new name for the new type'),
@@ -81,10 +81,11 @@ def module_globals(tree):
     for s in tree.body:
         if isinstance(s, ast.Import):
             for a in s.names:
-                out[(a.asname or a.name).split('.')[0]] = math if a.name == 'math' else _OTHER
+                out[(a.asname or a.name).split('.')[0]] = math if a.name == 'math' else StaticNumpy() if a.name == 'numpy' else _OTHER
         elif isinstance(s, ast.ImportFrom):
             for a in s.names:
-                out[a.asname or a.name] = getattr(math, a.name, _OTHER) if s.module == 'math' else _OTHER
+                out[a.asname or a.name] = getattr(math, a.name, _OTHER) if s.module == 'math' \
+                    else StaticNumpy(a.name) if s.module == 'numpy' else _OTHER
         elif isinstance(s, (ast.FunctionDef, ast.ClassDef)):
             out[s.name] = _OTHER
         elif isinstance(s, ast.Assign):

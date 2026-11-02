@@ -40,11 +40,11 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 4. **Loop lifting, what's left:** a loop stays in Python if a variable read afterwards may be unbound
    (`for i ...` then reading `i`, with nothing assigned first), inside `try` or `with`, or containing `return`.
    "Partly compiled" is per function, not per signature. Tracebacks show one extra frame for a loop that raises.
-5. **numpy calls in compiled functions:** `np.sqrt(x[i])`, `np.sum(x)`, `x.sum()`, `m[i].sum()` and `x * 2` all run as Python today.
+5. **numpy calls in compiled functions:** `np.sum(x)`, `x.sum()`, `m[i].sum()` and `x * 2` still run as Python.
    No cimo work is required for any step; its SIMD only adds speed. In this order:
-   - **numpy functions on single numbers, first:** `np.sqrt`, `np.abs`, `np.exp`, `np.floor`, `np.minimum` and friends. No allocation, and
-     probably the most common reason a numeric loop won't compile. Test bit for bit first: numpy may use its own `exp` and `sin`, not
-     libm's. What differs gets ported, as in `_mathlib.py`, or stays in Python.
+   - **numpy functions on single numbers: built.** See `loops-and-builtins.md`. Left in Python: `np.tanh` and `np.power`, which aren't libm's, and
+     combinations whose result depends on the platform or numpy version. Bit for bit checked on arm64 and wasm only: check x86-64 when it lands,
+     where numpy may use SIMD routines for `exp` and `sin`. Not yet: `np.mod`, `np.floor_divide`, `np.degrees`, `np.radians`.
    - **Reductions on a whole array:** `sum`, `prod`, `min`, `max`, `mean`, `any`, `all`, `argmax`. A plain loop doesn't match `np.sum` (it differs from
      about 100 elements up), so port numpy's pairwise order. The gain is inside loops: outside one, lifting already gives numpy for the
      reduction and native code for the loop. numpy is faster on big arrays, with SIMD: at 1,000,000 elements `np.sum` 162 µs against our loop's

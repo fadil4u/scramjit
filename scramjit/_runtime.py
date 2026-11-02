@@ -62,7 +62,7 @@ OVERFLOW_ERROR_MESSAGES = [
 # wrapped in CPython's own handling of special values and errors (mathmodule.c).
 LIBM = ['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'asinh', 'acosh', 'atanh', 'sinh', 'cosh',
         'tanh', 'exp', 'exp2', 'expm1', 'log', 'log2', 'log10', 'log1p', 'cbrt', 'erf', 'erfc',
-        'atan2', 'pow', 'ldexp', 'nextafter']
+        'atan2', 'pow', 'ldexp', 'nextafter', 'hypot', 'fmod']
 
 
 try:

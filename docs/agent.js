@@ -76,6 +76,9 @@
   // Folding the corner to (W - q, q) creases the banner along y = x - W + q. The part above the
   // crease is gone from the front and shows, reflected across the crease, as the flap.
   var q = REST, isOpen = false, raf = 0, drag = null;
+  // Followed the corner here from another page of the site: closing the prompt returns there.
+  var home = new URL('./', here).href, ref = document.referrer, refPage = ref.split(/[?#]/)[0];
+  var cameFrom = location.hash === '#agents' && refPage !== home && refPage.indexOf(home) === 0 ? ref : '';
   var points = function (ps) { return ps.length ? 'polygon(' + ps.map(function (p) { return p[0] + 'px ' + p[1] + 'px'; }).join(',') + ')' : 'polygon(0 0)'; };
   function cut(poly, d) {
     var out = [];
@@ -146,6 +149,10 @@
     if (instant) { draw(full()); end(); } else move(full(), 650, end);
   }
   function close() {
+    if (cameFrom && location.hash === '#agents') {  // left open behind us, for the forward button
+      if (history.length > 1) history.back(); else location.replace(cameFrom);
+      return;
+    }
     isOpen = false;
     back.inert = true;
     banner.classList.remove('is-open');

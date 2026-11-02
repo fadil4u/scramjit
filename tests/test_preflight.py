@@ -489,9 +489,9 @@ def tally_file(tmp_path):
 
 
 def _cli(*args, cwd=None):
-    env = dict(os.environ, NO_COLOR='1', PYTHONWARNINGS='ignore')
+    env = dict(os.environ, NO_COLOR='1', PYTHONWARNINGS='ignore', PYTHONIOENCODING='utf-8')
     env['PYTHONPATH'] = os.pathsep.join(p for p in sys.path if p)
-    return subprocess.run([sys.executable, '-m', 'scramjit', *map(str, args)], capture_output=True, text=True, env=env, cwd=cwd)
+    return subprocess.run([sys.executable, '-m', 'scramjit', *map(str, args)], capture_output=True, encoding='utf-8', env=env, cwd=cwd)
 
 
 def test_static_shows_all_three_states(tally_file):

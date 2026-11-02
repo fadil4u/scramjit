@@ -82,6 +82,75 @@ summarize runs as Python
 
 Arguments after the script or module are passed to it.
 
+## Which lines ran most
+
+`--counts` compiles copies of your functions that count how often each line runs, and adds the hottest lines to the report:
+
+```console
+$ scramjit preflight --counts --run examples/hot_lines.py
+```
+
+```text
+hottest lines, exact counts; counting slowed this run, so the times above read high
+  100,196,159  hot_lines.py:24  a[j + 1] = a[j]
+  100,196,159  hot_lines.py:25  moved += 1
+  100,196,159  hot_lines.py:26  j -= 1
+       21,998  hot_lines.py:21  v = a[i]
+       21,998  hot_lines.py:22  j = i - 1
+```
+
+Give it a function to count only that one, and to see every line of it, with how long each loop ran and how often each branch was taken:
+
+```console
+$ scramjit preflight examples/hot_lines.py:insertion_sort --counts --run examples/hot_lines.py
+```
+
+```text
+  19 │ ✓           2     moved = 0
+  20 │ ✓           2     for i in range(1, len(a)):              10,999.0 per entry
+  21 │ ✓      21,998         v = a[i]                            bounds proven
+  22 │ ✓      21,998         j = i - 1
+  23 │ ✓      21,998         while j >= 0 and a[j] > v:          1 bounds check kept  4,554.8 per entry
+  24 │ ✓ 100,196,159             a[j + 1] = a[j]                 2 bounds checks kept
+  25 │ ✓ 100,196,159             moved += 1
+  26 │ ✓ 100,196,159             j -= 1
+  27 │ ✓      21,998         a[j + 1] = v                        1 bounds check kept
+```
+
+- A loop's line shows how many times the loop was entered, and **per entry** how many iterations each entry ran on average. An `if` shows how many times it was tested and how often it was **taken**.
+- Counts cover native code, including loops compiled on their own in a partly compiled function. Lines that run as Python have none.
+- Results don't change, and the compiled copies are cached apart from the normal ones.
+
+Use the counts, not the times, from a run with `--counts`. Counting took from 3% to 45% more time on our benchmarks, the most in tight loops full of branches, so it changes which lines look expensive. Plain `--run` doesn't count anything.
+
+Two cases aren't exact. When a line raises, the lines after it in the same block read one too many. And threads running the same function at once can lose some counts, since counters are plain additions; their results are still right.
+
+## Watching a run
+
+`--live` shows the report while the program runs, updating calls and time even in the middle of a long call. With `--counts` it adds the hottest lines:
+
+```console
+$ scramjit preflight --live --counts --run simulate.py
+```
+
+```text
+scramjit 2.3 s  90% native
+* settle          1 call     2.04 s native     0.00 s python
+     853,290,288  simulate.py:9  x[i] = 0.5 * x[i] + 0.5 * x[i - 1]
+     853,290,288  simulate.py:10  if x[i] > 0.25:
+         854,145  simulate.py:8  for i in range(1, len(x)):
+         280,875  simulate.py:11  t += 1.0
+               1  simulate.py:6  t = 0.0
+```
+
+`*` marks what's running now. The normal report follows at the end, and the exit status is the same.
+
+- On a terminal the block redraws in place, and clears when your program prints through `sys.stdout` or `sys.stderr`. Output from native libraries that write directly can leave a block behind.
+- When stderr is piped, it prints one line every 5 seconds instead.
+- With `--json` it writes one JSON object per line, about once a second: `type` is `snapshot` until the last line, which is the `report`. Use `-o run.jsonl` to keep them apart from your program's output.
+
+`--live` on its own costs under 1% and doesn't recompile. Counters can be read during a call because compiled code releases the GIL. In Pyodide nothing can run during a call, so counts move only between calls.
+
 ## In CI
 
 Both modes exit non-zero when any function is less than compiled; `--allow-partial` accepts partly compiled ones. The strongest check runs your tests, so every function is checked with the types it really gets:
@@ -127,7 +196,7 @@ $ scramjit preflight src/sim.py:ema --run app.py       # every signature compile
 $ scramjit preflight pkg.sim:ema                       # a dotted module path works too
 ```
 
-It prints the same report as `ema.preflight()`. Without `--run`, argument types come from annotations, and unannotated arguments are assumed to be numbers or arrays. With `--run`, the report covers each signature the function was actually compiled for. Put the function before `--run`: everything after `--run` is the program and its arguments.
+It prints the same report as `ema.preflight()`, with a column of [how often each line ran](#which-lines-ran-most) if you add `--counts`. Without `--run`, argument types come from annotations, and unannotated arguments are assumed to be numbers or arrays. With `--run`, the report covers each signature the function was actually compiled for. Put the function before `--run`: everything after `--run` is the program and its arguments.
 
 ## Specializations and the generated C
 

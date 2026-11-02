@@ -52,6 +52,7 @@ Matches CPython bit for bit: // and % on negatives, negative indices, IndexError
 scramjit preflight [paths]  # static, imports nothing: state of each @scram function, blocking lines with hints, undecorated loops that would compile; -q, --json, --no-suggest
 scramjit preflight FILE:FUNC  # line by line: state, types, bounds checks
 scramjit preflight --run app.py [args] | --run -m pytest  # real types; compile, native and Python time; report on stderr
+scramjit preflight [FILE:FUNC] --counts [--live] [--json -o F] --run app.py  # also how often each line ran and each branch was taken; --live reports during the run; the flags go before --run; counting slows the run, so trust its counts, not its times
 scramjit c FILE:FUNC  # generated C; --runtime for a standalone file
 scramjit cache info|clear|path
 preflight exits 1 if any @scram function runs as Python, so it works in CI. SCRAMJIT_LOG=1 logs each compile and fallback. Every command has --help.

@@ -331,6 +331,10 @@ be easy to see. Tools, all pure Python, behind one `scramjit` command (also `pyt
   whole run (the coverage number). Ends with hints. Catches the type-driven fallbacks the static
   mode can't see; running the test suite under it is the CI check.
 - Both modes exit non-zero on anything but compiled (`--allow-partial` accepts partly compiled).
+- **`--counts` and `--live`** (with `--run`; built 2026-11-02): `--counts` compiles copies that count how often each line runs, for the
+  hottest lines in the report, and with `FILE:FUNCTION` only that function, every line, loop iterations and branches taken. `--live` shows
+  the report during the run: redrawn on a terminal, a line every 5 s when piped, JSON lines with `--json`. Separate because they cost
+  different things, and plain `--run` must never slow down. Not `--watch`, which means "rerun on change" elsewhere.
 - **`scramjit preflight PATH:FUNCTION`** (or `pkg.module:function`): the `f.preflight()` report for one
   function, from the command line. Static by default (one assumed signature); with `--run` it shows
   each signature compiled during the run. The target comes before `--run`, which takes the rest of
@@ -344,6 +348,15 @@ be easy to see. Tools, all pure Python, behind one `scramjit` command (also `pyt
 Hints must be actionable and name the line: what stops a loop compiling and how to rewrite it,
 annotate an argument that arrives as several types, pass a numpy array instead of a list (copied per
 call), make an array contiguous, and when a bounds check stays in a hot loop, what would let it go.
+
+**Line counts: what they cost.** Statements that always run together share one counter, and an `if` adds its test to its body's
+counter without branching (`sj_c[n] += t`), its else being the difference. A store inside the body stopped if-conversion: a random branch
+went from 0.69 to 4.6 ns (6.6x), `edit_distance` 3.8x. With this (interleaved, best of 7, arm64): `ema` 2.42 to 2.48 ns, matrix-vector
+0.90 to 0.96, a random branch 0.70 to 0.90, `edit_distance` 1.26 to 1.82. So timing and counting are separate runs: counts are checked
+against a Python tracer, and don't time anything. A kernel adds to its counters with the GIL released, so a Python thread reads them mid-call
+(`tests/test_counts.py`); in Pyodide counts work but move only between calls. `--live` alone costs under 1% on calls of 12 µs. Only
+native code is counted, so this can't see into libraries scramjit doesn't compile. Spills per line would need them from cimo
+(`cimo report` in its `TODO.md`).
 
 ## What scramjit needs from cimo
 

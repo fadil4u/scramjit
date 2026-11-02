@@ -332,9 +332,15 @@ def flatten_dicts(fdef, arg_types):
 
 
 class Compiler:
-    def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, parity=True):
+    def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, parity=True, counts=False):
         fdef, arg_types, self.dict_slots = flatten_dicts(fdef, arg_types)
-        self.again = (arg_types, globals_, filename, line_offset, boundscheck, parity)
+        self.again = (arg_types, globals_, filename, line_offset, boundscheck, parity, counts)
+        self.counts = counts       # preflight --counts: the kernel counts how often each line runs
+        self.count_lines = []      # counter -> the Python lines it stands for
+        self.count_slot = {}       # id(statement) -> (its counter, whether it's the one that adds to it)
+        self.count_heads = {}      # Python line of an if or a loop -> ('if' or 'loop', the counter of its body)
+        self.count_tests = {}      # id(if statement) -> the counter its test adds to
+        self.count_rest = {}       # counter of an else -> (counter of its if, counter of the if's body)
         self.split_done = False    # names are split into webs, so a conflict left is within one variable
         self.tagged = set()        # variables holding an exact int or a float: a double and v___int (see may_tag)
         self.not_literal = set()   # variables assigned an int that isn't a literal
@@ -1334,6 +1340,8 @@ class Compiler:
                 self.emit(f'int v_{name}__np = {1 if name in self.params and self.came_as(name).np is True else 0};')
         self.emit('int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;')
         decl_at = len(self.lines)
+        if self.counts:
+            self.plan_counts(self.f.body)
         for s in self.f.body:
             self.stmt(s)
         frees = [f'free(v_{n});' for n, t in self.env.items() if t.kind == 'list'] + \
@@ -1355,10 +1363,59 @@ class Compiler:
             params.append('const uint64_t *sj_m')
         if self.uses_stop:
             params.append('volatile int *sj_stop')
+        if self.counts:
+            params.append('int64_t *restrict sj_c')
         params.append('int64_t *sj_io')
         start = ['    *sj_stop = 0;'] if self.uses_stop else []
         return snippets(self.helpers) + '\n'.join(self.lines[:head] + [f'int sj_kernel({", ".join(params)}) {{'] + start
                          + self.lines[head:] + ['}', ''])
+
+    def plan_counts(self, stmts, by_test=False):
+        """Statements that always run together share one counter, added to by the first of them: a store
+        per statement slows a loop far more than one per run of statements. Anything that can jump away
+        ends a run. Only an exception escapes this, so lines after the one that raised can read one too many.
+        An if adds its test to its body's counter, and its else is what's left: a store inside a branch
+        would stop it becoming a conditional move (a random branch: 0.69 to 4.6 ns). by_test: stmts are one."""
+        slot = None
+        for s in stmts:
+            if isinstance(s, ast.Expr):           # a docstring: stmt() emits nothing for it
+                continue
+            leads = slot is None and not by_test
+            if slot is None:
+                slot = len(self.count_lines)
+                self.count_lines.append(set())
+                by_test = False
+            self.count_slot[id(s)] = (slot, leads)
+            self.count_lines[slot].add(self.line(s))
+            if isinstance(s, ast.If):
+                body = self.first_count(s.body, True)
+                if body is not None:
+                    self.count_tests[id(s)] = body
+                    self.count_heads[self.line(s)] = ('if', body)
+                    other = self.first_count(s.orelse, True)
+                    if other is not None:
+                        self.count_rest[other] = (slot, body)
+            elif isinstance(s, (ast.For, ast.While)):
+                body = self.first_count(s.body)
+                if body is not None:
+                    self.count_heads[self.line(s)] = ('loop', body)
+                self.first_count(s.orelse)
+            if any(isinstance(n, (ast.Break, ast.Continue, ast.Return)) for n in ast.walk(s)):
+                slot = None
+
+    def first_count(self, stmts, by_test=False):
+        """Plan a nested block; returns the counter of its first statement, if it has one."""
+        self.plan_counts(stmts, by_test)
+        first = next((b for b in stmts if not isinstance(b, ast.Expr)), None)
+        return None if first is None else self.count_slot[id(first)][0]
+
+    def count(self, s):
+        if id(s) not in self.count_slot:          # written by the compiler as it went: its own counter
+            self.count_slot[id(s)] = (len(self.count_lines), True)
+            self.count_lines.append({self.line(s)})
+        slot, leads = self.count_slot[id(s)]
+        if leads:
+            self.emit(f'sj_c[{slot}]++;')
 
     def block(self, stmts):
         self.depth += 1
@@ -1424,6 +1481,8 @@ class Compiler:
         if isinstance(s, ast.Expr):           # a docstring
             return
         self.mark(s)
+        if self.counts:
+            self.count(s)
         if isinstance(s, ast.Assign) and self.is_list_ctor(s.value):
             self.make_list(s.targets[0].id, s.value, s)
             return
@@ -1465,7 +1524,13 @@ class Compiler:
                 if at.kind == 'list' and at.elem.np == 'dyn':
                     self.emit(f'v_{name}__np[{idx}] = {r[1]};')
         elif isinstance(s, ast.If):
-            self.open(f'if ({self.truth(self.expr(s.test)[0], self.typeof(s.test))})')
+            test = self.truth(self.expr(s.test)[0], self.typeof(s.test))
+            if id(s) in self.count_tests:
+                t = self.temp()
+                self.emit(f'int {t} = ({test}) != 0;')
+                self.emit(f'sj_c[{self.count_tests[id(s)]}] += {t};')
+                test = t
+            self.open(f'if ({test})')
             saved = self.with_facts(self.guard_facts(s.test, s.body))
             for b in s.body:
                 self.stmt(b)

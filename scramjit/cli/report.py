@@ -2,6 +2,7 @@
 
 import ast
 import json
+import linecache
 import os
 
 from .. import _dispatch, _preflight as P
@@ -124,8 +125,23 @@ def static_json(stream, reports):
     stream.write('\n')
 
 
-def lines_table(t, lines, first, fdef, offset, title, status, bounds, problems, types, gotchas=None, loops=()):
-    """One function, line by line. loops: (first line, last line) of what is native in a partly compiled one."""
+def _count_note(line, runs, heads):
+    """What a line's count means for what it holds: how long its loop runs, how often its branch is taken."""
+    kind, body = heads.get(line, (None, 0))
+    n = runs.get(line, 0)
+    if kind == 'loop' and n:
+        return f'{body / n:,.1f} per entry'
+    if kind == 'if' and n:
+        return f'taken {100 * body / n:.0f}%'
+    return ''
+
+
+def lines_table(t, lines, first, fdef, offset, title, status, bounds, problems, types, gotchas=None, loops=(), counts=None):
+    """One function, line by line. loops: (first line, last line) of what is native in a partly compiled one.
+    counts: (runs, heads) from Function.line_counts, for a column of how often each line ran."""
+    runs, heads = counts or ({}, {})
+    top = max(runs.values(), default=0)
+    across = max((len(f'{v:,}') for v in runs.values()), default=0)
     t.write(t.style(title, 'bold'))
     t.write(status)
     rule = t.style(t.symbol('dash') * min(t.width, 72), 'muted')
@@ -170,8 +186,16 @@ def lines_table(t, lines, first, fdef, offset, title, status, bounds, problems, 
                     note = t.style('bounds hoisted out of the loop' if n in hoisted else 'bounds proven', 'muted')
             if gotchas and n in gotchas:
                 note = t.style(gotchas[n], 'yellow')
+        column = ''
+        if counts:
+            v = runs.get(n)
+            shown = f'{v:,}' if v is not None else ''
+            column = t.style(f'{shown:>{across}}', 'yellow' if v and v * 2 >= top else 'muted') + ' '
+            extra = _count_note(n, runs, heads)
+            if extra:
+                note = f'{note}  {t.style(extra, "muted")}' if note else t.style(extra, 'muted')
         pad = ' ' * (width - len(text)) if note else ''
-        t.write(f'{t.style(f"{n:>4}", "muted")} {bar} {mark} {text}{pad}  {note}'.rstrip())
+        t.write(f'{t.style(f"{n:>4}", "muted")} {bar} {mark} {column}{text}{pad}  {note}'.rstrip())
     t.write(rule)
     if types:
         t.write(f'{t.style("types:", "heading")} ' + ', '.join(f'{k}: {t.style(v, "code")}' for k, v in types.items()))
@@ -217,6 +241,8 @@ def function_report(f, signature, stream):
     except (OSError, TypeError):
         lines = []
     offset = f._first - 1
+    counts = f.line_counts()
+    counts = counts if counts[0] else None
     keys = [tuple(signature)] if signature is not None else list(f._cache)
     if not keys:
         a = P.best_analysis(fdef, f._fn.__globals__, f._filename, offset, {'boundscheck': f._boundscheck, 'parity': f._parity})
@@ -235,14 +261,14 @@ def function_report(f, signature, stream):
             s = f._compile_s.get(key)
             when = f' · compiled in {s * 1000:.0f} ms' if s is not None else ''
             lines_table(t, lines, f._first, fdef, offset, f'{f.__name__}({names})', _state_line(t, True, f'· {where}{when}'),
-                        (entry.checks, entry.hoisted, f._boundscheck), [], entry.locals, entry.gotchas)
+                        (entry.checks, entry.hoisted, f._boundscheck), [], entry.locals, entry.gotchas, counts=counts)
         else:
             line, why = f._why.get(key, (f._first, 'not compiled'))
             loops = [(x._tree.lineno + offset, x._tree.end_lineno + offset) for x in f._native_loops()]
             if loops:
                 problems = [] if any(a <= line <= b for a, b in loops) else [P.Problem(line, None, 1, why)]
                 lines_table(t, lines, f._first, fdef, offset, f'{f.__name__}({names})',
-                            _state_line(t, 'partly', f'· {where}'), None, problems, {}, None, loops)
+                            _state_line(t, 'partly', f'· {where}'), None, problems, {}, None, loops, counts)
                 continue
             lines_table(t, lines, f._first, fdef, offset, f'{f.__name__}({names})', _state_line(t, False, f'· {where}'),
                         None, [P.Problem(line, None, 1, why)], {})
@@ -332,11 +358,47 @@ def run(t, total, status, allow_partial=False):
     return bad
 
 
-def run_json(stream, total, status, allow_partial=False):
+def hottest(limit=10):
+    """The lines that ran most, over every counted function: (times, function name, file, line)."""
+    out = []
+    for f in _dispatch.functions():
+        out += [(v, f.__name__, f._filename, n) for n, v in f.line_counts()[0].items() if v]
+    return sorted(out, key=lambda x: (-x[0], x[2], x[3]))[:limit]
+
+
+def hot_lines(t):
+    hot = hottest()
+    if not hot:
+        return
+    t.write('')
+    t.write(t.style('hottest lines', 'heading') + t.style(', exact counts; counting slowed this run, so the times above read high', 'muted'))
+    across = max(len(f'{v:,}') for v, *_ in hot)
+    for v, name, path, n in hot:
+        where = f'{os.path.basename(path)}:{n}'
+        t.write(f'  {t.style(f"{v:>{across},}", "number")}  {where}  {linecache.getline(path, n).strip()}')
+
+
+def counts_json(f):
+    runs, heads = f.line_counts()
+    return {'lines': {str(n): v for n, v in sorted(runs.items())},
+            'branches_taken': {str(n): v for n, (k, v) in sorted(heads.items()) if k == 'if'},
+            'loop_iterations': {str(n): v for n, (k, v) in sorted(heads.items()) if k == 'loop'}}
+
+
+def run_json(stream, total, status, allow_partial=False, one_line=False):
     rows = run_rows()
+    functions = []
+    for r in rows:
+        row = {k: v for k, v in r.items() if k != 'function'}
+        c = counts_json(r['function'])
+        if c['lines']:
+            row['counts'] = c
+        functions.append(row)
     out = {'seconds': total, 'exit_status': status, 'native_share': min(sum(r['native'] for r in rows) / total, 1.0) if total else 0.0,
-           'functions': [{k: v for k, v in r.items() if k != 'function'} for r in rows],
+           'functions': functions,
            'hints': [{'where': w, 'reason': why, 'hint': h} for w, why, h in run_hints(rows)]}
-    json.dump(out, stream, indent=2)
+    if one_line:
+        out['type'] = 'report'
+    json.dump(out, stream, indent=None if one_line else 2)
     stream.write('\n')
     return sum(r['state'] == 'python' or (r['state'] == 'partly' and not allow_partial) for r in rows)

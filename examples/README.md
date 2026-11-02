@@ -22,11 +22,12 @@ and the scripts print it. `asian_option` gains least because most of its time is
 
 `config_dict` gains less than most because its loop is only float arithmetic with no indexing, which CPython does comparatively well, and it's at the hardware's limit: hand-written C takes the same time per step through cimo and through `gcc -O3`.
 
-Three more show behaviour rather than speed:
+Four more show behaviour rather than speed:
 
 - [`threads.py`](threads.py): compiled code releases the GIL. Four threads ran 2.3x to 3.8x faster than the same
   calls one after another, depending on what else the machine was doing; plain Python threads gained
   nothing.
 - [`fallback.py`](fallback.py): a function that doesn't compile runs as Python with a `FallbackWarning`.
   Shows the warning, `f.preflight()`, `fallback=False`, and a rewrite that compiles.
+- [`hot_lines.py`](hot_lines.py): insertion sort, to run under `scramjit preflight --counts`: 100 million moves on one line, and exactly how often each line and branch ran.
 - [`partly_compiled.py`](partly_compiled.py): a function that handles text can't compile whole, but its loop over numbers still does: 96x, with the rest as Python. Shows the warning and `f.preflight()` line by line.

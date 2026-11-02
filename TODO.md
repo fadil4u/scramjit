@@ -27,6 +27,11 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
   module's bytes, which isn't cimo's documented API. When cimo exposes a compiled module's
   WebAssembly (or a disassembly), use that.
 
+## Line counts, what's left
+
+Turning them on from a notebook or the browser, which have no command line (`enable_counts` is private); a heatmap over the
+LLM demo's code; spills per line, once cimo can report them.
+
 ## Next
 
 1. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has.

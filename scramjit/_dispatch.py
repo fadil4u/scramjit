@@ -161,11 +161,14 @@ PYTHON = _Python()
 
 
 class Compiled:
-    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun', 'outs')
+    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun', 'outs',
+                 'counts', 'count_lines', 'count_heads', 'count_rest')
 
     def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None, stop=False, rerun=False):
         self.rerun = rerun
         self.outs = []                        # written dict keys: (argument index, key, byte in io, type)
+        self.counts = None                    # preflight --counts: the int64 counters the kernel adds to
+        self.count_lines, self.count_heads, self.count_rest = (), {}, {}
         self.checks, self.hoisted, self.gotchas, self.stop = checks or {}, hoisted, gotchas or {}, stop
         self.locals = locals_ or {}           # variable -> inferred type name
         self.kernel = kernel
@@ -174,15 +177,47 @@ class Compiled:
         self.source = source
         self.libm = libm
 
+    def read_counts(self):
+        """(line -> times it ran, line -> ('if' or 'loop', times its body ran)). A kernel adds to its counters
+        with the GIL released, so this works while one runs, from any thread."""
+        values = list(struct.unpack(f'<{len(self.counts) // 8}q', self.counts))
+        for slot in sorted(self.count_rest):      # an if comes before its else, so a chain of elifs resolves in order
+            whole, taken = self.count_rest[slot]
+            values[slot] = max(values[whole] - values[taken], 0)
+        runs = {}
+        for lines, v in zip(self.count_lines, values):
+            for n in lines:
+                runs[n] = max(runs.get(n, 0), v)    # a line can hold several statements
+        return runs, {n: (kind, values[slot]) for n, (kind, slot) in self.count_heads.items()}
+
 
 _functions = weakref.WeakSet()    # every decorated function, for preflight
 _profile = False                  # preflight --run: time each call
+_counts = None                    # preflight --counts: True, or the names of the functions to count
+_running = None                   # preflight --live: thread id -> (the function, native or not, when it started)
 _log = bool(os.environ.get('SCRAMJIT_LOG'))
 
 
 def enable_profile():
     global _profile
     _profile = True
+
+
+def enable_counts(names=None):
+    """Compile a copy of each function, or of those named, that counts how often each line runs."""
+    global _counts
+    enable_profile()
+    _counts = set(names) if names else True
+
+
+def enable_live():
+    global _running
+    enable_profile()
+    _running = {}
+
+
+def running():
+    return list(_running.values()) if _running else []
 
 
 def functions():
@@ -297,6 +332,7 @@ class Function:
         self._py = fn             # what runs when a signature doesn't compile: fn, or fn with its loops lifted
         self._lifted = None       # the Functions of its lifted loops, once that has been tried
         self._loop = _loop        # a lifted loop: (its function's tree, the first line, the file)
+        self._owner = fn.__name__ # the decorated function this is, or that this loop was lifted from
         self._boundscheck = boundscheck
         self._fallback = fallback
         self._parity = parity
@@ -406,10 +442,32 @@ class Function:
         s = self._stats.setdefault(key, [0, 0.0, 0.0])
         s[0] += 1
         t = time.perf_counter()
+        if _running is not None:
+            me = threading.get_ident()
+            outer = _running.get(me)
+            _running[me] = (self, entry is not PYTHON, t)
         try:
             return self._py(*args) if entry is PYTHON else self._run(entry, args)
         finally:
             s[2 if entry is PYTHON else 1] += time.perf_counter() - t
+            if _running is not None:
+                if outer is None:
+                    del _running[me]
+                else:
+                    _running[me] = outer
+
+    def line_counts(self):
+        """Over all signatures and lifted loops: (line -> times it ran, line -> (kind, times its body ran))."""
+        runs, heads = {}, {}
+        for f in [self] + self._all_loops():
+            for entry in list(f._cache.values()):
+                if isinstance(entry, Compiled) and entry.counts is not None:
+                    r, h = entry.read_counts()
+                    for n, v in r.items():
+                        runs[n] = runs.get(n, 0) + v
+                    for n, (kind, v) in h.items():
+                        heads[n] = (kind, heads.get(n, (kind, 0))[1] + v)
+        return runs, heads
 
     def preflight(self, signature=None):
         """Print this function line by line: native or Python and why, types, bounds checks."""
@@ -468,7 +526,9 @@ class Function:
         self._lifted = []
 
         def native(python, tree, loop):
-            return Function(python, self._boundscheck, self._use_disk, True, self._parity, (tree, self._first))
+            f = Function(python, self._boundscheck, self._use_disk, True, self._parity, (tree, self._first))
+            f._owner = self._owner
+            return f
 
         self._py, self._lifted = _lift.lift(self._tree, self._fn, self._filename, self._first, native,
                                             self._tree.body[0] if self._loop else None)
@@ -479,8 +539,9 @@ class Function:
         for x, t in zip(args, key):
             if t is None:
                 raise Unsupported(None, f'an argument of type {_describe(x, t)} is not compiled')
+        counts = _counts is True or bool(_counts and self._owner in _counts)
         c = Compiler(self._tree, list(key), self._fn.__globals__, self._filename, self._first - 1,
-                     self._boundscheck, self._parity)
+                     self._boundscheck, self._parity, counts)
         source = c.generate()
         cimo = _get_cimo()
         try:
@@ -495,6 +556,9 @@ class Function:
         entry = Compiled(kernel, c.ret, key, source, _libm_table() if c.uses_libm else None,
                          c.shown_types(), c.checks, c.hoisted_lines, c.gotchas, c.uses_stop, c.uses_rerun)
         entry.outs = [(i, k, 8 * c.out_slot(n), c.env[flat]) for n, (flat, i, k) in enumerate(c.outs)]
+        if counts:
+            entry.counts = bytearray(8 * max(len(c.count_lines), 1))
+            entry.count_lines, entry.count_heads, entry.count_rest = c.count_lines, c.count_heads, c.count_rest
         return entry
 
     def _key(self, args):
@@ -531,6 +595,8 @@ class Function:
             cargs.append(entry.libm)
         if entry.stop:
             cargs.append(_interrupt.address())
+        if entry.counts is not None:
+            cargs.append(entry.counts)
         io = bytearray(40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0) + 16 * len(entry.outs))
         status = entry.kernel(*cargs, io)
         if status == RERUN and entry.rerun:

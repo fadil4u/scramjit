@@ -41,6 +41,10 @@ def build_tree():
                    'line by line', nargs='*')
     p.opt('--run', metavar='program', help='Run this script, or `-m module`, with the arguments after it. '
                                            'The report goes to stderr; the program keeps stdout')
+    p.opt('--counts', flag=True, help='With `--run`, compile copies that count how often each line runs, and report the '
+                                      'hottest lines. Slows the program; a `FILE:FUNCTION` limits that to one function')
+    p.opt('--live', flag=True, help='With `--run`, show the report while the program runs, not only at the end. With '
+                                    '`--json`, writes one JSON object per line')
     p.opt('-q', '--quiet', flag=True, help='Show only what doesn\'t compile')
     p.opt('--no-suggest', flag=True, help='Don\'t list undecorated functions that would compile')
     p.opt('--json', flag=True, help='Print the report as JSON')
@@ -53,6 +57,8 @@ def build_tree():
     p.example('scramjit preflight --run simulate.py --steps 2000')
     p.example('scramjit preflight --run -m pytest tests/', 'in CI: every function, with the types it really gets')
     p.example('scramjit preflight --json -o report.json --run app.py', 'for tools')
+    p.example('scramjit preflight --counts --live --run app.py', 'the hottest lines, as it runs')
+    p.example('scramjit preflight app.py:step --counts --run app.py', 'one function, with how often each line ran')
 
     c = root.command(
         'c', 'Print the C generated for a function', func=cmd_c,
@@ -162,6 +168,9 @@ def cmd_preflight(ctx):
     v = ctx.values
     if v.get('run') is not None:
         return _preflight_run(ctx, v['run'])
+    for flag in ('counts', 'live'):
+        if v.get(flag):
+            raise UsageError(f'--{flag} needs --run', ctx.command, hint=f'write `scramjit preflight --{flag} --run app.py`')
     args = v.get('paths') or []
     targets = [a for a in args if _is_target(a)]
     paths = [a for a in args if a not in targets] or ([] if targets else ['.'])
@@ -232,10 +241,21 @@ def _preflight_run(ctx, program):
         _error(ctx, f'no such script: {program[0]}', suggestion=near)
         raise Failure(2)
     _dispatch.enable_profile()
+    values = ctx.values
+    names = {a.rpartition(':')[2] for a in values.get('paths') or () if _is_target(a)}
+    if values.get('counts'):
+        _dispatch.enable_counts(names)
+    live = None
+    if values.get('live'):
+        from .live import Live
+        _dispatch.enable_live()
+        live = Live(ctx.err, values.get('output'), values.get('json'), bool(values.get('counts')))
     warnings.filterwarnings('ignore', category=FallbackWarning)     # the report says it, with hints
     status = 0
     saved = sys.argv, list(sys.path)
     t0 = time.perf_counter()
+    if live:
+        live.start(t0)
     try:
         if program[0] == '-m':
             sys.argv = program[1:]
@@ -254,14 +274,20 @@ def _preflight_run(ctx, program):
         status = 1
     finally:
         sys.argv, sys.path[:] = saved[0], saved[1]
+        if live:
+            live.stop()
     total = time.perf_counter() - t0
     sys.stdout.flush()
-    if ctx.values.get('json'):
+    if live and live.json_stream:
+        bad = report.run_json(live.json_stream, total, status, values.get('allow_partial'), one_line=True)
+        live.close()
+    elif ctx.values.get('json'):
         bad = _with_output(ctx, lambda stream: report.run_json(stream, total, status, ctx.values.get('allow_partial')), sys.stderr)
     else:
         bad = report.run(ctx.err, total, status, ctx.values.get('allow_partial'))
+        if values.get('counts') and not names:
+            report.hot_lines(ctx.err)
     if ctx.values.get('paths'):
-        names = {a.rpartition(':')[2] for a in ctx.values['paths'] if ':' in a}
         for f in _dispatch.functions():
             if f.__name__ in names:
                 ctx.err.write('')

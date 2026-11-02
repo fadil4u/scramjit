@@ -164,7 +164,8 @@ src/sim.py
 It also lists undecorated functions with a loop that would compile if decorated, assuming their
 arguments are numbers or arrays. `scramjit preflight --run app.py` (or `--run -m pytest`) reports what happened with the real types:
 calls, compile time, and time in native code and in Python. Both exit non-zero if a function isn't
-compiled, so they work as a CI check, and `--json` gives the report to tools. `scramjit preflight
+compiled, so they work as a CI check, and `--json` gives the report to tools. Add `--counts` for how often each line ran and
+each branch was taken, and `--live` to watch it happen. `scramjit preflight
 FILE:FUNCTION` or `f.preflight()` annotates one function line by line, including which bounds checks
 were proven, hoisted out of the loop or kept. `scramjit c FILE:FUNCTION` prints the generated C, and
 `SCRAMJIT_LOG=1` logs each compile and fallback. `scramjit --help` has the rest.

@@ -24,7 +24,7 @@ HINTS = [
     (r'^dict', 'if the keys are small integers, use an array indexed by key; otherwise do this outside the compiled function'),
     (r'^sets|^set comp', 'if the values are small integers, use a boolean array indexed by value'),
     (r'^f-strings|calls (str|print|repr|format)\(\)', 'keep text and printing out of the function: return numbers and format them after the call'),
-    (r'slices|views', 'loop over the indices you want: for i in range(lo, hi): a[i]'),
+    (r'slice|view', 'read and write through views, or loop over the indices you want: for i in range(lo, hi): a[i] = 0.0'),
     (r'^calls [\w.]*\.\w+\(\)', 'write it as a loop; methods and numpy calls on whole arrays aren\'t compiled'),
     (r'^calls \w+\(\)', 'put its body here, or decorate and call it from Python; a compiled function can\'t call Python functions'),
     (r'empty list|a list assigned', 'allocate a numpy array of the final size and pass it in'),
@@ -132,6 +132,20 @@ def assumed_signature(fdef):
             for a in n.args:
                 if isinstance(a, ast.Name):
                     ndim.setdefault(a.id, 1)
+    # row = m[i], with row indexed in turn, says m has more dimensions than one index shows
+    for n in ast.walk(fdef):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and n.targets[0].id in ndim \
+                and isinstance(n.value, ast.Subscript) and isinstance(n.value.value, ast.Name):
+            items = n.value.slice.elts if isinstance(n.value.slice, ast.Tuple) else [n.value.slice]
+            ints = sum(not isinstance(k, ast.Slice) for k in items)
+            ndim[n.value.value.id] = max(ndim.get(n.value.value.id, 0), ndim[n.targets[0].id] + ints)
+        elif isinstance(n, ast.For) and isinstance(n.target, ast.Name) and n.target.id in ndim and isinstance(n.iter, ast.Name):
+            ndim[n.iter.id] = max(ndim.get(n.iter.id, 0), ndim[n.target.id] + 1)
+        elif isinstance(n, ast.Subscript) and isinstance(n.value, ast.Subscript) and isinstance(n.value.value, ast.Name):
+            items = n.value.slice.elts if isinstance(n.value.slice, ast.Tuple) else [n.value.slice]
+            inner = n.slice.elts if isinstance(n.slice, ast.Tuple) else [n.slice]
+            ints = sum(not isinstance(k, ast.Slice) for k in items)
+            ndim[n.value.value.id] = max(ndim.get(n.value.value.id, 0), ints + len(inner))
     # rows, cols = a.shape says how many dimensions a has
     for n in ast.walk(fdef):
         if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Tuple) and isinstance(n.value, ast.Attribute) \

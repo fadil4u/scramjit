@@ -102,7 +102,8 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 
 | Compiled | Runs as Python |
 |:---|:---|
-| `for`, `while`, `break`, `continue`, `if`, conditional expressions | Slices and views: `a[1:]` |
+| `for`, `while`, `break`, `continue`, `if`, conditional expressions | Assigning to a slice: `a[1:] = 0` |
+| Views: `m[i]`, `x[a:b]`, `x[::-1]`, `m[:, j]`, `for row in m` | Returning a view |
 | `range`, `enumerate`, `zip`, `map`, `filter`, comprehensions | numpy array expressions: `a * 2`, `a.sum()` |
 | `sum(gen, 0.0)`, `min`, `max`, `abs`, `**`, tuple unpacking | Calls to other Python functions |
 | Numbers and n-D numpy arrays, including dtypes like `uint8` | Strings, objects |

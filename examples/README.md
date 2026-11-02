@@ -11,6 +11,7 @@ Python and through scramjit, and asserts the results are identical. They need nu
 | [`karplus_strong.py`](karplus_strong.py) | Plucked strings, written to a WAV | Each sample depends on one a period earlier | 0.99 s | 25.7 ms | 38x |
 | [`mandelbrot.py`](mandelbrot.py) | Escape-time fractal, drawn in the terminal | Each pixel iterates a different number of times | 1.94 s | 103 ms | 19x |
 | [`asian_option.py`](asian_option.py) | Monte Carlo option pricing | Path-dependent, with generator state across paths | 1.27 s | 103 ms | 12x |
+| [`views.py`](views.py) | Gaussian elimination with rows and columns as views | Each step changes what the next sees; the pivot depends on the data | 1.65 s | 5.7 ms | 291x |
 | [`numpy_functions.py`](numpy_functions.py) | A greedy route over a sphere, with `np.sin`, `np.arcsin`, `np.sqrt` | Each stop depends on the one before | 0.175 s | 2.4 ms | 74x |
 | [`config_dict.py`](config_dict.py) | An epidemic model with its settings and results in dicts | Each day depends on the one before | 0.081 s | 4.4 ms | 18x |
 

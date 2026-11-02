@@ -168,7 +168,11 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
 - **numpy on single numbers (built 2026-11-02).** 25 of 26 functions matched libm bit for bit on 160,024 inputs on arm64 and in Pyodide, so they
   call it; `np.tanh` doesn't, natively. Types are the trap: `np.abs(4)` is int64 natively and int32 in Pyodide, `np.floor(4)` changed in numpy 2.1,
   `np.sqrt(True)` is float16, so those stay Python. `np.minimum(0.0, -0.0)` differs by platform, so the compiler asks the numpy present.
-- **numpy calls (decided 2026-11-02; see `TODO.md`):** reductions next, then views. Array-creating
+- **Views (built 2026-11-02).** Pointer, extents and strides as plain variables, so no allocation and `row[j]` costs what `m[i, j]` does (1.04 against 1.01
+  ns). Until these, arrays were parameters with fixed extents, and range facts, aliases, versioning and forwarding relied on it. Now an array assigned
+  anywhere (`rebound`) gives no facts: its loops are versioned instead, tested at entry, unless it's assigned inside that loop. Removing any of these guards
+  fails `tests/test_views.py`.
+- **numpy calls (decided 2026-11-02; see `TODO.md`):** reductions next. Array-creating
   operations stay in Python, and MKL and BLAS stay out: not pure Python, and their results vary by library, CPU and thread count. A
   plain loop doesn't reproduce `np.sum` (pairwise), and is 6 to 12x slower than numpy on 1,000,000 elements until cimo has SIMD.
 - **Later:** growable lists, dicts, sets and strings as typed C containers: each needs allocation and a runtime.

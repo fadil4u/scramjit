@@ -45,13 +45,14 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
    - **numpy functions on single numbers: built.** See `loops-and-builtins.md`. Left in Python: `np.tanh` and `np.power`, which aren't libm's, and
      combinations whose result depends on the platform or numpy version. Bit for bit checked on arm64 and wasm only: check x86-64 when it lands,
      where numpy may use SIMD routines for `exp` and `sin`. Not yet: `np.mod`, `np.floor_divide`, `np.degrees`, `np.radians`.
+   - **Views: built.** Pointer, extents and strides, no allocation; `m[i]`, slices of any step, `m[:, j]`, `for row in m`. Not yet: returning one,
+     assigning to a slice, `a, b = m[0], m[1]`, rows in `enumerate()` and `zip()`, strided arrays as arguments (`f(x[::2])` from Python runs as Python).
    - **Reductions on a whole array:** `sum`, `prod`, `min`, `max`, `mean`, `any`, `all`, `argmax`. A plain loop doesn't match `np.sum` (it differs from
      about 100 elements up), so port numpy's pairwise order. The gain is inside loops: outside one, lifting already gives numpy for the
      reduction and native code for the loop. numpy is faster on big arrays, with SIMD: at 1,000,000 elements `np.sum` 162 µs against our loop's
      1,019, `np.max` 114 against 1,358; at 8, 1.5 µs against 2.8, nearly all call overhead. So numpy should win above roughly 1,000 to 2,000
      elements, an estimate. **Undecided:** should a function that compiles whole because of this get slower on huge arrays until cimo
      has SIMD, with a gotcha and a preflight note, or do whole-array reductions stay in Python until then? Recommended: the former.
-   - **Views:** `m[i]`, `x[a:b]`, only a pointer and a length. Reductions are much less useful without them.
    - **Not now, operations that create arrays:** `x * 2`, `a + b` need allocation, lifetimes, broadcasting and dtype rules, which is rewriting numpy.
      They stay in Python, with the loops around them lifted.
    - **Not `np.dot`, and no MKL or BLAS:** they would break "standard library plus cimo", and their results depend on the library, CPU and thread count.

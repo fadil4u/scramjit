@@ -48,6 +48,7 @@ VALUE_ERROR_MESSAGES = [
     '(see "Gotchas" in the docs)',
     'x ** y with a negative x and a fractional y: Python gives a complex here, which compiled code can\'t '
     '(see "Gotchas" in the docs)',
+    'slice step cannot be zero',                                # numpy
 ]
 OVERFLOW_ERROR_MESSAGES = [
     'cannot convert float infinity to integer',
@@ -101,6 +102,19 @@ PRELUDE = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+/* A slice of an extent n, as CPython's PySlice_Unpack and PySlice_AdjustIndices: its length, start and step. s != 0. */
+static inline int64_t sj_slice(int has_a, int64_t a, int has_b, int64_t b, int64_t s, int64_t n, int64_t *start, int64_t *step) {
+    if (s < -INT64_MAX) s = -INT64_MAX;
+    if (!has_a) a = s < 0 ? INT64_MAX : 0;
+    if (!has_b) b = s < 0 ? INT64_MIN : INT64_MAX;
+    if (a < 0) { a += n; if (a < 0) a = s < 0 ? -1 : 0; } else if (a >= n) a = s < 0 ? n - 1 : n;
+    if (b < 0) { b += n; if (b < 0) b = s < 0 ? -1 : 0; } else if (b >= n) b = s < 0 ? n - 1 : n;
+    *start = a;
+    *step = s;
+    if (s < 0) return b < a ? (int64_t)(((uint64_t)a - (uint64_t)b - 1) / (0 - (uint64_t)s)) + 1 : 0;
+    return a < b ? (int64_t)(((uint64_t)b - (uint64_t)a - 1) / (uint64_t)s) + 1 : 0;
+}
 
 #define SJ_FAIL(st, ln, a, b) do { sj_st = (st); sj_ln = (ln); sj_x = (a); sj_y = (b); goto sj_fail; } while (0)
 

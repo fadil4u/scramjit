@@ -1,10 +1,39 @@
-# Arrays, lists, tuples and dicts
+# Arrays, views, lists, tuples and dicts
 
 ## numpy arrays
 
 Arrays are passed by pointer, shape and strides, never copied. Writes go to your array. The generated code is specialized to the dtype, the number of dimensions and the layout, so a C-contiguous array gets plain `a[i]` indexing.
 
 Negative indices count from the end, as in Python. Indices are bounds-checked by default and raise `IndexError`; see [Semantics](semantics.md).
+
+## Views
+
+Indexing with fewer indices than dimensions, or with slices, gives a view, as in numpy. Nothing is copied and nothing is allocated, so a view costs a few variables, and reading through one runs as fast as `m[i, j]`:
+
+```python
+@scram
+def normalize(m):
+    for row in m:                   # each row is a view
+        top = row[0]
+        for j in range(len(row)):
+            row[j] /= top
+
+    first = m[:, 0]                 # a column
+    tail = m[1:, 1:]                # a block
+    backwards = first[::-1]         # any step, and views of views
+    return first[0] + tail[0, 0] + backwards[0] + m[0][0]
+```
+
+Writes go to the array, and show through every other view of it. Slices follow Python's rules: bounds clamp, negatives count from the end, and a step of zero raises `ValueError`. `len()`, `.shape`, `.size` and `.ndim` work on a view.
+
+A variable can be assigned a different view of the same kind later, as `x = x[1:]` does. Some forms still run as Python, with loops around them lifted where they fit:
+
+- returning a view, or passing one back, since it has to be a real numpy array sharing the memory
+- assigning to a slice: `x[1:3] = 0.0`. Write it as a loop, or through a view
+- arithmetic on whole arrays or views: `x[1:] * 2.0`
+- masks and index arrays: `x[x > 0]`, `x[indices]`, and `None` or `...` in an index
+- a tuple of views: `a, b = m[0], m[1]`. Assign them one at a time
+- `enumerate()` or `zip()` over rows, and a variable holding either a view with gaps or one without: `v = x[1:]` and later `v = x[::2]`
 
 ## Tuples
 

@@ -591,3 +591,48 @@ def test_static_understands_dict_arguments(tmp_path):
     d = json.loads(_cli('preflight', f, '--json', '--no-suggest').stdout)
     states = {x['name']: x['state'] for x in d['files'][0]['functions']}
     assert states == {'step': 'compiled', 'table': 'compiled', 'not_fixed': 'python'}
+
+
+VIEWS = '''
+from scramjit import scram
+
+@scram
+def by_row(m):
+    s = 0.0
+    for i in range(len(m)):
+        row = m[i]
+        for j in range(len(row)):
+            s += row[j]
+    return s
+
+@scram
+def by_iteration(m):
+    s = 0.0
+    for row in m:
+        for j in range(len(row)):
+            s += row[j]
+    return s
+
+@scram
+def chained(m, i: int, j: int):
+    return m[i][j]
+
+@scram
+def sliced(x):
+    s = 0.0
+    for v in x[1:]:
+        s += v
+    return s
+
+@scram
+def gives_back_a_view(x):
+    return x[1:]
+'''
+
+
+def test_static_understands_views(tmp_path):
+    f = tmp_path / 'views.py'
+    f.write_text(VIEWS)
+    d = json.loads(_cli('preflight', f, '--json', '--no-suggest').stdout)
+    states = {x['name']: x['state'] for x in d['files'][0]['functions']}
+    assert states == {'by_row': 'compiled', 'by_iteration': 'compiled', 'chained': 'compiled', 'sliced': 'compiled', 'gives_back_a_view': 'python'}

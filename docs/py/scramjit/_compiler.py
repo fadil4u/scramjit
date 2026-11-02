@@ -26,7 +26,7 @@ from ._errors import Unsupported
 import sys
 
 from ._mathlib import snippets
-from ._runtime import (INDEX_ERROR, INTERRUPTED, RERUN, RETURNS_INT, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
+from ._runtime import (INDEX_ERROR, INTERRUPTED, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
                        OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION)
 
 BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'round', 'sum', 'any', 'all')
@@ -365,6 +365,8 @@ class Compiler:
         self.hoisted_lines = set()   # Python lines whose checks live only in a versioned loop's slow copy
         self.slow_copy = 0     # inside that slow copy
         self.forwards = {}     # array -> (loop variable, temp holding its element at var - 1)
+        self.view_names = {}   # id of a view expression -> the variable that holds it while it's used
+        self.rebound = set()   # arrays assigned somewhere: their extents aren't fixed, so facts mustn't name them
         self.broke = []        # for each open Python loop, the flag its else tests, or None
         self.da_breaks = []    # for each loop definite assignment is in: what's assigned at each break
         self.polls = sys.platform != 'emscripten'       # no signals to wait for in Pyodide
@@ -393,7 +395,7 @@ class Compiler:
         return text
 
     def shown_types(self):
-        return {self.shown(WEB_SUFFIX.sub("'", k)): t.name for k, t in self.env.items()}
+        return {self.shown(WEB_SUFFIX.sub("'", k)): t.name for k, t in self.env.items() if not k.startswith('sjv__')}
 
     def find_outs(self):
         """The dict keys this function writes: [(flat name, argument index, key)]. Their values go back to the
@@ -460,13 +462,11 @@ class Compiler:
         return T.list_of(self.join_all(v, ts, 'a list'))
 
     def assign_type(self, node, name, t):
-        if t.kind == 'array':
-            self.fail(node, f'{name}: arrays can only be parameters')
         if t is T.NONE:
             self.fail(node, f'{name} would be None')
         old = self.env.get(name)
-        if old is not None and old.kind == 'array':
-            self.fail(node, f'{name} is reassigned')
+        if old is not None and old is not t and (old.kind == 'array' or t.kind == 'array') and self.split_done:
+            self.fail(node, f'{name} is {old.name} and later {t.name}; a variable must keep one type')
         if t is T.INT and not exact_int_literal(node):
             self.not_literal.add(name)
         if old is not None and old is not t:
@@ -551,12 +551,14 @@ class Compiler:
             self.infer_block(s.orelse)
             self.bind_types(s.target, self.elem_struct(self.iterable(s.iter)), s)
             lists = {n.id for n in ast.walk(s.iter) if isinstance(n, ast.Name)
-                     and self.env.get(n.id) is not None and self.env[n.id].kind == 'list'}
+                     and self.env.get(n.id) is not None and self.env[n.id].kind in ('list', 'array')}
             for n in ast.walk(ast.Module(body=s.body, type_ignores=[])):
                 if isinstance(n, ast.Name) and n.id in lists and isinstance(n.ctx, ast.Store):
                     self.fail(n, f'rebinds {n.id} inside a loop over it (Python keeps iterating the old list)')
             self.infer_block(s.body)
         elif isinstance(s, ast.Return):
+            if s.value is not None and self.typeof(s.value).kind == 'array':
+                self.fail(s, 'returns an array or a view (it would have to be a numpy array sharing the memory)')
             self.returns.append((s, self.typeof(s.value) if s.value is not None else T.NONE))
         elif isinstance(s, (ast.Break, ast.Continue, ast.Pass)):
             pass
@@ -612,8 +614,10 @@ class Compiler:
     def iterable(self, it):
         if isinstance(it, ast.Name) and it.id in self.env and self.env[it.id].kind in ('array', 'list'):
             if self.env[it.id].kind == 'array' and self.env[it.id].ndim != 1:
-                self.fail(it, 'iterating over a multi-dimensional array (rows are views, not compiled yet)')
+                return ('rows', it.id, None)
             return ('array', it.id)
+        if isinstance(it, ast.Subscript) and self.typeof(it).kind == 'array':
+            return ('rows' if self.typeof(it).ndim != 1 else 'array', self.view_name(it), it)
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Name):
             name = it.func.id
             if self.is_builtin(name, 'range'):
@@ -629,24 +633,32 @@ class Compiler:
                     self.fail(it, 'enumerate() with these arguments')
                 if len(args) == 2 and self.typeof(args[1]).kind not in ('int', 'bool'):
                     self.fail(it, 'enumerate() with a non-integer start')
-                return ('enumerate', self.iterable(args[0]), args[1] if len(args) == 2 else None)
+                return ('enumerate', self.one_at_a_time(self.iterable(args[0]), it), args[1] if len(args) == 2 else None)
             if self.is_builtin(name, 'zip'):
                 if it.keywords or not it.args:
                     self.fail(it, 'zip() with these arguments')
-                return ('zip', [self.iterable(a) for a in it.args])
+                return ('zip', [self.one_at_a_time(self.iterable(a), it) for a in it.args])
             if self.is_builtin(name, 'reversed'):
                 if it.keywords or len(it.args) != 1:
                     self.fail(it, 'reversed() with these arguments')
                 inner = self.iterable(it.args[0])
-                if inner[0] not in ('range', 'array'):
+                if inner[0] not in ('range', 'array') or (len(inner) > 2 and inner[2] is not None):
                     self.fail(it, 'reversed() of something other than range() or an array')
                 return ('reversed', inner)
         self.fail(it, 'loops over something other than range(), an array, enumerate(), zip() or reversed()')
+
+    def one_at_a_time(self, d, it):
+        if d[0] == 'rows':
+            self.fail(it, 'rows of an array inside enumerate() or zip()')
+        return d
 
     def elem_struct(self, d):
         kind = d[0]
         if kind == 'range':
             return T.INT
+        if kind == 'rows':
+            t = self.env[d[1]]
+            return T.array(t.elem, t.writable, t.ndim - 1, t.strided)
         if kind == 'array':
             return self.env[d[1]].elem
         if kind == 'enumerate':
@@ -668,10 +680,60 @@ class Compiler:
             self.fail(s, 'a loop target that does not match what the loop yields')
 
     def array_of(self, sub):
-        if not isinstance(sub.value, ast.Name) or sub.value.id not in self.env \
-                or self.env[sub.value.id].kind not in ('array', 'list'):
-            self.fail(sub, 'indexing something other than an array parameter or a list')
-        return self.env[sub.value.id]
+        v = sub.value
+        if isinstance(v, ast.Subscript):
+            t = self.subscript_type(v)
+            if t.kind != 'array':
+                self.fail(sub, 'indexing something other than an array or a list')
+            return t
+        if not isinstance(v, ast.Name) or v.id not in self.env or self.env[v.id].kind not in ('array', 'list'):
+            self.fail(sub, 'indexing something other than an array or a list')
+        return self.env[v.id]
+
+    def subscript_type(self, e):
+        """What indexing an array gives: its element, with an int for every axis, else a view."""
+        at = self.array_of(e)
+        if at.kind == 'list':
+            self.index_type(e)
+            return at.elem
+        items = e.slice.elts if isinstance(e.slice, ast.Tuple) else [e.slice]
+        if len(items) > at.ndim:
+            self.fail(e, f'{len(items)} indices into {at.name}')
+        for k in items:
+            if isinstance(k, ast.Slice):
+                for part in (k.lower, k.upper, k.step):
+                    if part is not None and not (self.typeof(part).kind == 'int'):
+                        self.fail(e, 'a slice with bounds that are not integers')
+            elif isinstance(k, ast.Constant) and (k.value is None or k.value is Ellipsis):
+                self.fail(e, 'None or ... in an index')
+            elif self.typeof(k).kind != 'int':
+                self.fail(e, f'an index of type {self.typeof(k).name}')
+        kept = at.ndim - sum(not isinstance(k, ast.Slice) for k in items)
+        if not kept:
+            return at.elem
+        t = T.array(at.elem, at.writable, kept, at.strided or not self.keeps_contiguous(items))
+        self.env[self.view_name(e)] = t
+        return t
+
+    @staticmethod
+    def keeps_contiguous(items):
+        """ints, then at most one slice of step 1, then only whole axes: the elements stay next to each other."""
+        i = 0
+        while i < len(items) and not isinstance(items[i], ast.Slice):
+            i += 1
+        if i == len(items):
+            return True
+        step = items[i].step
+        if not (step is None or (isinstance(step, ast.Constant) and step.value == 1)):
+            return False
+        return all(isinstance(k, ast.Slice) and k.lower is None and k.upper is None and k.step is None for k in items[i + 1:])
+
+    def view_name(self, e):
+        name = self.view_names.get(id(e))
+        if name is None:
+            name = f'sjv__{len(self.view_names)}'
+            self.view_names[id(e)] = name
+        return name
 
     def tuple_index(self, sub):
         t = self.env[sub.value.id]
@@ -687,17 +749,17 @@ class Compiler:
         return i % len(t.elem)
 
     def indices(self, sub):
-        t = self.env[sub.value.id]
+        t = self.array_of(sub)
         nd = t.ndim if t.kind == 'array' else 1
         idx = sub.slice.elts if isinstance(sub.slice, ast.Tuple) else [sub.slice]
         if len(idx) != nd:
-            self.fail(sub, f'{len(idx)} indices into {t.name} (slices and views are not compiled yet)')
+            self.fail(sub, f'{len(idx)} indices into {t.name}, assigning to a view')
         return idx
 
     def index_type(self, sub):
         for k in self.indices(sub):
             if isinstance(k, ast.Slice):
-                self.fail(sub, 'slices (views are not compiled yet)')
+                self.fail(sub, 'assigning to a slice')
             t = self.typeof(k)
             if t.kind != 'int':
                 self.fail(sub, f'an index of type {t.name}')
@@ -831,9 +893,7 @@ class Compiler:
                 return T.INT
             if isinstance(e.value, ast.Name) and e.value.id in self.env and self.env[e.value.id].kind == 'tuple':
                 return self.env[e.value.id].elem[self.tuple_index(e)]
-            at = self.array_of(e)
-            self.index_type(e)
-            return at.elem
+            return self.subscript_type(e)
         if isinstance(e, ast.Tuple):
             ts = [self.typeof(x) for x in e.elts]
             if not all(t.is_number for t in ts):
@@ -1084,6 +1144,8 @@ class Compiler:
             self.fail(e, f'{name}() with keyword arguments')
         if name == 'len':
             a = e.args[0] if len(e.args) == 1 else None
+            if isinstance(a, ast.Subscript) and self.typeof(a).kind == 'array':
+                return T.INT
             if not (isinstance(a, ast.Name) and a.id in self.env and self.env[a.id].kind in ('array', 'list', 'tuple')):
                 self.fail(e, 'len() of something other than an array, a list or a tuple')
             return T.INT
@@ -1217,6 +1279,8 @@ class Compiler:
             self.infer()
         self.check_tagged()
         self.find_outs()
+        self.rebound = {n.id for n in ast.walk(self.f) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                        and self.env.get(n.id) is not None and self.env[n.id].kind == 'array'}
 
     def generate(self):
         self.infer_with_webs()
@@ -1255,6 +1319,12 @@ class Compiler:
                         self.emit(f'{et.ctype} v_{name}__{i} = 0;')
                     if et.np == 'dyn':
                         self.emit(f'int v_{name}__{i}__np = 0;')
+                continue
+            if t.kind == 'array':
+                if name not in self.params:           # a view: filled in where it's made
+                    self.emit(f'{t.ctype}v_{name} = 0; int64_t ' + ', '.join(f'{self.extent(name, k)} = 0' for k in range(t.ndim)) + ';')
+                if t.strided:
+                    self.emit('int64_t ' + ', '.join(f'v_{name}__s{k} = 0' for k in range(t.ndim)) + ';')
                 continue
             if name not in self.params:
                 self.emit(f'{t.ctype} v_{name} = 0;')
@@ -1365,6 +1435,10 @@ class Compiler:
                 for target in targets:
                     self.assign_tuple(target, vals, vt)
                 return
+            if vt.kind == 'array':
+                for target in targets:
+                    self.assign_view(target.id, s.value)
+                return
             c, f = self.expr(s.value)
             v = (self.hold(c, vt), self.hold_flag(f)) if len(targets) > 1 else (c, f)
             for target in targets:
@@ -1381,8 +1455,9 @@ class Compiler:
                 rt = self.binop_type(ct, self.typeof(s.value), op, s)
                 self.assign(name, self.arith(op, cur, ct, s.value, s), rt)
             else:
-                arr, idx = self.element(s.target)     # checked once, before the right side
-                name = s.target.value.id
+                target = self.named(s.target)
+                arr, idx = self.element(target)       # checked once, before the right side
+                name = target.value.id
                 at = self.env[name]
                 rt = self.binop_type(at.elem, self.typeof(s.value), op, s)
                 r = self.arith(op, (self.hold(f'{arr}[{idx}]', at.elem), self.elem_flag(name, idx)), at.elem, s.value, s)
@@ -1515,7 +1590,11 @@ class Compiler:
         where elem(k) gives (C value, type, flag) leaves, nested in lists for tuples."""
         kind = d[0]
         if kind == 'array':
+            if len(d) > 2:
+                self.materialize(d[2])
             name, t = d[1], self.env[d[1]].elem
+            if self.env[name].strided:
+                return f'(uint64_t)v_{name}__n', lambda k: (f'v_{name}[(int64_t){k} * v_{name}__s0]', t, '1')
             return f'(uint64_t)v_{name}__n', lambda k: (f'v_{name}[{k}]', t, self.elem_flag(name, k))
         if kind == 'range':
             args = [self.coerce(self.expr(a)[0], self.typeof(a), T.INT) for a in d[1].args]
@@ -1543,7 +1622,11 @@ class Compiler:
             return n, lambda k: [f(k) for _, f in parts]
         inner = d[1]                                  # reversed
         if inner[0] == 'array':
+            if len(inner) > 2:
+                self.materialize(inner[2])
             name, t = inner[1], self.env[inner[1]].elem
+            if self.env[name].strided:
+                return f'(uint64_t)v_{name}__n', lambda k: (f'v_{name}[(v_{name}__n - 1 - (int64_t){k}) * v_{name}__s0]', t, '1')
             return f'(uint64_t)v_{name}__n', lambda k: (f'v_{name}[v_{name}__n - 1 - (int64_t){k}]', t,
                                                         self.elem_flag(name, f'(v_{name}__n - 1 - (int64_t){k})'))
         n, _ = self.iter_prep(inner)
@@ -1558,7 +1641,30 @@ class Compiler:
             for t, x in zip(target.elts, v):
                 self.bind_values(t, x)
 
+    def for_rows(self, s, d):
+        """for row in m: row is a view of each first-axis element in turn."""
+        if not isinstance(s.target, ast.Name):
+            self.fail(s, 'unpacks rows of an array')
+        name = self.materialize(d[2]) if d[2] is not None else d[1]
+        row = s.target.id
+        t = self.env[row]
+        src = self.env[name]
+        k = self.temp()
+        first = self.hold(self.stride(name, 0), T.INT)
+        count = self.hold(self.extent(name, 0), T.INT)
+        self.open_counted('uint64_t', k, '0', f'(uint64_t){count}')
+        self.emit(f'v_{row} = v_{name} + (int64_t){k} * {first};')
+        for axis in range(t.ndim):
+            self.emit(f'{self.extent(row, axis)} = {self.extent(name, axis + 1)};')
+            if t.strided:
+                self.emit(f'v_{row}__s{axis} = {self.stride(name, axis + 1)};')
+        for b in s.body:
+            self.stmt(b)
+        self.close()
+
     def for_iter(self, s, d):
+        if d[0] == 'rows':
+            return self.for_rows(s, d)
         n, elem = self.iter_prep(d)
         k = self.temp()
         self.open_counted('uint64_t', k, '0', n)
@@ -1623,7 +1729,8 @@ class Compiler:
         target = stores[0]
         name = target.value.id
         t = self.env.get(name)
-        if t is None or t.kind != 'array' or t.ndim != 1 or t.elem.name not in ('np.float64', 'np.int64') \
+        if t is None or t.kind != 'array' or t.ndim != 1 or t.strided or name in self.rebound \
+                or t.elem.name not in ('np.float64', 'np.int64') \
                 or not (isinstance(target.slice, ast.Name) and target.slice.id == var):
             return None
         at = [k for k, b in enumerate(s.body) if isinstance(b, ast.Assign) and b.targets == [target]]
@@ -1731,7 +1838,7 @@ class Compiler:
                     continue
                 name = n.value.id
                 idxs = n.slice.elts if isinstance(n.slice, ast.Tuple) else [n.slice]
-                if len(idxs) != self.env[name].ndim:
+                if len(idxs) != self.env[name].ndim or name in stored or any(isinstance(k, ast.Slice) for k in idxs):
                     continue
                 for axis, idx in enumerate(idxs):
                     base = self.index_base(idx, var) if innermost else None
@@ -1790,6 +1897,11 @@ class Compiler:
         return (lo, hi, slack) if lo is not None or hi else None
 
     def len_of(self, e):
+        """The (array, axis) whose extent e is, if that can't change: nothing is known about an array that's assigned."""
+        r = self.extent_of(e)
+        return None if r and r[0] in self.rebound else r
+
+    def extent_of(self, e):
         """(array, axis) if e is that axis's extent: len(a), a.shape[k], or a variable assigned
         from one of those exactly once (h, w = a.shape)."""
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and self.is_builtin(e.func.id, 'len') \
@@ -1829,7 +1941,7 @@ class Compiler:
                 a = self.len_of(v) if not isinstance(v, ast.Name) else None
                 if a:
                     self.aliases[t.id] = a
-            elif isinstance(t, ast.Tuple) and self.is_shape(v):
+            elif isinstance(t, ast.Tuple) and self.is_shape(v) and v.value.id not in self.rebound:
                 for k, x in enumerate(t.elts):
                     if isinstance(x, ast.Name) and stores.get(x.id) == 1 and k < self.env[v.value.id].ndim:
                         self.aliases[x.id] = (v.value.id, k)
@@ -1915,6 +2027,8 @@ class Compiler:
         """Compute each distinct (var + c) % n wraparound in the loop once, at the top of the body
         (pure, and it can't raise: the loop proves n >= 1), as hand-written stencils do."""
         keys = []
+        if self.rebound:
+            return keys
         for n in ast.walk(ast.Module(body=s.body, type_ignores=[])):
             if not (isinstance(n, ast.BinOp) and isinstance(n.op, ast.Mod) and self.wrap_mod(n)):
                 continue
@@ -1976,8 +2090,10 @@ class Compiler:
     def element(self, sub, store=False):
         """Index an array or a list: Python's negative indices on every axis; numpy's IndexError
         (naming the axis) for arrays, Python's for lists. Returns (C array, linear index)."""
+        sub = self.named(sub)
         name = sub.value.id
         is_list = self.env[name].kind == 'list'
+        strided = self.env[name].strided
         idxs = self.indices(sub)
         raws = [self.coerce(self.expr(k)[0], self.typeof(k), T.INT) for k in idxs]
         raws = [self.hold(r, T.INT) for r in raws]            # all indices first, in order
@@ -1998,10 +2114,86 @@ class Compiler:
                 else:
                     self.checks[self.line(sub)] = self.checks.get(self.line(sub), 0) + 1
                 self.emit(f'if ((uint64_t){t} >= (uint64_t){n}) {{ sj_io[4] = {axis}; SJ_FAIL({INDEX_ERROR}, {self.line(sub)}, {raw}, {n}); }}')
-            lin = t if lin is None else f'({lin} * {n} + {t})'
-        if len(idxs) > 1:
+            if strided:
+                lin = f'{t} * v_{name}__s{axis}' if lin is None else f'({lin} + {t} * v_{name}__s{axis})'
+            else:
+                lin = t if lin is None else f'({lin} * {n} + {t})'
+        if len(idxs) > 1 or strided:
             lin = self.hold(lin, T.INT)
         return f'v_{name}', lin
+
+    def named(self, sub):
+        """sub, indexing a variable: a view it indexes is made first."""
+        if isinstance(sub.value, ast.Name):
+            return sub
+        return ast.copy_location(ast.Subscript(ast.Name(self.materialize(sub.value), ast.Load()), sub.slice, sub.ctx), sub)
+
+    def stride(self, name, axis):
+        """How many elements apart this axis's neighbours are."""
+        t = self.env[name]
+        if t.strided:
+            return f'v_{name}__s{axis}'
+        return ' * '.join(['1LL'] + [self.extent(name, k) for k in range(axis + 1, t.ndim)])
+
+    def materialize(self, e):
+        """Fill in the variable holding a view expression, and return its name. Bounds and steps are evaluated
+        first, in order, as Python builds the index before numpy looks at it."""
+        if isinstance(e, ast.Name):
+            return e.id
+        base = self.materialize(e.value)
+        name = self.view_name(e)
+        t = self.env[name]
+        items = e.slice.elts if isinstance(e.slice, ast.Tuple) else [e.slice]
+        line = self.line(e)
+
+        def number(part):
+            return self.hold(self.coerce(self.expr(part)[0], self.typeof(part), T.INT), T.INT)
+        vals = []
+        for k in items:
+            if isinstance(k, ast.Slice):
+                vals.append(tuple(None if p is None else number(p) for p in (k.lower, k.upper, k.step)))
+            else:
+                vals.append(number(k))
+        off = self.temp()
+        self.emit(f'int64_t {off} = 0;')
+        axes = []
+        at = self.env[base]
+        for axis, (k, v) in enumerate(zip(items, vals)):
+            n = self.extent(base, axis)
+            st = self.stride(base, axis)
+            if not isinstance(k, ast.Slice):
+                i = self.temp()
+                self.emit(f'int64_t {i} = {v} < 0 ? {v} + {n} : {v};')
+                if self.boundscheck:
+                    self.emit(f'if ((uint64_t){i} >= (uint64_t){n}) {{ sj_io[4] = {axis}; SJ_FAIL({INDEX_ERROR}, {line}, {v}, {n}); }}')
+                self.emit(f'{off} += {i} * ({st});')
+                continue
+            a, b, c = v
+            if c is not None:
+                self.emit(f'if ({c} == 0) SJ_FAIL({VALUE_ERROR}, {line}, {VALUE_ERROR_MESSAGES.index("slice step cannot be zero")}, 0);')
+            first, step, count = self.temp(), self.temp(), self.temp()
+            self.emit(f'int64_t {first} = 0, {step} = 1, {count} = sj_slice({0 if a is None else 1}, {a or "0"}, {0 if b is None else 1}, '
+                      f'{b or "0"}, {c or "1"}, {n}, &{first}, &{step});')
+            self.emit(f'{off} += {first} * ({st});')
+            axes.append((count, f'{step} * ({st})'))
+        for axis in range(len(items), at.ndim):
+            axes.append((self.extent(base, axis), self.stride(base, axis)))
+        self.emit(f'v_{name} = v_{base} + {off};')
+        for k, (count, st) in enumerate(axes):
+            self.emit(f'{self.extent(name, k)} = {count};')
+            if t.strided:
+                self.emit(f'v_{name}__s{k} = {st};')
+        return name
+
+    def assign_view(self, target, value):
+        """row = m[i]: a view is its pointer, extents and strides, so this copies those."""
+        src = self.materialize(value)
+        t = self.env[target]
+        self.emit(f'v_{target} = v_{src};')
+        for k in range(t.ndim):
+            self.emit(f'{self.extent(target, k)} = {self.extent(src, k)};')
+            if t.strided:
+                self.emit(f'v_{target}__s{k} = v_{src}__s{k};')
 
     def elem_flag(self, name, idx):
         t = self.env[name]
@@ -2011,6 +2203,7 @@ class Compiler:
 
     def store_elem(self, target, v, vt):
         """target[i] = v (already computed): the index is evaluated and checked now."""
+        target = self.named(target)
         name = target.value.id
         et = self.env[name].elem
         dtype = et.name[3:]
@@ -2273,6 +2466,7 @@ class Compiler:
                 and self.env[e.value.id].kind == 'tuple':
             return self.tuple_var(e.value.id)[self.tuple_index(e)]
         if isinstance(e, ast.Subscript):
+            e = self.named(e)
             name = e.value.id
             if name in self.forwards and self.is_previous(e, name, self.forwards[name][0]):
                 return self.forwards[name][1], '1'
@@ -2448,6 +2642,8 @@ class Compiler:
         if self.is_reduction(e):
             return self.reduction(e)
         if name == 'len':
+            if isinstance(e.args[0], ast.Subscript):
+                return f'v_{self.materialize(e.args[0])}__n', '0'
             t = self.env[e.args[0].id]
             if t.kind == 'tuple':
                 return f'{len(t.elem)}LL', '0'
@@ -2957,6 +3153,7 @@ def da_stmt(c, s, assigned):
         da_reads(c, s.value, assigned)
         target = s.targets[0] if isinstance(s, ast.Assign) else s.target
         if isinstance(target, ast.Subscript):
+            da_reads(c, target.value, assigned)
             da_reads(c, target.slice, assigned)
         elif isinstance(s, ast.AugAssign):
             da_reads(c, target, assigned)

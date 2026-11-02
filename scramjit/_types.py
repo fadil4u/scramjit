@@ -7,7 +7,7 @@ So every scalar type records whether it is a Python number or a numpy scalar.
 
 
 class Type:
-    __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable', 'ndim')
+    __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable', 'ndim', 'strided')
 
     def __init__(self, name, ctype, kind, np=False, elem=None, writable=True):
         self.name = name          # how signatures print it
@@ -17,6 +17,7 @@ class Type:
         self.elem = elem          # arrays: the element type (a numpy scalar type)
         self.writable = writable  # arrays
         self.ndim = 0             # arrays: dimensions
+        self.strided = False      # arrays: a view whose elements aren't next to each other
 
     def __repr__(self):
         return self.name
@@ -117,14 +118,17 @@ def tuple_of(elems):
 _ARRAYS = {}
 
 
-def array(elem, writable=True, ndim=1):
-    key = (elem.name, writable, ndim)
+def array(elem, writable=True, ndim=1, strided=False):
+    key = (elem.name, writable, ndim, strided)
     if key not in _ARRAYS:
         name = elem.name[3:] + '[' + ', '.join([':'] * ndim) + ']'
+        if strided:
+            name += ' (strided)'
         if not writable:
             name += ' (read-only)'
         t = Type(name, elem.ctype + ' *', 'array', elem=elem, writable=writable)
         t.ndim = ndim
+        t.strided = strided
         _ARRAYS[key] = t
     return _ARRAYS[key]
 

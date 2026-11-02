@@ -1595,6 +1595,1254 @@ class _Asm:
 def assemble(text, syntax='elf'):
     return _Asm(syntax).run(text)
 ''',
+'assembler_amd64.py': '''\
+import re
+import struct
+from . import assembler as _arm
+from .assembler import AssemblerError, Object, Section, Symbol, Reloc
+__all__ = ['assemble', 'AssemblerError', 'Object', 'Section', 'Symbol', 'Reloc']
+M64 = (1 << 64) - 1
+_REGS = {}
+_N64 = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi']
+_N32 = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi']
+_N16 = ['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di']
+_N8 = ['al', 'cl', 'dl', 'bl', 'spl', 'bpl', 'sil', 'dil']
+for _i in range(16):
+    if _i < 8:
+        _REGS['%' + _N64[_i]] = ('r', 8, _i, 0)
+        _REGS['%' + _N32[_i]] = ('r', 4, _i, 0)
+        _REGS['%' + _N16[_i]] = ('r', 2, _i, 0)
+        _REGS['%' + _N8[_i]] = ('r', 1, _i, 1 if _i >= 4 else 0)
+    else:
+        _REGS['%%r%d' % _i] = ('r', 8, _i, 0)
+        _REGS['%%r%dd' % _i] = ('r', 4, _i, 0)
+        _REGS['%%r%dw' % _i] = ('r', 2, _i, 0)
+        _REGS['%%r%db' % _i] = ('r', 1, _i, 0)
+        _REGS['%%r%dl' % _i] = ('r', 1, _i, 0)
+    _REGS['%%xmm%d' % _i] = ('x', 16, _i, 0)
+for _i, _n in enumerate(['ah', 'ch', 'dh', 'bh']):
+    _REGS['%' + _n] = ('r', 1, 4 + _i, 2)
+_RIP = -1
+_SEGS = {'es': 0x26, 'cs': 0x2e, 'ss': 0x36, 'ds': 0x3e, 'fs': 0x64, 'gs': 0x65}
+_CL = _REGS['%cl']
+_TLS_MODS = ('tpoff', 'gottpoff', 'tlsgd', 'tlsld', 'dtpoff', 'dtpmod', 'tlvp', 'ntpoff',
+             'indntpoff', 'gotntpoff', 'tlsdesc', 'tlscall')
+_MODS = ('plt', 'gotpcrel')
+_TOK = re.compile(r'\\s*(?:(0[xX][0-9a-fA-F]+|0[bB][01]+|[0-9]+)|([A-Za-z_.$][\\w.$]*)'
+                  r'|("(?:[^"\\\\]|\\\\.)*")|(<<|>>|[-+*/%&|^~!()@]))')
+_SYMCH = re.compile(r'[A-Za-z_.$][\\w.$]*$')
+def _num(s):
+    if s[:2] in ('0x', '0X'):
+        return int(s[2:], 16)
+    if s[:2] in ('0b', '0B'):
+        return int(s[2:], 2)
+    if len(s) > 1 and s[0] == '0':
+        try:
+            return int(s, 8)
+        except ValueError:
+            raise AssemblerError('bad number %r' % s) from None
+    return int(s)
+def _s64(v):
+    v &= M64
+    return v - (1 << 64) if v >> 63 else v
+def _tls(mod):
+    if mod in _TLS_MODS:
+        raise AssemblerError('thread-local storage is not supported')
+def _eval(s):
+    s = s.strip()
+    if s.isdigit() and (s[0] != '0' or len(s) == 1):
+        return None, _s64(int(s)), None
+    if s[:1] == '-' and s[1:].isdigit() and (s[1] != '0' or len(s) == 2):
+        return None, _s64(-int(s[1:])), None
+    if _SYMCH.match(s) and s != '.':
+        return s, 0, None
+    toks = []
+    i = 0
+    n = len(s)
+    while i < n:
+        m = _TOK.match(s, i)
+        if not m or m.end() == i:
+            if s[i:].strip() == '':
+                break
+            raise AssemblerError('bad expression %r' % s)
+        i = m.end()
+        if m.group(1):
+            toks.append(('n', _num(m.group(1))))
+        elif m.group(2):
+            toks.append(('s', m.group(2)))
+        elif m.group(3):
+            toks.append(('s', _arm._parse_sym(m.group(3), 0)[0]))
+        else:
+            toks.append(('o', m.group(4)))
+    pos = [0]
+    mods = [None]
+    def peek():
+        return toks[pos[0]] if pos[0] < len(toks) else (None, None)
+    def primary():
+        t, v = peek()
+        pos[0] += 1
+        if t == 'n':
+            return None, v
+        if t == 's':
+            if v == '.':
+                raise AssemblerError('"." is not supported in expressions')
+            t2, v2 = peek()
+            if t2 == 'o' and v2 == '@':
+                pos[0] += 1
+                t3, v3 = peek()
+                if t3 != 's':
+                    raise AssemblerError('bad relocation modifier in %r' % s)
+                pos[0] += 1
+                mod = v3.lower()
+                _tls(mod)
+                if mods[0] is not None or mod not in _MODS:
+                    raise AssemblerError('unsupported relocation modifier @%s' % v3)
+                mods[0] = mod
+            return v, 0
+        if t == 'o':
+            if v == '(':
+                r = binary(1)
+                t2, v2 = peek()
+                if (t2, v2) != ('o', ')'):
+                    raise AssemblerError('missing ) in %r' % s)
+                pos[0] += 1
+                return r
+            if v in '-~!+':
+                sym, x = primary()
+                if v == '+':
+                    return sym, x
+                if sym is not None:
+                    raise AssemblerError('unsupported expression %r' % s)
+                if v == '-':
+                    return None, -x & M64
+                if v == '~':
+                    return None, ~x & M64
+                return None, int(x & M64 == 0)
+        raise AssemblerError('bad expression %r' % s)
+    prec = {'+': 1, '-': 1, '|': 2, '&': 2, '^': 2, '!': 2,
+            '*': 3, '/': 3, '%': 3, '<<': 3, '>>': 3}
+    def binary(level):
+        lhs = primary() if level > 3 else binary(level + 1)
+        while True:
+            t, op = peek()
+            if t != 'o' or prec.get(op) != level:
+                return lhs
+            pos[0] += 1
+            rhs = binary(level + 1)
+            (ls, lv), (rs, rv) = lhs, rhs
+            if op == '+':
+                if ls is not None and rs is not None:
+                    raise AssemblerError('unsupported expression %r' % s)
+                lhs = (ls or rs, (lv + rv) & M64)
+                continue
+            if op == '-':
+                if rs is not None:
+                    if rs != ls:
+                        raise AssemblerError('unsupported expression %r' % s)
+                    lhs = (None, (lv - rv) & M64)
+                else:
+                    lhs = (ls, (lv - rv) & M64)
+                continue
+            if ls is not None or rs is not None:
+                raise AssemblerError('unsupported expression %r' % s)
+            lv &= M64
+            rv &= M64
+            if op == '*':
+                r = lv * rv
+            elif op in ('/', '%'):
+                if rv == 0:
+                    raise AssemblerError('division by zero')
+                a, b = _s64(lv), _s64(rv)
+                q = abs(a) // abs(b) * (1 if (a < 0) == (b < 0) else -1)
+                r = q if op == '/' else a - q * b
+            elif op == '<<':
+                r = lv << rv if rv < 64 else 0
+            elif op == '>>':
+                r = lv >> rv if rv < 64 else 0
+            elif op == '|':
+                r = lv | rv
+            elif op == '&':
+                r = lv & rv
+            elif op == '^':
+                r = lv ^ rv
+            else:
+                r = lv | (~rv & M64)
+            lhs = (None, r & M64)
+    if not toks:
+        raise AssemblerError('empty expression')
+    sym, v = binary(1)
+    if pos[0] != len(toks):
+        raise AssemblerError('bad expression %r' % s)
+    return sym, _s64(v), mods[0]
+def _split(s):
+    if '(' not in s and '"' not in s:
+        return [p.strip() for p in s.split(',')] if s else []
+    out = []
+    depth = 0
+    q = False
+    start = 0
+    for i, c in enumerate(s):
+        if q:
+            if c == '"':
+                q = False
+        elif c == '"':
+            q = True
+        elif c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+        elif c == ',' and depth == 0:
+            out.append(s[start:i].strip())
+            start = i + 1
+    out.append(s[start:].strip())
+    return out
+def _reg(s):
+    r = _REGS.get(s) or _REGS.get(s.lower())
+    if r is None:
+        raise AssemblerError('bad register name %r' % s)
+    return r
+def _operand(s):
+    if not s:
+        raise AssemblerError('missing operand')
+    c = s[0]
+    if c == '%':
+        r = _REGS.get(s)
+        if r is not None:
+            return r
+        if ':' not in s:
+            return _reg(s)
+    elif c == '$':
+        sym, v, mod = _eval(s[1:])
+        return ('i', sym, v, mod)
+    elif c == '*':
+        return ('*', _operand(s[1:].strip()))
+    return _mem(s)
+def _mem(s):
+    seg = None
+    if s[0] == '%':
+        j = s.index(':')
+        seg = s[1:j].strip().lower()
+        if seg not in _SEGS:
+            raise AssemblerError('bad segment register in %r' % s)
+        s = s[j + 1:].strip()
+    base = index = None
+    scale = 0
+    disp = s
+    if s.endswith(')'):
+        j = s.rfind('(')
+        inner = s[j + 1:-1].strip()
+        if inner[:1] in ('%', ',') or inner == '':
+            disp = s[:j].strip()
+            parts = [p.strip() for p in inner.split(',')]
+            if len(parts) > 3:
+                raise AssemblerError('bad memory operand %r' % s)
+            if parts[0]:
+                if parts[0].lower() == '%rip':
+                    base = _RIP
+                else:
+                    r = _reg(parts[0])
+                    if r[0] != 'r' or r[1] != 8:
+                        raise AssemblerError('bad base register in %r' % s)
+                    base = r[2]
+            if len(parts) > 1:
+                r = _reg(parts[1])
+                if r[0] != 'r' or r[1] != 8 or r[2] == 4:
+                    raise AssemblerError('bad index register in %r' % s)
+                if base == _RIP:
+                    raise AssemblerError('%%rip can not be used with an index in %r' % s)
+                index = r[2]
+                if len(parts) > 2:
+                    sc = {'1': 0, '2': 1, '4': 2, '8': 3}.get(parts[2])
+                    if sc is None:
+                        raise AssemblerError('bad scale in %r' % s)
+                    scale = sc
+            elif len(parts) > 2:
+                raise AssemblerError('bad memory operand %r' % s)
+    if disp:
+        sym, v, mod = _eval(disp)
+    else:
+        sym, v, mod = None, 0, None
+    return ('m', seg, sym, v, mod, base, index, scale)
+def _imm_wrap(v, size):
+    if size == 8:
+        if not -0x80000000 <= v <= 0x7fffffff:
+            raise AssemblerError('immediate %d does not fit in a sign-extended 32-bit field' % v)
+        return v
+    bits = size * 8
+    v &= (1 << bits) - 1
+    return v - (1 << bits) if v >> (bits - 1) else v
+_ABS = {1: 'ABS8', 2: 'ABS16', 4: 'ABS32', 8: 'ABS32S'}
+def _enc(a, opc, reg, rm, size=0, mand=b'', imm=None, w=None, dabs='ABS32S'):
+    out = bytearray()
+    rex = 8 if (size == 8 if w is None else w) else 0
+    force = 0
+    if reg.__class__ is tuple:
+        force = reg[3]
+        reg = reg[2]
+    if reg & 8:
+        rex |= 4
+    reg = (reg & 7) << 3
+    fix = None
+    dsz = 0
+    sib = -1
+    if rm[0] == 'm':
+        _, seg, sym, disp, mod, base, index, scale = rm
+        if seg:
+            out.append(_SEGS[seg])
+        if mod is not None and mod != 'gotpcrel':
+            raise AssemblerError('unsupported relocation modifier @%s' % mod)
+        if base == _RIP:
+            modrm = 0x05 | reg
+            dsz = 4
+            if sym is not None:
+                fix = ('GOTPCREL' if mod else 'PC32', sym, disp, True)
+            elif mod:
+                raise AssemblerError('@gotpcrel needs a symbol')
+        else:
+            if mod:
+                raise AssemblerError('@gotpcrel needs a %rip base')
+            if base is None:
+                modrm = 0x04 | reg
+                sib = (scale << 6 | (index & 7) << 3 | 5) if index is not None else 0x25
+                if index is not None and index & 8:
+                    rex |= 2
+                dsz = 4
+            else:
+                if sym is not None:
+                    dsz = 4
+                elif disp == 0 and base & 7 != 5:
+                    dsz = 0
+                elif -128 <= disp <= 127:
+                    dsz = 1
+                else:
+                    dsz = 4
+                md = (0, 0x40, 0, 0, 0x80)[dsz]
+                if base & 8:
+                    rex |= 1
+                if index is not None:
+                    if index & 8:
+                        rex |= 2
+                    modrm = md | reg | 4
+                    sib = scale << 6 | (index & 7) << 3 | (base & 7)
+                elif base & 7 == 4:
+                    modrm = md | reg | 4
+                    sib = 0x24
+                else:
+                    modrm = md | reg | (base & 7)
+            if sym is not None:
+                fix = (dabs, sym, disp, False)
+        if dsz == 4 and fix is None and not -0x80000000 <= disp <= 0x7fffffff:
+            if disp <= 0xffffffff and base is None and index is None:
+                disp -= 1 << 32
+            else:
+                raise AssemblerError('displacement %d out of range' % disp)
+    else:
+        force |= rm[3]
+        n = rm[2]
+        if n & 8:
+            rex |= 1
+        modrm = 0xc0 | reg | (n & 7)
+    if size == 2:
+        out.append(0x66)
+    if mand:
+        out += mand
+    if a.lock:
+        out.append(0xf0)
+    if rex or force & 1:
+        if force & 2:
+            raise AssemblerError("can't encode %ah/%bh/%ch/%dh in an instruction requiring REX")
+        out.append(0x40 | rex)
+    out += opc
+    out.append(modrm)
+    if sib >= 0:
+        out.append(sib)
+    doff = len(out)
+    if dsz == 1:
+        out.append(disp & 0xff)
+    elif dsz == 4:
+        out += (0 if fix else disp & 0xffffffff).to_bytes(4, 'little')
+    fixups = []
+    if imm is not None:
+        nb, isym, iv, ikind = imm
+        ioff = len(out)
+        if isym is not None:
+            out += bytes(nb)
+            fixups.append((ioff, ikind, isym, iv))
+        else:
+            out += (iv & ((1 << (8 * nb)) - 1)).to_bytes(nb, 'little')
+    if fix is not None:
+        kind, sym, add, pcrel = fix
+        if pcrel:
+            add -= len(out) - doff
+        fixups.append((doff, kind, sym, add))
+    a.put(out, fixups)
+def _enc_o(a, op, r, size, imm=None):
+    out = bytearray()
+    if size == 2:
+        out.append(0x66)
+    rex = 8 if size == 8 else 0
+    if r[2] & 8:
+        rex |= 1
+    if rex or r[3] & 1:
+        if r[3] & 2:
+            raise AssemblerError("can't encode %ah/%bh/%ch/%dh in an instruction requiring REX")
+        out.append(0x40 | rex)
+    out += op[:-1]
+    out.append(op[-1] | (r[2] & 7))
+    fixups = []
+    if imm is not None:
+        nb, isym, iv, ikind = imm
+        if isym is not None:
+            fixups.append((len(out), ikind, isym, iv))
+            out += bytes(nb)
+        else:
+            out += (iv & ((1 << (8 * nb)) - 1)).to_bytes(nb, 'little')
+    a.put(out, fixups)
+def _size(sz, ops):
+    for o in ops:
+        if o[0] == 'r':
+            if sz == 0:
+                sz = o[1]
+            elif o[1] != sz:
+                raise AssemblerError('operand size mismatch')
+    if sz == 0:
+        raise AssemblerError('no instruction mnemonic suffix given and no register operands')
+    return sz
+def _nops(n, need):
+    if len(n) != need:
+        raise AssemblerError('expected %d operand%s' % (need, 's' if need != 1 else ''))
+def _rm(o):
+    if o[0] not in ('r', 'm'):
+        raise AssemblerError('expected a register or memory operand')
+    return o
+def _gpr(o, sizes=(1, 2, 4, 8)):
+    if o[0] != 'r' or o[1] not in sizes:
+        raise AssemblerError('expected a general register')
+    return o
+def _xmm(o, mem=False):
+    if o[0] != 'x' and not (mem and o[0] == 'm'):
+        raise AssemblerError('expected an %%xmm register%s' % (' or memory' if mem else ''))
+    return o
+def _immop(o, size, kind=None):
+    if o[0] != 'i':
+        raise AssemblerError('expected an immediate')
+    if o[3] is not None:
+        _tls(o[3])
+        raise AssemblerError('relocation modifier not allowed in an immediate')
+    if o[1] is not None:
+        return o[1], o[2]
+    return None, _imm_wrap(o[2], size)
+def _h_alu(a, ops, sz, n):
+    _nops(ops, 2)
+    src, dst = ops
+    if src[0] == 'i':
+        _rm(dst)
+        size = _size(sz, (dst,))
+        sym, v = _immop(src, size)
+        acc = dst[0] == 'r' and dst[2] == 0
+        if size == 1:
+            if acc:
+                return _enc_imm_acc(a, bytes([n << 3 | 4]), size, (1, sym, v, 'ABS8'))
+            return _enc(a, b'\\x80', n, dst, size, imm=(1, sym, v, 'ABS8'))
+        if sym is None and -128 <= v <= 127:
+            return _enc(a, b'\\x83', n, dst, size, imm=(1, None, v, None))
+        isz = 2 if size == 2 else 4
+        if acc:
+            return _enc_imm_acc(a, bytes([n << 3 | 5]), size, (isz, sym, v, _ABS[size]))
+        return _enc(a, b'\\x81', n, dst, size, imm=(isz, sym, v, _ABS[size]))
+    size = _size(sz, ops)
+    w = size != 1
+    if src[0] == 'r' and dst[0] in ('r', 'm'):
+        return _enc(a, bytes([n << 3 | w]), src, dst, size)
+    if src[0] == 'm' and dst[0] == 'r':
+        return _enc(a, bytes([n << 3 | 2 | w]), dst, src, size)
+    raise AssemblerError('bad operands')
+def _enc_imm_acc(a, op, size, imm):
+    out = bytearray()
+    if size == 2:
+        out.append(0x66)
+    if a.lock:
+        out.append(0xf0)
+    if size == 8:
+        out.append(0x48)
+    out += op
+    nb, sym, v, kind = imm
+    fixups = []
+    if sym is not None:
+        fixups.append((len(out), kind, sym, v))
+        out += bytes(nb)
+    else:
+        out += (v & ((1 << (8 * nb)) - 1)).to_bytes(nb, 'little')
+    a.put(out, fixups)
+def _h_test(a, ops, sz, _):
+    _nops(ops, 2)
+    src, dst = ops
+    if src[0] == 'i':
+        _rm(dst)
+        size = _size(sz, (dst,))
+        sym, v = _immop(src, size)
+        isz = min(size, 4)
+        if dst[0] == 'r' and dst[2] == 0:
+            return _enc_imm_acc(a, b'\\xa8' if size == 1 else b'\\xa9', size,
+                                (isz, sym, v, _ABS[size]))
+        return _enc(a, b'\\xf6' if size == 1 else b'\\xf7', 0, dst, size,
+                    imm=(isz, sym, v, _ABS[size]))
+    size = _size(sz, ops)
+    op = b'\\x84' if size == 1 else b'\\x85'
+    if src[0] == 'r' and dst[0] in ('r', 'm'):
+        return _enc(a, op, src, dst, size)
+    if src[0] == 'm' and dst[0] == 'r':
+        return _enc(a, op, dst, src, size)
+    raise AssemblerError('bad operands')
+def _h_mov(a, ops, sz, mn):
+    _nops(ops, 2)
+    src, dst = ops
+    if src[0] == 'x' or dst[0] == 'x':
+        if mn == 'movq':
+            return _h_movq(a, ops, 8, 'movq')
+        raise AssemblerError('bad operands')
+    if src[0] == 'i':
+        _rm(dst)
+        size = _size(sz, (dst,))
+        if src[3] is not None:
+            _tls(src[3])
+            raise AssemblerError('relocation modifier not allowed in an immediate')
+        sym, v = src[1], src[2]
+        if dst[0] == 'r':
+            if size == 8:
+                if sym is None and not -0x80000000 <= v <= 0x7fffffff:
+                    return _enc_o(a, b'\\xb8', dst, 8, imm=(8, None, v, None))
+                return _enc(a, b'\\xc7', 0, dst, 8, imm=(4, sym, v, 'ABS32S'))
+            if sym is None:
+                v = _imm_wrap(v, size)
+            return _enc_o(a, b'\\xb0' if size == 1 else b'\\xb8', dst, size,
+                          imm=(size, sym, v, _ABS[size]))
+        sym, v = _immop(src, size)
+        return _enc(a, b'\\xc6' if size == 1 else b'\\xc7', 0, dst, size,
+                    imm=(min(size, 4), sym, v, _ABS[size]))
+    size = _size(sz, ops)
+    w = size != 1
+    if src[0] == 'r' and dst[0] in ('r', 'm'):
+        return _enc(a, bytes([0x88 | w]), src, dst, size)
+    if src[0] == 'm' and dst[0] == 'r':
+        return _enc(a, bytes([0x8a | w]), dst, src, size)
+    raise AssemblerError('bad operands')
+def _h_movabs(a, ops, sz, _):
+    _nops(ops, 2)
+    src, dst = ops
+    if src[0] != 'i' or dst[0] != 'r' or dst[1] != 8 or sz not in (0, 8):
+        raise AssemblerError('only movabsq $imm64, %reg64 is supported')
+    if src[3] is not None:
+        _tls(src[3])
+        raise AssemblerError('relocation modifier not allowed in an immediate')
+    _enc_o(a, b'\\xb8', dst, 8, imm=(8, src[1], src[2], 'ABS64'))
+def _h_unary(a, ops, sz, n):
+    _nops(ops, 1)
+    o = _rm(ops[0])
+    size = _size(sz, ops)
+    digit, incdec = n
+    if incdec:
+        op = b'\\xfe' if size == 1 else b'\\xff'
+    else:
+        op = b'\\xf6' if size == 1 else b'\\xf7'
+    _enc(a, op, digit, o, size)
+def _h_imul(a, ops, sz, _):
+    if len(ops) == 1:
+        return _h_unary(a, ops, sz, (5, False))
+    if len(ops) == 2:
+        src, dst = ops
+        if src[0] == 'i':
+            ops = [src, dst, dst]
+        else:
+            _gpr(dst, (2, 4, 8))
+            size = _size(sz, ops)
+            return _enc(a, b'\\x0f\\xaf', dst, _rm(src), size)
+    if len(ops) != 3:
+        raise AssemblerError('imul takes 1 to 3 operands')
+    imm, src, dst = ops
+    _gpr(dst, (2, 4, 8))
+    _rm(src)
+    size = _size(sz, ops[1:])
+    sym, v = _immop(imm, size)
+    if sym is None and -128 <= v <= 127:
+        return _enc(a, b'\\x6b', dst, src, size, imm=(1, None, v, None))
+    _enc(a, b'\\x69', dst, src, size, imm=(2 if size == 2 else 4, sym, v, _ABS[size]))
+def _h_shift(a, ops, sz, n):
+    if len(ops) == 1:
+        o = _rm(ops[0])
+        size = _size(sz, ops)
+        return _enc(a, b'\\xd0' if size == 1 else b'\\xd1', n, o, size)
+    _nops(ops, 2)
+    cnt, o = ops
+    _rm(o)
+    size = _size(sz, (o,))
+    if cnt == _CL:
+        return _enc(a, b'\\xd2' if size == 1 else b'\\xd3', n, o, size)
+    sym, v = _immop(cnt, 1)
+    if sym is not None:
+        raise AssemblerError('shift count must be a constant')
+    if v == 1:
+        return _enc(a, b'\\xd0' if size == 1 else b'\\xd1', n, o, size)
+    _enc(a, b'\\xc0' if size == 1 else b'\\xc1', n, o, size, imm=(1, None, v, None))
+def _h_movx(a, ops, sz, arg):
+    _nops(ops, 2)
+    op, ssz, dsz = arg
+    src, dst = ops
+    _gpr(dst, (dsz,))
+    if src[0] == 'r':
+        _gpr(src, (ssz,))
+    elif src[0] != 'm':
+        raise AssemblerError('bad operands')
+    _enc(a, op, dst, src, dsz)
+def _h_movsx(a, ops, sz, arg):
+    _nops(ops, 2)
+    src, dst = ops
+    _gpr(dst, (2, 4, 8))
+    if src[0] != 'r':
+        raise AssemblerError('%s needs a register source (sizes are ambiguous)' % arg)
+    ssz = src[1]
+    if arg == 'movsxd':
+        if ssz != 4:
+            raise AssemblerError('bad operands')
+        return _enc(a, b'\\x63', dst, src, dst[1])
+    if ssz not in (1, 2) or ssz >= dst[1]:
+        raise AssemblerError('bad operands')
+    base = 0xbe if arg == 'movsx' else 0xb6
+    _enc(a, bytes([0x0f, base | (ssz == 2)]), dst, src, dst[1])
+def _h_lea(a, ops, sz, _):
+    _nops(ops, 2)
+    src, dst = ops
+    if src[0] != 'm':
+        raise AssemblerError('lea needs a memory operand')
+    _gpr(dst, (2, 4, 8))
+    size = _size(sz, (dst,))
+    _enc(a, b'\\x8d', dst, src, size, dabs='ABS32S' if size == 8 else 'ABS32')
+def _h_xchg(a, ops, sz, _):
+    _nops(ops, 2)
+    x, y = ops
+    size = _size(sz, ops)
+    if x[0] == 'r' and y[0] == 'r':
+        if size == 8 and x[2] == y[2] == 0:
+            return a.put(b'\\x90', ())
+        if size != 1 and (x[2] == 0 or y[2] == 0) and not (size == 4 and x[2] == y[2] == 0):
+            return _enc_o(a, b'\\x90', y if x[2] == 0 else x, size)
+        return _enc(a, b'\\x86' if size == 1 else b'\\x87', x, y, size)
+    if x[0] == 'r' and y[0] == 'm':
+        return _enc(a, b'\\x86' if size == 1 else b'\\x87', x, y, size)
+    if x[0] == 'm' and y[0] == 'r':
+        return _enc(a, b'\\x86' if size == 1 else b'\\x87', y, x, size)
+    raise AssemblerError('bad operands')
+def _h_push(a, ops, sz, pop):
+    _nops(ops, 1)
+    o = ops[0]
+    if sz not in (0, 8, 2):
+        raise AssemblerError('only 64-bit (or 16-bit) push/pop exist in 64-bit mode')
+    if o[0] == 'r':
+        if o[1] not in (2, 8) or (sz and sz != o[1]):
+            raise AssemblerError('bad register for push/pop')
+        return _enc_o(a, b'\\x58' if pop else b'\\x50', o, 2 if o[1] == 2 else 4)
+    if o[0] == 'm':
+        return _enc(a, b'\\x8f' if pop else b'\\xff', 0 if pop else 6, o, 2 if sz == 2 else 0)
+    if o[0] == 'i' and not pop:
+        size = sz or 8
+        sym, v = _immop(o, size)
+        out = bytearray(b'\\x66' if size == 2 else b'')
+        if sym is None and -128 <= v <= 127:
+            out += bytes([0x6a, v & 0xff])
+            return a.put(out, ())
+        nb = 2 if size == 2 else 4
+        out.append(0x68)
+        if sym is not None:
+            fix = [(len(out), 'ABS16' if size == 2 else 'ABS32S', sym, v)]
+            out += bytes(nb)
+        else:
+            fix = ()
+            out += (v & ((1 << (8 * nb)) - 1)).to_bytes(nb, 'little')
+        return a.put(out, fix)
+    raise AssemblerError('bad operand')
+def _target(o):
+    if o[0] != 'm' or o[1] or o[5] is not None or o[6] is not None or o[2] is None:
+        raise AssemblerError('bad branch target')
+    return o[2], o[3], o[4]
+def _h_call(a, ops, sz, jmp):
+    _nops(ops, 1)
+    if sz not in (0, 8):
+        raise AssemblerError('bad suffix')
+    o = ops[0]
+    if o[0] == '*' or o[0] == 'r':
+        if o[0] == '*':
+            o = o[1]
+        if o[0] == 'r' and o[1] != 8:
+            raise AssemblerError('indirect branch needs a 64-bit register')
+        return _enc(a, b'\\xff', 4 if jmp else 2, _rm(o), 0)
+    sym, add, mod = _target(o)
+    if jmp and mod is None:
+        return a.branch(-1, sym, add)
+    if mod not in (None, 'plt'):
+        raise AssemblerError('bad branch target')
+    a.put(b'\\xe9\\0\\0\\0\\0' if jmp else b'\\xe8\\0\\0\\0\\0',
+          [(1, 'PLT32' if mod else 'BRANCH', sym, add - 4)])
+def _h_jcc(a, ops, sz, cc):
+    _nops(ops, 1)
+    sym, add, mod = _target(ops[0])
+    if mod is None:
+        return a.branch(cc, sym, add)
+    if mod != 'plt':
+        raise AssemblerError('bad branch target')
+    a.put(bytes([0x0f, 0x80 | cc, 0, 0, 0, 0]), [(2, 'PLT32', sym, add - 4)])
+def _h_setcc(a, ops, sz, cc):
+    _nops(ops, 1)
+    o = _rm(ops[0])
+    if o[0] == 'r' and o[1] != 1:
+        raise AssemblerError('setcc needs a byte register')
+    _enc(a, bytes([0x0f, 0x90 | cc]), 0, o, 0)
+def _h_cmov(a, ops, sz, cc):
+    _nops(ops, 2)
+    src, dst = ops
+    _gpr(dst, (2, 4, 8))
+    size = _size(sz, ops)
+    _enc(a, bytes([0x0f, 0x40 | cc]), dst, _rm(src), size)
+def _h_fixed(a, ops, sz, code):
+    if ops:
+        raise AssemblerError('no operands expected')
+    a.put(code, ())
+def _h_bswap(a, ops, sz, _):
+    _nops(ops, 1)
+    r = _gpr(ops[0], (4, 8))
+    _enc_o(a, b'\\x0f\\xc8', r, _size(sz, ops))
+def _h_bitscan(a, ops, sz, arg):
+    _nops(ops, 2)
+    mand, op = arg
+    src, dst = ops
+    _gpr(dst, (2, 4, 8))
+    _enc(a, op, dst, _rm(src), _size(sz, ops), mand=mand)
+def _h_xadd(a, ops, sz, op):
+    _nops(ops, 2)
+    src, dst = ops
+    _gpr(src)
+    size = _size(sz, ops)
+    _enc(a, bytes([0x0f, op | (size != 1)]), src, _rm(dst), size)
+def _h_sse(a, ops, sz, arg):
+    _nops(ops, 2)
+    src, dst = ops
+    _enc(a, arg[1], _xmm(dst), _xmm(src, True), 0, mand=arg[0])
+def _h_ssemov(a, ops, sz, arg):
+    _nops(ops, 2)
+    src, dst = ops
+    if dst[0] == 'm':
+        return _enc(a, arg[2], _xmm(src), dst, 0, mand=arg[0])
+    _enc(a, arg[1], _xmm(dst), _xmm(src, True), 0, mand=arg[0])
+def _h_movq(a, ops, sz, mn):
+    _nops(ops, 2)
+    src, dst = ops
+    if src[0] == 'x' and dst[0] == 'x':
+        if mn != 'movq':
+            raise AssemblerError('bad operands')
+        return _enc(a, b'\\x0f\\x7e', dst, src, 0, mand=b'\\xf3')
+    if dst[0] == 'x':
+        if src[0] == 'm':
+            if mn == 'movq':
+                return _enc(a, b'\\x0f\\x7e', dst, src, 0, mand=b'\\xf3')
+            return _enc(a, b'\\x0f\\x6e', dst, src, 0, mand=b'\\x66')
+        _gpr(src, (4, 8) if mn == 'movd' else (8,))
+        return _enc(a, b'\\x0f\\x6e', dst, src, 0, mand=b'\\x66', w=src[1] == 8)
+    if src[0] == 'x':
+        if dst[0] == 'm':
+            if mn == 'movq':
+                return _enc(a, b'\\x0f\\xd6', src, dst, 0, mand=b'\\x66')
+            return _enc(a, b'\\x0f\\x7e', src, dst, 0, mand=b'\\x66')
+        _gpr(dst, (4, 8) if mn == 'movd' else (8,))
+        return _enc(a, b'\\x0f\\x7e', src, dst, 0, mand=b'\\x66', w=dst[1] == 8)
+    raise AssemblerError('bad operands')
+def _h_cvti2f(a, ops, sz, mand):
+    _nops(ops, 2)
+    src, dst = ops
+    _xmm(dst)
+    if src[0] == 'r':
+        _gpr(src, (4, 8))
+        size = _size(sz, (src,))
+    elif src[0] == 'm':
+        size = sz or 4
+    else:
+        raise AssemblerError('bad operands')
+    _enc(a, b'\\x0f\\x2a', dst, src, 0, mand=mand, w=size == 8)
+def _h_cvtf2i(a, ops, sz, arg):
+    _nops(ops, 2)
+    src, dst = ops
+    _gpr(dst, (4, 8))
+    size = _size(sz, (dst,))
+    _enc(a, arg[1], dst, _xmm(src, True), 0, mand=arg[0], w=size == 8)
+def _h_round(a, ops, sz, op):
+    _nops(ops, 3)
+    imm, src, dst = ops
+    sym, v = _immop(imm, 1)
+    if sym is not None:
+        raise AssemblerError('rounding mode must be a constant')
+    _enc(a, b'\\x0f\\x3a' + op, _xmm(dst), _xmm(src, True), 0, mand=b'\\x66',
+         imm=(1, None, v, None))
+_SFX = {'b': 1, 'w': 2, 'l': 4, 'q': 8}
+_INSNS = {}
+def _add(names, h, arg=None, sfx='bwlq'):
+    for n in names.split():
+        for c in sfx:
+            _INSNS[n + c] = (h, _SFX[c], arg)
+        _INSNS[n] = (h, 0, arg)
+for _n, _d in (('add', 0), ('or', 1), ('adc', 2), ('sbb', 3), ('and', 4), ('sub', 5),
+               ('xor', 6), ('cmp', 7)):
+    _add(_n, _h_alu, _d)
+for _n, _d in (('rol', 0), ('ror', 1), ('rcl', 2), ('rcr', 3), ('shl', 4), ('sal', 4),
+               ('shr', 5), ('sar', 7)):
+    _add(_n, _h_shift, _d)
+for _n, _d in (('not', (2, False)), ('neg', (3, False)), ('mul', (4, False)),
+               ('div', (6, False)), ('idiv', (7, False)), ('inc', (0, True)),
+               ('dec', (1, True))):
+    _add(_n, _h_unary, _d)
+_add('test', _h_test)
+_add('imul', _h_imul)
+_add('xchg', _h_xchg)
+_add('lea', _h_lea, sfx='wlq')
+_add('push', _h_push, False, sfx='wq')
+_add('pop', _h_push, True, sfx='wq')
+_add('bswap', _h_bswap, sfx='lq')
+_add('bsf', _h_bitscan, (b'', b'\\x0f\\xbc'), sfx='wlq')
+_add('bsr', _h_bitscan, (b'', b'\\x0f\\xbd'), sfx='wlq')
+_add('tzcnt', _h_bitscan, (b'\\xf3', b'\\x0f\\xbc'), sfx='wlq')
+_add('lzcnt', _h_bitscan, (b'\\xf3', b'\\x0f\\xbd'), sfx='wlq')
+_add('popcnt', _h_bitscan, (b'\\xf3', b'\\x0f\\xb8'), sfx='wlq')
+_add('cmpxchg', _h_xadd, 0xb0)
+_add('xadd', _h_xadd, 0xc0)
+for _c in 'bwlq':
+    _INSNS['mov' + _c] = (_h_mov, _SFX[_c], 'mov' + _c)
+_INSNS['mov'] = (_h_mov, 0, 'mov')
+_INSNS['movabs'] = _INSNS['movabsq'] = (_h_movabs, 0, None)
+_INSNS['movd'] = (_h_movq, 4, 'movd')
+for _n, _op, _s, _dd in (('movsbw', b'\\x0f\\xbe', 1, 2), ('movsbl', b'\\x0f\\xbe', 1, 4),
+                         ('movsbq', b'\\x0f\\xbe', 1, 8), ('movswl', b'\\x0f\\xbf', 2, 4),
+                         ('movswq', b'\\x0f\\xbf', 2, 8), ('movslq', b'\\x63', 4, 8),
+                         ('movzbw', b'\\x0f\\xb6', 1, 2), ('movzbl', b'\\x0f\\xb6', 1, 4),
+                         ('movzbq', b'\\x0f\\xb6', 1, 8), ('movzwl', b'\\x0f\\xb7', 2, 4),
+                         ('movzwq', b'\\x0f\\xb7', 2, 8)):
+    _INSNS[_n] = (_h_movx, 0, (_op, _s, _dd))
+for _n in ('movsx', 'movzx', 'movsxd'):
+    _INSNS[_n] = (_h_movsx, 0, _n)
+for _n in ('call', 'jmp'):
+    _INSNS[_n] = _INSNS[_n + 'q'] = (_h_call, 0, _n == 'jmp')
+for _n, _code in (('ret', b'\\xc3'), ('leave', b'\\xc9'), ('cqto', b'\\x48\\x99'), ('cqo', b'\\x48\\x99'),
+                  ('cltd', b'\\x99'), ('cdq', b'\\x99'), ('cltq', b'\\x48\\x98'),
+                  ('cdqe', b'\\x48\\x98'), ('cwtl', b'\\x98'), ('cwde', b'\\x98'),
+                  ('cwtd', b'\\x66\\x99'), ('cwd', b'\\x66\\x99'), ('cbtw', b'\\x66\\x98'),
+                  ('cbw', b'\\x66\\x98'), ('ud2', b'\\x0f\\x0b'), ('endbr64', b'\\xf3\\x0f\\x1e\\xfa'),
+                  ('nop', b'\\x90'), ('int3', b'\\xcc'), ('pause', b'\\xf3\\x90'),
+                  ('mfence', b'\\x0f\\xae\\xf0'), ('lfence', b'\\x0f\\xae\\xe8'),
+                  ('sfence', b'\\x0f\\xae\\xf8'), ('hlt', b'\\xf4'), ('rdtsc', b'\\x0f\\x31'),
+                  ('cpuid', b'\\x0f\\xa2'), ('syscall', b'\\x0f\\x05')):
+    _INSNS[_n] = (_h_fixed, 0, _code)
+_INSNS['retq'] = _INSNS['ret']
+_INSNS['leaveq'] = _INSNS['leave']
+_CC = {'o': 0, 'no': 1, 'b': 2, 'c': 2, 'nae': 2, 'ae': 3, 'nb': 3, 'nc': 3, 'e': 4, 'z': 4,
+       'ne': 5, 'nz': 5, 'be': 6, 'na': 6, 'a': 7, 'nbe': 7, 's': 8, 'ns': 9, 'p': 10, 'pe': 10,
+       'np': 11, 'po': 11, 'l': 12, 'nge': 12, 'ge': 13, 'nl': 13, 'le': 14, 'ng': 14, 'g': 15,
+       'nle': 15}
+for _c, _v in _CC.items():
+    for _s in 'wlq':
+        _INSNS['cmov%s%s' % (_c, _s)] = (_h_cmov, _SFX[_s], _v)
+for _c, _v in _CC.items():
+    _INSNS['cmov' + _c] = (_h_cmov, 0, _v)
+    _INSNS['set' + _c] = (_h_setcc, 0, _v)
+    _INSNS['j' + _c] = (_h_jcc, 0, _v)
+for _n, _op in (('add', 0x58), ('mul', 0x59), ('sub', 0x5c), ('min', 0x5d), ('div', 0x5e),
+                ('max', 0x5f), ('sqrt', 0x51)):
+    for _k, _p in (('ss', b'\\xf3'), ('sd', b'\\xf2'), ('ps', b''), ('pd', b'\\x66')):
+        _INSNS[_n + _k] = (_h_sse, 0, (_p, bytes([0x0f, _op])))
+for _n, _p, _op in (('andps', b'', 0x54), ('andpd', b'\\x66', 0x54), ('andnps', b'', 0x55),
+                    ('andnpd', b'\\x66', 0x55), ('orps', b'', 0x56), ('orpd', b'\\x66', 0x56),
+                    ('xorps', b'', 0x57), ('xorpd', b'\\x66', 0x57), ('pxor', b'\\x66', 0xef),
+                    ('pand', b'\\x66', 0xdb), ('por', b'\\x66', 0xeb),
+                    ('ucomiss', b'', 0x2e), ('ucomisd', b'\\x66', 0x2e), ('comiss', b'', 0x2f),
+                    ('comisd', b'\\x66', 0x2f), ('cvtss2sd', b'\\xf3', 0x5a),
+                    ('cvtsd2ss', b'\\xf2', 0x5a), ('unpcklps', b'', 0x14),
+                    ('unpcklpd', b'\\x66', 0x14), ('cvtps2pd', b'', 0x5a),
+                    ('cvtpd2ps', b'\\x66', 0x5a)):
+    _INSNS[_n] = (_h_sse, 0, (_p, bytes([0x0f, _op])))
+for _n, _p, _ld, _st in (('movss', b'\\xf3', 0x10, 0x11), ('movsd', b'\\xf2', 0x10, 0x11),
+                         ('movups', b'', 0x10, 0x11), ('movupd', b'\\x66', 0x10, 0x11),
+                         ('movaps', b'', 0x28, 0x29), ('movapd', b'\\x66', 0x28, 0x29),
+                         ('movdqa', b'\\x66', 0x6f, 0x7f), ('movdqu', b'\\xf3', 0x6f, 0x7f)):
+    _INSNS[_n] = (_h_ssemov, 0, (_p, bytes([0x0f, _ld]), bytes([0x0f, _st])))
+for _k, _p in (('ss', b'\\xf3'), ('sd', b'\\xf2')):
+    _INSNS['cvtsi2' + _k] = (_h_cvti2f, 0, _p)
+    _INSNS['cvtsi2%sl' % _k] = (_h_cvti2f, 4, _p)
+    _INSNS['cvtsi2%sq' % _k] = (_h_cvti2f, 8, _p)
+    for _t, _op in (('cvtt', 0x2c), ('cvt', 0x2d)):
+        _n = '%s%s2si' % (_t, _k)
+        _INSNS[_n] = (_h_cvtf2i, 0, (_p, bytes([0x0f, _op])))
+        _INSNS[_n + 'l'] = (_h_cvtf2i, 4, (_p, bytes([0x0f, _op])))
+        _INSNS[_n + 'q'] = (_h_cvtf2i, 8, (_p, bytes([0x0f, _op])))
+for _n, _op in (('roundps', 0x08), ('roundpd', 0x09), ('roundss', 0x0a), ('roundsd', 0x0b)):
+    _INSNS[_n] = (_h_round, 0, bytes([_op]))
+_NOPS = [b'', bytes.fromhex('90'), bytes.fromhex('6690'), bytes.fromhex('0f1f00'),
+         bytes.fromhex('0f1f4000'), bytes.fromhex('0f1f440000'), bytes.fromhex('660f1f440000'),
+         bytes.fromhex('0f1f8000000000'), bytes.fromhex('0f1f840000000000'),
+         bytes.fromhex('660f1f840000000000'), bytes.fromhex('662e0f1f840000000000'),
+         bytes.fromhex('66662e0f1f840000000000')]
+def _nop_fill(count, normal):
+    out = bytearray()
+    if not normal:
+        out.append(0x90)
+        count -= 1
+    if count // 11 > 7:
+        if count - 2 <= 127:
+            out += bytes([0xeb, count - 2])
+            count -= 2
+        else:
+            out.append(0xe9)
+            out += (count - 5).to_bytes(4, 'little')
+            count -= 5
+    q, r = divmod(count, 11)
+    out += _NOPS[11] * q + _NOPS[r]
+    return out
+class _Var:
+    __slots__ = ('cc', 'sym', 'add', 'lineno', 'long', 'align', 'maxskip', 'fill', 'normal',
+                 'addr', 'size')
+    def __init__(self):
+        self.cc = None
+        self.long = False
+        self.size = 0
+        self.addr = 0
+class _Sec:
+    __slots__ = ('sec', 'frags', 'cur', 'normal', 'labels', 'addrs')
+    def __init__(self, sec):
+        self.sec = sec
+        self.frags = []
+        self.cur = bytearray()
+        self.normal = True
+        self.labels = {}
+        self.addrs = None
+class _Asm(_arm._Asm):
+    def __init__(self, syntax):
+        if syntax != 'elf':
+            raise ValueError('syntax must be "elf"')
+        self.states = {}
+        self.st = None
+        self.lock = False
+        self.fixups = []
+        _arm._Asm.__init__(self, syntax)
+    def switch(self, name, flags=None):
+        _arm._Asm.switch(self, name, flags)
+        st = self.states.get(self.sec)
+        if st is None:
+            st = self.states[self.sec] = _Sec(self.sec)
+        self.st = st
+    def put(self, b, fixups):
+        st = self.st
+        if self.sec.nobits:
+            raise AssemblerError('instruction in nobits section %s' % self.sec.name)
+        base = len(st.cur)
+        if fixups:
+            fi = len(st.frags)
+            lineno = self.lineno
+            for off, kind, sym, add in fixups:
+                self.fixups.append((st, fi, base + off, kind, sym, add, lineno))
+        st.cur += b
+        st.normal = True
+    def emit(self, b):
+        st = self.st
+        s = self.sec
+        if s.nobits:
+            if any(b):
+                raise AssemblerError('non-zero data in nobits section %s' % s.name)
+            s.size += len(b)
+            return
+        st.cur += b
+        st.normal = False
+    def _close(self, var):
+        st = self.st
+        st.frags.append((st.cur, var))
+        st.cur = bytearray()
+    def branch(self, cc, sym, add):
+        if self.sec.nobits:
+            raise AssemblerError('instruction in nobits section %s' % self.sec.name)
+        v = _Var()
+        v.cc = cc
+        v.sym = sym
+        v.add = add
+        v.lineno = self.lineno
+        self._close(v)
+        self.st.normal = True
+    def align(self, n, maxskip=None, fill=None):
+        if n <= 0 or n & (n - 1):
+            raise AssemblerError('alignment must be a power of 2')
+        s = self.sec
+        st = self.st
+        s.align = max(s.align, n)
+        if s.nobits:
+            s.size += -s.size % n
+            return
+        if not st.frags:
+            pad = -len(st.cur) % n
+            if pad and (maxskip is None or pad <= maxskip):
+                st.cur += self._pad(pad, st.normal, fill)
+            return
+        v = _Var()
+        v.align = n
+        v.maxskip = maxskip
+        v.fill = fill
+        v.normal = st.normal
+        self._close(v)
+    def _pad(self, n, normal, fill):
+        if fill is not None:
+            return bytes([fill & 0xff]) * n
+        if self.sec.exec:
+            return _nop_fill(n, normal)
+        return bytes(n)
+    def label(self, name):
+        s = self.symbol(name)
+        if s.section is not None or s.common is not None:
+            raise AssemblerError('symbol %s is already defined' % name)
+        s.section = self.sec
+        st = self.st
+        if self.sec.nobits:
+            s.value = self.sec.size
+        else:
+            st.labels[s] = (len(st.frags), len(st.cur))
+    def run(self, text):
+        text = _arm._strip_comments(text)
+        insns = _INSNS
+        sym_re = _arm._SYM_RE
+        for self.lineno, line in enumerate(text.split('\\n'), 1):
+            if '#' in line or ';' in line:
+                stmts = _statements(line)
+            else:
+                stmts = (line,)
+            for line in stmts:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    while True:
+                        if line[0] == '"':
+                            name, j = _arm._parse_sym(line, 0)
+                        else:
+                            m = sym_re.match(line)
+                            if not m:
+                                break
+                            name, j = m.group(0), m.end()
+                        k = j
+                        while k < len(line) and line[k] in ' \\t':
+                            k += 1
+                        if k < len(line) and line[k] == ':':
+                            self.label(name)
+                            line = line[k + 1:].strip()
+                            if not line:
+                                break
+                        else:
+                            break
+                    if not line:
+                        continue
+                    parts = line.split(None, 1)
+                    mn = parts[0].lower()
+                    rest = parts[1] if len(parts) > 1 else ''
+                    if mn[0] == '.':
+                        self.directive(mn, rest)
+                        continue
+                    if mn == 'lock':
+                        parts = rest.split(None, 1)
+                        if not parts:
+                            self.put(b'\\xf0', ())
+                            self.st.normal = False
+                            continue
+                        mn = parts[0].lower()
+                        rest = parts[1] if len(parts) > 1 else ''
+                        self.lock = True
+                    ent = insns.get(mn)
+                    if ent is None:
+                        raise AssemblerError('unsupported instruction %r' % parts[0])
+                    h, sz, arg = ent
+                    ops = [_operand(o) for o in _split(rest)] if rest else []
+                    if self.lock and not any(o[0] == 'm' for o in ops):
+                        raise AssemblerError('lock needs a memory destination')
+                    h(self, ops, sz, arg)
+                    self.lock = False
+                except AssemblerError as e:
+                    self.lock = False
+                    raise AssemblerError('line %d: %s: %s' % (self.lineno, e, line)) from None
+        self.resolve()
+        return self.obj
+    def directive(self, d, rest):
+        if d in ('.word', '.value', '.short', '.hword', '.2byte', '.long', '.int', '.4byte',
+                 '.quad', '.8byte', '.byte'):
+            size = {'.byte': 1, '.long': 4, '.int': 4, '.4byte': 4, '.quad': 8,
+                    '.8byte': 8}.get(d, 2)
+            for e in _split(rest):
+                self.data(size, e)
+        elif d in ('.balign', '.p2align', '.align'):
+            args = _split(rest)
+            n = _int_expr(args[0])
+            if d == '.p2align':
+                n = 1 << n
+            fill = None
+            if len(args) > 1 and args[1]:
+                fill = _int_expr(args[1])
+            maxskip = _int_expr(args[2]) if len(args) > 2 and args[2] else None
+            self.align(n, maxskip, fill)
+        elif d in ('.xword', '.dword'):
+            raise AssemblerError('unsupported directive %s' % d)
+        else:
+            _arm._Asm.directive(self, d, rest)
+    def data(self, size, e):
+        sym, v, mod = _eval(e)
+        if mod is not None:
+            raise AssemblerError('relocation modifier in data')
+        if self.sec.nobits:
+            if sym is not None or v:
+                raise AssemblerError('non-zero data in nobits section %s' % self.sec.name)
+            self.sec.size += size
+            return
+        st = self.st
+        if sym is None:
+            if size < 8 and not -(1 << (8 * size)) < v < 1 << (8 * size):
+                raise AssemblerError('value %s does not fit in %d bytes' % (e, size))
+            st.cur += (v & ((1 << (8 * size)) - 1)).to_bytes(size, 'little')
+        else:
+            kind = {8: 'ABS64', 4: 'ABS32', 2: 'ABS16', 1: 'ABS8'}[size]
+            self.fixups.append((st, len(st.frags), len(st.cur), kind, sym, v, self.lineno))
+            st.cur += bytes(size)
+        st.normal = False
+    def _layout(self, st):
+        frags = st.frags
+        frags.append((st.cur, None))
+        st.cur = None
+        labels = st.labels
+        syms = self.obj.symbols
+        branches = []
+        for _, v in frags:
+            if v is not None and v.cc is not None:
+                s = syms.get(v.sym)
+                if s is None or s not in labels:
+                    v.long = True
+                else:
+                    branches.append(v)
+        addrs = [0] * len(frags)
+        while True:
+            addr = 0
+            for i, (fixed, v) in enumerate(frags):
+                addrs[i] = addr
+                addr += len(fixed)
+                if v is not None:
+                    v.addr = addr
+                    if v.cc is None:
+                        pad = -addr % v.align
+                        if v.maxskip is not None and pad > v.maxskip:
+                            pad = 0
+                        v.size = pad
+                    elif v.long:
+                        v.size = 5 if v.cc < 0 else 6
+                    else:
+                        v.size = 2
+                    addr += v.size
+            changed = False
+            for v in branches:
+                if not v.long:
+                    fi, off = labels[syms[v.sym]]
+                    d = addrs[fi] + off + v.add - v.addr - 2
+                    if not -128 <= d <= 127:
+                        v.long = True
+                        changed = True
+            if not changed:
+                break
+        st.addrs = addrs
+        for s, (fi, off) in labels.items():
+            s.value = addrs[fi] + off
+        out = bytearray()
+        sec = st.sec
+        for fixed, v in frags:
+            out += fixed
+            if v is None:
+                continue
+            if v.cc is None:
+                if v.size:
+                    out += self._pad_at(sec, v)
+                continue
+            s = syms.get(v.sym)
+            if s is None:
+                s = syms[v.sym] = Symbol(v.sym)
+            if not v.long:
+                out += bytes([0xeb if v.cc < 0 else 0x70 | v.cc,
+                              (s.value + v.add - v.addr - 2) & 0xff])
+                continue
+            op = b'\\xe9' if v.cc < 0 else bytes([0x0f, 0x80 | v.cc])
+            out += op
+            field = v.addr + len(op)
+            if s in labels:
+                d = s.value + v.add - field - 4
+                out += (d & 0xffffffff).to_bytes(4, 'little')
+            else:
+                out += bytes(4)
+                plt = v.add == 0 and (s.section is None or s.globl)
+                sec.relocs.append(Reloc(field, 'PLT32' if plt else 'PC32', v.sym, v.add - 4))
+        sec.data = out
+        sec.size = len(out)
+    def _pad_at(self, sec, v):
+        if v.fill is not None:
+            return bytes([v.fill & 0xff]) * v.size
+        if sec.exec:
+            return _nop_fill(v.size, v.normal)
+        return bytes(v.size)
+    def resolve(self):
+        for sec in self.obj.sections:
+            if not sec.nobits:
+                self._layout(self.states[sec])
+        syms = self.obj.symbols
+        for st, fi, off, kind, name, add, lineno in self.fixups:
+            sec = st.sec
+            p = st.addrs[fi] + off
+            s = syms.get(name)
+            if s is None:
+                s = syms[name] = Symbol(name)
+            if kind == 'BRANCH':
+                kind = 'PLT32' if add == -4 and (s.section is None or s.globl) else 'PC32'
+            if kind == 'PC32' and s.section is sec and not s.globl:
+                d = s.value + add - p
+                if not -0x80000000 <= d <= 0x7fffffff:
+                    raise AssemblerError('line %d: pc-relative reference out of range: %s'
+                                         % (lineno, name))
+                struct.pack_into('<i', sec.data, p, d)
+            else:
+                sec.relocs.append(Reloc(p, kind, name, add))
+        for sec in self.obj.sections:
+            sec.relocs.sort(key=lambda r: r.offset)
+def _int_expr(s):
+    sym, v, mod = _eval(s)
+    if sym is not None or mod is not None:
+        raise AssemblerError('expected a constant, got %r' % s)
+    return v
+def _statements(line):
+    out = []
+    q = False
+    start = 0
+    i = 0
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if q:
+            if c == '\\\\':
+                i += 1
+            elif c == '"':
+                q = False
+        elif c == '"':
+            q = True
+        elif c == '#':
+            n = i
+            break
+        elif c == ';':
+            out.append(line[start:i])
+            start = i + 1
+        i += 1
+    out.append(line[start:n])
+    return out
+def assemble(text, syntax='elf'):
+    return _Asm(syntax).run(text)
+''',
 'backend/LICENSE': '''\
 © 2015-2026 Quentin Carbonneaux <quentin@c9x.me>
 
@@ -1795,6 +3043,2501 @@ def fillalias(fn):
                 esc(p.arg[n], fn)
             p = p.link
         b = b.link
+''',
+'backend/amd64/__init__.py': '''\
+pass
+''',
+'backend/amd64/emit.py': '''\
+from .. import defs as D
+from .. import ext as _ext
+from ..defs import (R, RTmp, RCon, RSlot, RMem, CBits, CAddr, CUndef, Con, SGlo, SThr, SExt,
+                    SExtThr, Kw, Kl, Ks, Kd, KWIDE, KBASE, NCmpI, NCmp, Ins, TMP, BIT,
+                    rtype, rval, rsval, optab, NOp, isxsel,
+                    Cieq, Cine, Cisge, Cisgt, Cisle, Cislt, Ciuge, Ciugt, Ciule, Ciult,
+                    Cfle, Cflt, Cfgt, Cfge, Cfo, Cfuo, Jhlt, Jret0, Jjmp, Jjf,
+                    Oadd, Osub, Oand, Oor, Oxor, Osar, Oshr, Oshl, Omul, Odiv, Ostorel,
+                    Ostorew, Ostoreh, Ostoreb, Ostores, Ostored, Oload, Oloadsw, Oloaduw,
+                    Oloadsh, Oloaduh, Oloadsb, Oloadub, Oextsw, Oextuw, Oextsh, Oextuh,
+                    Oextsb, Oextub, Oexts, Otruncd, Ostosi, Odtosi, Oswtof, Osltof, Ocast,
+                    Oaddr, Oswap, Osign, Oxdiv, Oxidiv, Oxcmp, Oxtest, Oflag, Oflagfeq,
+                    Oflagfne, Onop, Oneg, Ocopy, Ocall, Osalloc, Odbgloc, Oxsel, Ogetsp,
+                    Osetsp, Ofsqrt, Ofabs, Obclz, Obctz, Obswap, Obswap16)
+from ..util import die, isreg, str_
+from ..emit import emitfnlnk, emitdbgloc, elf_emitfnfin, stashbits
+from .regs import (RAX, RBX, RCX, RDX, RSI, RDI, RBP, RSP, R8, R9, R10, R11, R12, R13, R14,
+                   R15, XMM0, XMM15, NCLR_SYSV, NCLR_WIN)
+def _cimowin():
+    return D.T.name == 'amd64_windows'
+class E:
+    __slots__ = ('f', 'fn', 'fp', 'fsz', 'nclob', 'xsave', 'xarea')
+    def __init__(self, f, fn):
+        self.f = f
+        self.fn = fn
+        self.fp = 0
+        self.fsz = 0
+        self.nclob = 0
+        self.xsave = []
+        self.xarea = 0
+_CMP = [
+    (Ciule, "be", "a"),
+    (Ciult, "b", "ae"),
+    (Cisle, "le", "g"),
+    (Cislt, "l", "ge"),
+    (Cisgt, "g", "le"),
+    (Cisge, "ge", "l"),
+    (Ciugt, "a", "be"),
+    (Ciuge, "ae", "b"),
+    (Cieq, "z", "nz"),
+    (Cine, "nz", "z"),
+    (NCmpI + Cfle, "?", "?"),
+    (NCmpI + Cflt, "?", "?"),
+    (NCmpI + Cfgt, "a", "be"),
+    (NCmpI + Cfge, "ae", "b"),
+    (NCmpI + Cfo, "np", "p"),
+    (NCmpI + Cfuo, "p", "np"),
+]
+SLong, SWord, SShort, SByte = 0, 1, 2, 3
+Ki = -1
+Ka = -2
+omap = [
+    (Oadd, Ka, "+add%k %1, %="),
+    (Osub, Ka, "-sub%k %1, %="),
+    (Oand, Ki, "+and%k %1, %="),
+    (Oor, Ki, "+or%k %1, %="),
+    (Oxor, Ki, "+xor%k %1, %="),
+    (Osar, Ki, "-sar%k %B1, %="),
+    (Oshr, Ki, "-shr%k %B1, %="),
+    (Oshl, Ki, "-shl%k %B1, %="),
+    (Omul, Ki, "+imul%k %1, %="),
+    (Omul, Ks, "+mulss %1, %="),
+    (Omul, Kd, "+mulsd %1, %="),
+    (Odiv, Ka, "-div%k %1, %="),
+    (Ostorel, Ka, "movq %L0, %M1"),
+    (Ostorew, Ka, "movl %W0, %M1"),
+    (Ostoreh, Ka, "movw %H0, %M1"),
+    (Ostoreb, Ka, "movb %B0, %M1"),
+    (Ostores, Ka, "movss %S0, %M1"),
+    (Ostored, Ka, "movsd %D0, %M1"),
+    (Oload, Ka, "mov%k %M0, %="),
+    (Oloadsw, Kl, "movslq %M0, %L="),
+    (Oloadsw, Kw, "movl %M0, %W="),
+    (Oloaduw, Ki, "movl %M0, %W="),
+    (Oloadsh, Ki, "movsw%k %M0, %="),
+    (Oloaduh, Ki, "movzw%k %M0, %="),
+    (Oloadsb, Ki, "movsb%k %M0, %="),
+    (Oloadub, Ki, "movzb%k %M0, %="),
+    (Oextsw, Kl, "movslq %W0, %L="),
+    (Oextuw, Kl, "movl %W0, %W="),
+    (Oextsh, Ki, "movsw%k %H0, %="),
+    (Oextuh, Ki, "movzw%k %H0, %="),
+    (Oextsb, Ki, "movsb%k %B0, %="),
+    (Oextub, Ki, "movzb%k %B0, %="),
+    (Oexts, Kd, "cvtss2sd %0, %="),
+    (Otruncd, Ks, "cvtsd2ss %0, %="),
+    (Ostosi, Ki, "cvttss2si%k %0, %="),
+    (Odtosi, Ki, "cvttsd2si%k %0, %="),
+    (Oswtof, Ka, "cvtsi2%k %W0, %="),
+    (Osltof, Ka, "cvtsi2%k %L0, %="),
+    (Ocast, Ki, "movq %D0, %L="),
+    (Ocast, Ka, "movq %L0, %D="),
+    (Oaddr, Ki, "lea%k %M0, %="),
+    (Oswap, Ki, "xchg%k %0, %1"),
+    (Osign, Kl, "cqto"),
+    (Osign, Kw, "cltd"),
+    (Oxdiv, Ki, "div%k %0"),
+    (Oxidiv, Ki, "idiv%k %0"),
+    (Oxcmp, Ks, "ucomiss %S0, %S1"),
+    (Oxcmp, Kd, "ucomisd %D0, %D1"),
+    (Oxcmp, Ki, "cmp%k %0, %1"),
+    (Oxtest, Ki, "test%k %0, %1"),
+]
+omap += [(Oflag + c, Ki, "set" + s + " %B=\\n\\tmovzb%k %B=, %=") for c, s, _ in _CMP]
+omap += [
+    (Oflagfeq, Ki, "setz %B=\\n\\tmovzb%k %B=, %="),
+    (Oflagfne, Ki, "setnz %B=\\n\\tmovzb%k %B=, %="),
+]
+cmov = {}
+for _c, _s0, _s1 in _CMP:
+    cmov[_c] = ("cmov" + _s0 + " %0, %=", "cmov" + _s1 + " %1, %=")
+del _c, _s0, _s1
+_ctoa = {c: (s, n) for c, s, n in _CMP}
+rname = {
+    RAX: ("rax", "eax", "ax", "al"),
+    RBX: ("rbx", "ebx", "bx", "bl"),
+    RCX: ("rcx", "ecx", "cx", "cl"),
+    RDX: ("rdx", "edx", "dx", "dl"),
+    RSI: ("rsi", "esi", "si", "sil"),
+    RDI: ("rdi", "edi", "di", "dil"),
+    RBP: ("rbp", "ebp", "bp", "bpl"),
+    RSP: ("rsp", "esp", "sp", "spl"),
+    R8: ("r8", "r8d", "r8w", "r8b"),
+    R9: ("r9", "r9d", "r9w", "r9b"),
+    R10: ("r10", "r10d", "r10w", "r10b"),
+    R11: ("r11", "r11d", "r11w", "r11b"),
+    R12: ("r12", "r12d", "r12w", "r12b"),
+    R13: ("r13", "r13d", "r13w", "r13b"),
+    R14: ("r14", "r14d", "r14w", "r14b"),
+    R15: ("r15", "r15d", "r15w", "r15b"),
+}
+def slot(r, e):
+    s = rsval(r)
+    assert s <= e.fn.slot
+    if s < 0:
+        if e.fp == RSP:
+            return 4 * -s - 8 + e.fsz + e.nclob * 8 + e.xarea
+        else:
+            return 4 * -s
+    elif e.fp == RSP:
+        return 4 * s + e.nclob * 8 + e.xarea
+    elif e.fn.vararg:
+        if D.T.windows:
+            return -4 * (e.fn.slot - s)
+        else:
+            return -176 + -4 * (e.fn.slot - s)
+    else:
+        return -4 * (e.fn.slot - s)
+def emitcon(con, e):
+    if con.type == CAddr:
+        l = str_(con.sym.id)
+        p = "" if l[0] == '"' else D.T.assym
+        if con.sym.type == SThr:
+            assert not D.T.apple
+            e.f.write("%%fs:%s%s@tpoff" % (p, l))
+        else:
+            assert (con.sym.type & ~SExt) == SGlo
+            e.f.write("%s%s" % (p, l))
+        if con.i:
+            e.f.write("%+d" % con.i)
+    elif con.type == CBits:
+        e.f.write("%d" % con.i)
+    else:
+        die("unreachable")
+def regtoa(reg, sz):
+    assert reg <= XMM15
+    if reg >= XMM0:
+        return "xmm%d" % (reg - XMM0)
+    else:
+        return rname[reg][sz]
+def getarg(c, i):
+    if c == '0':
+        return i.arg[0]
+    elif c == '1':
+        return i.arg[1]
+    elif c == '=':
+        return i.to
+    else:
+        die("invalid arg letter %c", c)
+def emitcopy(r1, r2, k, e):
+    icp = Ins(Ocopy, k, r1, r2)
+    emitins(icp, e)
+_clstoa = ("l", "q", "ss", "sd")
+def emitf(s, i, e):
+    f = e.f
+    if s[0] in '+-':
+        if s[0] == '+':
+            if i.arg[1] == i.to:
+                ref = i.arg[0]
+                i.arg[0] = i.arg[1]
+                i.arg[1] = ref
+        assert (i.arg[1] != i.to or i.arg[0] == i.to), "cannot convert to 2-address"
+        emitcopy(i.to, i.arg[0], i.cls, e)
+        s = s[1:]
+    out = ['\\t']
+    n = len(s)
+    p = 0
+    while True:
+        q = s.find('%', p)
+        if q < 0:
+            out.append(s[p:])
+            out.append('\\n')
+            f.write(''.join(out))
+            return
+        out.append(s[p:q])
+        c = s[q + 1]
+        p = q + 2
+        if c == '%':
+            out.append('%')
+            continue
+        if c == 'k':
+            out.append(_clstoa[i.cls])
+            continue
+        if c in '0=1':
+            sz = SLong if KWIDE(i.cls) else SWord
+            p -= 1
+        elif c in 'DS':
+            sz = SLong
+        elif c == 'L':
+            sz = SLong
+        elif c == 'W':
+            sz = SWord
+        elif c == 'H':
+            sz = SShort
+        elif c == 'B':
+            sz = SByte
+        elif c == 'M':
+            c = s[p]
+            p += 1
+            ref = getarg(c, i)
+            t = rtype(ref)
+            if t == RMem:
+                _mem(ref, e, out)
+            elif t == RSlot:
+                out.append("%d(%%%s)" % (slot(ref, e), regtoa(e.fp, SLong)))
+            elif t == RCon:
+                off = e.fn.con[rval(ref)].copy()
+                f.write(''.join(out))
+                out = []
+                emitcon(off, e)
+                if off.type == CAddr:
+                    if off.sym.type != SThr:
+                        out.append("(%rip)")
+            elif t == RTmp:
+                assert isreg(ref)
+                out.append("(%%%s)" % regtoa(rval(ref), SLong))
+            else:
+                die("unreachable")
+            continue
+        else:
+            die("invalid format specifier %%%c", c)
+        c = s[p]
+        p += 1
+        ref = getarg(c, i)
+        t = rtype(ref)
+        if t == RTmp:
+            assert isreg(ref)
+            out.append("%%%s" % regtoa(rval(ref), sz))
+        elif t == RSlot:
+            out.append("%d(%%%s)" % (slot(ref, e), regtoa(e.fp, SLong)))
+        elif t == RMem:
+            _mem(ref, e, out)
+        elif t == RCon:
+            out.append('$')
+            f.write(''.join(out))
+            out = []
+            emitcon(e.fn.con[rval(ref)], e)
+        else:
+            die("unreachable")
+def _mem(ref, e, out):
+    m = e.fn.mem[rval(ref)]
+    if rtype(m.base) == RSlot:
+        off = Con(CBits, slot(m.base, e))
+        from ..util import addcon
+        addcon(m.offset, off, 1)
+        m.base = TMP(e.fp)
+    if m.offset.type != CUndef:
+        e.f.write(''.join(out))
+        del out[:]
+        emitcon(m.offset, e)
+    out.append('(')
+    if m.base != R:
+        out.append("%%%s" % regtoa(rval(m.base), SLong))
+    elif m.offset.type == CAddr:
+        out.append("%rip")
+    if m.index != R:
+        out.append(", %%%s, %d" % (regtoa(rval(m.index), SLong), m.scale))
+    out.append(')')
+negmask = {Ks: 0x80000000, Kd: 0x8000000000000000}
+def _table(i, e):
+    for op, cls, fmt in omap:
+        if op == i.op:
+            if cls == i.cls or (cls == Ki and KBASE(i.cls) == 0) or cls == Ka:
+                emitf(fmt, i, e)
+                return
+    die("no match for %s(%c)", optab[i.op].name, "wlsd"[i.cls])
+def emitins(i, e):
+    i = i.copy()
+    f = e.f
+    op = i.op
+    if op == Onop:
+        pass
+    elif op == Omul:
+        if rtype(i.arg[1]) == RCon:
+            r = i.arg[0]
+            i.arg[0] = i.arg[1]
+            i.arg[1] = r
+        if (KBASE(i.cls) == 0
+                and rtype(i.arg[0]) == RCon
+                and rtype(i.arg[1]) == RTmp):
+            emitf("imul%k %0, %1, %=", i, e)
+        else:
+            _table(i, e)
+    elif op == Osub:
+        if i.to == i.arg[1] and i.arg[0] != i.to:
+            ineg = Ins(Oneg, i.cls, i.to, i.to)
+            emitins(ineg, e)
+            emitf("add%k %0, %=", i, e)
+        else:
+            _table(i, e)
+    elif op == Oneg:
+        if i.to != i.arg[0]:
+            emitf("mov%k %0, %=", i, e)
+        if KBASE(i.cls) == 0:
+            emitf("neg%k %=", i, e)
+        else:
+            f.write("\\txorp%c %sfp%d(%%rip), %%%s\\n" % (
+                "xxsd"[i.cls], D.T.asloc, stashbits(negmask[i.cls], 16),
+                regtoa(rval(i.to), SLong)))
+    elif op == Odiv:
+        if i.to == i.arg[1]:
+            i.arg[1] = TMP(XMM0 + 15)
+            emitf("mov%k %=, %1", i, e)
+            emitf("mov%k %0, %=", i, e)
+            i.arg[0] = i.to
+        _table(i, e)
+    elif op == Ocopy:
+        assert rtype(i.to) != RMem
+        if i.to == R or i.arg[0] == R:
+            return
+        if i.to == i.arg[0]:
+            return
+        t0 = rtype(i.arg[0])
+        if i.cls == Kl and t0 == RCon and e.fn.con[rval(i.arg[0])].type == CBits:
+            val = e.fn.con[rval(i.arg[0])].i
+            if isreg(i.to):
+                if 0 <= val <= 0xffffffff:
+                    emitf("movl %W0, %W=", i, e)
+                    return
+            if rtype(i.to) == RSlot:
+                if val < -(1 << 31) or val > (1 << 31) - 1:
+                    emitf("movl %0, %=", i, e)
+                    emitf("movl %0>>32, 4+%=", i, e)
+                    return
+        if isreg(i.to) and t0 == RCon and e.fn.con[rval(i.arg[0])].type == CAddr:
+            emitf("lea%k %M0, %=", i, e)
+            return
+        if rtype(i.to) == RSlot and (t0 == RSlot or t0 == RMem):
+            i.cls = Kd if KWIDE(i.cls) else Ks
+            i.arg[1] = TMP(XMM0 + 15)
+            emitf("mov%k %0, %1", i, e)
+            emitf("mov%k %1, %=", i, e)
+            return
+        emitf("mov%k %0, %=", i, e)
+    elif op == Oaddr:
+        if rtype(i.arg[0]) != RCon:
+            _table(i, e)
+            return
+        con = e.fn.con[rval(i.arg[0])]
+        assert isreg(i.to) and con.type == CAddr
+        sym = str_(con.sym.id)
+        pre = "" if sym[0] == '"' else D.T.assym
+        if D.T.apple and (con.sym.type & SThr):
+            f.write("\\tmovq %s%s@tlvp(%%rip), %%%s\\n" % (
+                pre, sym, regtoa(rval(i.to), SLong)))
+            return
+        if D.T.windows and con.sym.type != SGlo and not (_cimowin() and con.sym.type == SExt):
+            die("extern/thread unsupported on amd64_win")
+        st = con.sym.type
+        if st == SThr:
+            emitf("movq %%fs:0, %L=", i, e)
+            f.write("\\tleaq %s%s@tpoff" % (pre, sym))
+            if con.i:
+                f.write("%+d" % con.i)
+            f.write("(%%%s), %%%s\\n" % (regtoa(rval(i.to), SLong), regtoa(rval(i.to), SLong)))
+        elif st == SExtThr:
+            assert not con.i
+            emitf("movq %%fs:0, %L=", i, e)
+            f.write("\\taddq %s%s@gottpoff(%%rip), %%%s\\n" % (
+                pre, sym, regtoa(rval(i.to), SLong)))
+        elif st == SExt:
+            assert not con.i
+            f.write("\\tmovq %s%s@gotpcrel(%%rip), %%%s\\n" % (
+                pre, sym, regtoa(rval(i.to), SLong)))
+        else:
+            _table(i, e)
+    elif op == Ocall:
+        t = rtype(i.arg[0])
+        if t == RCon:
+            con = e.fn.con[rval(i.arg[0])]
+            f.write("\\tcallq ")
+            emitcon(con, e)
+            if con.type == CAddr and (con.sym.type & SExt) and not D.T.apple:
+                f.write("@plt")
+            f.write("\\n")
+        elif t == RTmp:
+            emitf("callq *%L0", i, e)
+        else:
+            die("invalid call argument")
+    elif op == Osalloc:
+        assert e.fp == RBP
+        if _cimowin() and not (rtype(i.arg[0]) == RCon
+                               and e.fn.con[rval(i.arg[0])].i <= 4096):
+            emitf("movq %%rsp, %%r11", i, e)
+            emitf("subq %L0, %%r11", i, e)
+            _probe(f)
+        else:
+            emitf("subq %L0, %%rsp", i, e)
+        if i.to != R:
+            emitcopy(i.to, TMP(RSP), Kl, e)
+    elif op == Oswap:
+        if KBASE(i.cls) == 0:
+            _table(i, e)
+            return
+        emitcopy(TMP(XMM0 + 15), i.arg[0], i.cls, e)
+        emitcopy(i.arg[0], i.arg[1], i.cls, e)
+        emitcopy(i.arg[1], TMP(XMM0 + 15), i.cls, e)
+    elif op == Odbgloc:
+        emitdbgloc(rval(i.arg[0]), rval(i.arg[1]), f)
+    elif isxsel(op):
+        if i.to == i.arg[1]:
+            emitf(cmov[op - Oxsel][0], i, e)
+        else:
+            if i.to != i.arg[0]:
+                emitf("mov %0, %=", i, e)
+            emitf(cmov[op - Oxsel][1], i, e)
+    elif op == Ogetsp:
+        emitf("movq %%rsp, %L=", i, e)
+    elif op == Osetsp:
+        emitf("movq %L0, %%rsp", i, e)
+    elif op == Ofsqrt:
+        emitf("sqrt%k %0, %=", i, e)
+    elif op == Ofabs:
+        if i.to != i.arg[0]:
+            emitf("mov%k %0, %=", i, e)
+        f.write("\\tandp%c %sfp%d(%%rip), %%%s\\n" % (
+            "xxsd"[i.cls], D.T.asloc, stashbits(absmask[i.cls], 16),
+            regtoa(rval(i.to), SLong)))
+    elif op == Obswap:
+        if i.to != i.arg[0]:
+            emitf("mov%k %0, %=", i, e)
+        emitf("bswap%k %=", i, e)
+    elif op == Obswap16:
+        emitf("movzwl %H0, %W=", i, e)
+        emitf("rolw $8, %H=", i, e)
+    elif op == Obclz:
+        emitf("bsr%k %0, %=", i, e)
+        emitf("xor%k $63, %=" if i.cls == Kl else "xor%k $31, %=", i, e)
+    elif op == Obctz:
+        emitf("bsf%k %0, %=", i, e)
+    else:
+        _table(i, e)
+absmask = {Ks: 0x7fffffff, Kd: 0x7fffffffffffffff}
+_nprobe = 0
+def _probe(f):
+    global _nprobe
+    _nprobe += 1
+    f.write(".Lprobe%d:\\n"
+            "\\tcmpq %%r11, %%rsp\\n"
+            "\\tjbe .Lprobed%d\\n"
+            "\\tsubq $4096, %%rsp\\n"
+            "\\ttestq %%rsp, (%%rsp)\\n"
+            "\\tjmp .Lprobe%d\\n"
+            ".Lprobed%d:\\n"
+            "\\tmovq %%r11, %%rsp\\n" % (_nprobe, _nprobe, _nprobe, _nprobe))
+def _stkchk(fn, f):
+    if _ext.stkchk and fn.name in _ext.stkchk:
+        f.write("\\tcallq %s__cimo_stkchk\\n" % D.T.assym)
+def _usesxmm15(fn):
+    b = fn.start
+    while b:
+        for i in b.ins[:b.nins]:
+            if i.op == Odiv and KBASE(i.cls) == 1 and i.to == i.arg[1]:
+                return True
+            if i.op == Ocopy and rtype(i.to) == RSlot and rtype(i.arg[0]) in (RSlot, RMem):
+                return True
+            if i.op == Oswap and KBASE(i.cls) == 1:
+                return True
+        b = b.link
+    return False
+def sysv_framesz(e):
+    from .sysv import amd64_sysv_rclob
+    o = 0
+    if not e.fn.leaf:
+        for k in range(NCLR_SYSV):
+            o ^= e.fn.reg >> amd64_sysv_rclob[k]
+        o &= 1
+    f = e.fn.slot
+    f = (f + 3) & -4
+    if f > 0 and e.fp == RSP and e.fn.salign == 4:
+        f += 2
+    e.fsz = 4 * f + 8 * o + 176 * e.fn.vararg
+_id0_sysv = 0
+def amd64_sysv_emitfn(fn, f):
+    global _id0_sysv
+    from .sysv import amd64_sysv_rsave, amd64_sysv_rclob
+    id0 = _id0_sysv
+    e = E(f, fn)
+    emitfnlnk(fn.name, fn.lnk, f)
+    f.write("\\tendbr64\\n")
+    _stkchk(fn, f)
+    if not fn.leaf or fn.vararg or fn.dynalloc:
+        e.fp = RBP
+        f.write("\\tpushq %rbp\\n\\tmovq %rsp, %rbp\\n")
+    else:
+        e.fp = RSP
+    sysv_framesz(e)
+    if e.fsz:
+        f.write("\\tsubq $%d, %%rsp\\n" % e.fsz)
+    if fn.vararg:
+        o = -176
+        for r in amd64_sysv_rsave[:6]:
+            f.write("\\tmovq %%%s, %d(%%rbp)\\n" % (rname[r][0], o))
+            o += 8
+        for n in range(8):
+            f.write("\\tmovaps %%xmm%d, %d(%%rbp)\\n" % (n, o))
+            o += 16
+    for r in amd64_sysv_rclob[:NCLR_SYSV]:
+        if fn.reg & BIT(r):
+            itmp = Ins(0, 0, R, TMP(r))
+            emitf("pushq %L0", itmp, e)
+            e.nclob += 1
+    lbl = 0
+    b = fn.start
+    while b:
+        if lbl or b.npred > 1:
+            for p in range(b.npred):
+                if b.pred[p].id >= b.id:
+                    break
+            else:
+                p = b.npred
+            if p != b.npred:
+                f.write(".p2align 4\\n")
+            f.write("%sbb%d:\\n" % (D.T.asloc, id0 + b.id))
+        for i in b.ins[:b.nins]:
+            emitins(i, e)
+        lbl = _emitjmp(b, fn, e, id0, amd64_sysv_rclob, NCLR_SYSV, 0)
+        b = b.link
+    _id0_sysv = id0 + fn.nblk
+    if not D.T.apple:
+        elf_emitfnfin(fn.name, f)
+def _emitjmp(b, fn, e, id0, rclob, nclr, win):
+    f = e.f
+    jt = b.jmp.type
+    if jt == Jhlt:
+        if _ext.trap:
+            f.write("\\tcallq %s__cimo_trap\\n" % D.T.assym)
+        else:
+            f.write("\\tud2\\n")
+    elif jt == Jret0:
+        if fn.dynalloc:
+            f.write("\\tmovq %%rbp, %%rsp\\n\\tsubq $%d, %%rsp\\n"
+                    % (e.fsz + e.nclob * 8 + e.xarea))
+        if e.xarea:
+            for k, x in enumerate(e.xsave):
+                f.write("\\tmovdqu %d(%%rsp), %%xmm%d\\n" % (16 * k, x - XMM0))
+            f.write("\\taddq $%d, %%rsp\\n" % e.xarea)
+        for r in reversed(rclob[:nclr]):
+            if fn.reg & BIT(r):
+                itmp = Ins(0, 0, R, TMP(r))
+                emitf("popq %L0", itmp, e)
+        if e.fp == RBP:
+            f.write("\\tleave\\n")
+        elif e.fsz:
+            f.write("\\taddq $%d, %%rsp\\n" % e.fsz)
+        f.write("\\tret\\n")
+    elif jt == Jjmp:
+        if b.s1 is not b.link:
+            f.write("\\tjmp %sbb%d\\n" % (D.T.asloc, id0 + b.s1.id))
+        else:
+            return 0
+    else:
+        c = jt - Jjf
+        if 0 <= c <= NCmp:
+            if b.link is b.s2 or (win and c >= NCmpI):
+                s = b.s1
+                b.s1 = b.s2
+                b.s2 = s
+                n = 0
+            else:
+                n = 1
+            f.write("\\tj%s %sbb%d\\n" % (_ctoa[c][n], D.T.asloc, id0 + b.s2.id))
+            if b.s1 is not b.link:
+                f.write("\\tjmp %sbb%d\\n" % (D.T.asloc, id0 + b.s1.id))
+            else:
+                return 0
+        else:
+            die("unhandled jump %d", jt)
+    return 1
+def winabi_framesz(e):
+    from .winabi import amd64_winabi_rclob
+    o = 0
+    if not e.fn.leaf:
+        for k in range(NCLR_WIN):
+            o ^= e.fn.reg >> amd64_winabi_rclob[k]
+        o &= 1
+    f = e.fn.slot
+    f = (f + 3) & -4
+    if f > 0 and e.fp == RSP and e.fn.salign == 4:
+        f += 2
+    e.fsz = 4 * f + 8 * o
+_id0_win = 0
+def amd64_winabi_emitfn(fn, f):
+    global _id0_win
+    from .winabi import amd64_winabi_rclob
+    id0 = _id0_win
+    e = E(f, fn)
+    emitfnlnk(fn.name, fn.lnk, f)
+    f.write("\\tendbr64\\n")
+    _stkchk(fn, f)
+    if fn.vararg:
+        f.write("\\tmovq %rcx, 0x8(%rsp)\\n")
+        f.write("\\tmovq %rdx, 0x10(%rsp)\\n")
+        f.write("\\tmovq %r8, 0x18(%rsp)\\n")
+        f.write("\\tmovq %r9, 0x20(%rsp)\\n")
+    if not fn.leaf or fn.vararg or fn.dynalloc:
+        e.fp = RBP
+        f.write("\\tpushq %rbp\\n\\tmovq %rsp, %rbp\\n")
+    else:
+        e.fp = RSP
+    winabi_framesz(e)
+    if e.fsz > 4096 and _cimowin():
+        f.write("\\tleaq -%d(%%rsp), %%r11\\n" % e.fsz)
+        _probe(f)
+    elif e.fsz:
+        f.write("\\tsubq $%d, %%rsp\\n" % e.fsz)
+    for r in amd64_winabi_rclob[:NCLR_WIN]:
+        if fn.reg & BIT(r):
+            itmp = Ins(0, 0, R, TMP(r))
+            emitf("pushq %L0", itmp, e)
+            e.nclob += 1
+    if _cimowin():
+        from .winabi import WIN_XCLOB
+        e.xsave = [x for x in WIN_XCLOB if fn.reg & BIT(x)]
+        if _usesxmm15(fn):
+            e.xsave.append(XMM15)
+        e.xarea = 16 * len(e.xsave)
+        if e.xarea:
+            f.write("\\tsubq $%d, %%rsp\\n" % e.xarea)
+            for k, x in enumerate(e.xsave):
+                f.write("\\tmovdqu %%xmm%d, %d(%%rsp)\\n" % (x - XMM0, 16 * k))
+    lbl = 0
+    b = fn.start
+    while b:
+        if lbl or b.npred > 1:
+            f.write("%sbb%d:\\n" % (D.T.asloc, id0 + b.id))
+        for i in b.ins[:b.nins]:
+            emitins(i, e)
+        lbl = _emitjmp(b, fn, e, id0, amd64_winabi_rclob, NCLR_WIN, 1)
+        b = b.link
+    _id0_win = id0 + fn.nblk
+    if _cimowin():
+        elf_emitfnfin(fn.name, f)
+''',
+'backend/amd64/isel.py': '''\
+import sys
+from .. import defs as D
+from ..defs import (R, RTmp, RCon, RMem, RSlot, NIns, Ins, Addr, Con, Num, Kw, Kl, Ks, Kd,
+                    KWIDE, KBASE, BIT, TMP, MEM, SLOT, CON_Z, CALL, NCmpI, CUndef, CBits,
+                    CAddr, SExt, SThr, Cine, Cfeq, Cfne, Cflt, Cfle, Cfgt, Cfge, rtype, rval,
+                    s64, isstore, isload, isext, isxsel, optab, Ocopy, Ocall, Oaddr, Oadd,
+                    Oload, Odiv, Orem, Oudiv, Ourem, Oxidiv, Oxdiv, Osign, Osar, Oshr, Oshl,
+                    Ouwtof, Oultof, Osltof, Oextuw, Ocast, Oor, Oand, Ostoui, Odtoui,
+                    Ostosi, Odtosi, Onop, Ostored, Ostores, Ostorel, Ostorew, Ostoreh,
+                    Ostoreb, Odbgloc, Osalloc, Osub, Oneg, Omul, Oxor, Oxtest, Oswtof, Oexts,
+                    Otruncd, Oalloc4, Oalloc8, Oalloc16, Oalloc, Oalloc1, Oflag, Oflagfo,
+                    Oflagfuo, Oxcmp, Oxsel, Osel0, Osel1, Jret0, Jjmp, Jhlt, Jjnz, Jjf)
+from ..util import (err, die, newtmp, getcon, newcon, addcon, chuse, emit, emiti, idup,
+                    vgrow, intern, iscmp, cmpop, argcls, salloc, isreg)
+from ..emit import stashbits
+from ..parse import printfn
+from .regs import RAX, RCX, RDX, RDI
+from .targ import amd64_op
+INT32_MIN = -(1 << 31)
+INT32_MAX = (1 << 31) - 1
+INT_MAX = INT32_MAX
+INT_MIN = INT32_MIN
+def noimm(r, fn):
+    if rtype(r) != RCon:
+        return 0
+    c = fn.con[rval(r)]
+    if c.type == CAddr:
+        return 0
+    elif c.type == CBits:
+        val = c.i
+        return val < INT32_MIN or val > INT32_MAX
+    else:
+        die("invalid constant")
+def rslot(r, fn):
+    if rtype(r) != RTmp:
+        return -1
+    return fn.tmp[rval(r)].slot
+def hascon(r, fn):
+    t = rtype(r)
+    if t == RCon:
+        return fn.con[rval(r)]
+    elif t == RMem:
+        return fn.mem[rval(r)].offset
+    return None
+def fixarg(lst, idx, k, i, fn):
+    r1 = r0 = lst[idx]
+    s = rslot(r0, fn)
+    op = i.op if i is not None else Ocopy
+    c = None
+    if KBASE(k) == 1 and rtype(r0) == RCon:
+        r1 = MEM(fn.nmem)
+        fn.nmem += 1
+        vgrow(fn.mem, fn.nmem, Addr)
+        a = Addr()
+        a.offset.type = CAddr
+        n = stashbits(fn.con[rval(r0)].i, 8 if KWIDE(k) else 4)
+        buf = "\\"%sfp%d\\"" % (D.T.asloc, n)
+        a.offset.sym.id = intern(buf)
+        fn.mem[fn.nmem - 1] = a
+    elif (op == Ocall and i is not None and lst is i.arg and idx == 0
+          and rtype(r0) == RCon and fn.con[rval(r0)].type != CAddr):
+        r1 = newtmp("isel", Kl, fn)
+        emit(Ocopy, Kl, r1, r0, R)
+    elif op != Ocopy and k == Kl and noimm(r0, fn):
+        r1 = newtmp("isel", Kl, fn)
+        emit(Ocopy, Kl, r1, r0, R)
+    elif s != -1:
+        r1 = newtmp("isel", Kl, fn)
+        emit(Oaddr, Kl, r1, SLOT(s), R)
+    elif (op != Ocall and _hascon_ext(r0, fn)):
+        c = hascon(r0, fn)
+        r1 = newtmp("isel", Kl, fn)
+        disp = (c.i and INT32_MIN <= c.i <= INT32_MAX and not _bigaddend(c) and i is not None
+                and lst is i.arg and (rtype(r0) == RMem or (isload(op) and idx == 0)
+                                      or (isstore(op) and idx == 1)))
+        if c.i and not disp:
+            r2 = newtmp("isel", Kl, fn)
+            cc = Con(CBits, c.i)
+            r3 = newcon(cc, fn)
+            if noimm(r3, fn):
+                r4 = newtmp("isel", Kl, fn)
+                emit(Oadd, Kl, r1, r2, r4)
+                emit(Ocopy, Kl, r4, r3, R)
+            else:
+                emit(Oadd, Kl, r1, r2, r3)
+        else:
+            r2 = r1
+        if D.T.apple and (c.sym.type & SThr):
+            emit(Ocopy, Kl, r2, TMP(RAX), R)
+            r2 = newtmp("isel", Kl, fn)
+            r3 = newtmp("isel", Kl, fn)
+            emit(Ocall, 0, R, r3, CALL(17))
+            emit(Ocopy, Kl, TMP(RDI), r2, R)
+            emit(Oload, Kl, r3, r2, R)
+        cc = c.copy()
+        cc.i = 0
+        r3 = newcon(cc, fn)
+        emit(Oaddr, Kl, r2, r3, R)
+        if rtype(r0) == RMem:
+            m = fn.mem[rval(r0)]
+            m.offset = Con(CBits, c.i) if disp else Con(CUndef, 0)
+            m.base = r1
+            r1 = r0
+        elif disp:
+            a = Addr()
+            a.offset = Con(CBits, c.i)
+            a.base = r1
+            fn.nmem += 1
+            vgrow(fn.mem, fn.nmem, Addr)
+            fn.mem[fn.nmem - 1] = a
+            r1 = MEM(fn.nmem - 1)
+    elif (not (isstore(op) and i is not None and lst is i.arg and idx == 1)
+          and not isload(op) and op != Ocall and rtype(r0) == RCon
+          and fn.con[rval(r0)].type == CAddr):
+        r1 = newtmp("isel", Kl, fn)
+        emit(Oaddr, Kl, r1, r0, R)
+    elif rtype(r0) == RMem:
+        m = fn.mem[rval(r0)]
+        if m.base == R:
+            if m.offset.type == CAddr:
+                r0 = newtmp("isel", Kl, fn)
+                emit(Oaddr, Kl, r0, newcon(m.offset, fn), R)
+                m.offset.type = CUndef
+                m.base = r0
+    elif isxsel(op) and rtype(lst[idx]) == RCon:
+        r1 = newtmp("isel", i.cls, fn)
+        emit(Ocopy, i.cls, r1, lst[idx], R)
+    lst[idx] = r1
+def _bigaddend(c):
+    return c.type == CAddr and not -(1 << 30) <= c.i < 1 << 30
+def _hascon_ext(r0, fn):
+    c = hascon(r0, fn)
+    return (c is not None and c.type == CAddr
+            and ((c.sym.type & SExt) or (D.T.apple and c.sym.type == SThr) or _bigaddend(c)))
+def seladdr(lst, idx, tn, fn):
+    r0 = lst[idx]
+    if rtype(r0) == RTmp:
+        a = Addr()
+        if not amatch(a, tn, r0, fn):
+            return
+        if ((a.offset.type == CBits and not INT32_MIN <= a.offset.i <= INT32_MAX)
+                or _bigaddend(a.offset)):
+            return
+        if a.base != R:
+            if a.offset.type == CAddr:
+                if a.index != R or rtype(a.base) != RTmp:
+                    return
+                else:
+                    a.index = a.base
+                    a.scale = 1
+                    a.base = R
+        chuse(r0, -1, fn)
+        fn.nmem += 1
+        vgrow(fn.mem, fn.nmem, Addr)
+        fn.mem[fn.nmem - 1] = a
+        chuse(a.base, +1, fn)
+        chuse(a.index, +1, fn)
+        lst[idx] = MEM(fn.nmem - 1)
+def cmpswap(arg, op):
+    if op in (NCmpI + Cflt, NCmpI + Cfle):
+        return 1
+    if op in (NCmpI + Cfgt, NCmpI + Cfge):
+        return 0
+    return int(rtype(arg[0]) == RCon)
+def selcmp(arg, k, swap, fn):
+    if swap:
+        r = arg[1]
+        arg[1] = arg[0]
+        arg[0] = r
+    emit(Oxcmp, k, R, arg[1], arg[0])
+    icmp = D.insb[D.curi]
+    if rtype(arg[0]) == RCon:
+        assert k != Kw
+        icmp.arg[1] = newtmp("isel", k, fn)
+        emit(Ocopy, k, icmp.arg[1], arg[0], R)
+        ci = D.insb[D.curi]
+        fixarg(ci.arg, 0, k, ci, fn)
+    fixarg(icmp.arg, 0, k, icmp, fn)
+    fixarg(icmp.arg, 1, k, icmp, fn)
+def _fix2(i, fn):
+    i1 = D.insb[D.curi]
+    fixarg(i1.arg, 0, argcls(i, 0), i1, fn)
+    fixarg(i1.arg, 1, argcls(i, 1), i1, fn)
+def sel(i, tn, fn):
+    tmp = [R] * 7
+    if rtype(i.to) == RTmp:
+        if not isreg(i.to) and not isreg(i.arg[0]) and not isreg(i.arg[1]):
+            if fn.tmp[rval(i.to)].nuse == 0:
+                chuse(i.arg[0], -1, fn)
+                chuse(i.arg[1], -1, fn)
+                return
+    i0 = D.curi
+    k = i.cls
+    op = i.op
+    if op in (Odiv, Orem, Oudiv, Ourem):
+        if KBASE(k) == 1:
+            _emit_fix(i, fn)
+        else:
+            if op == Odiv or op == Oudiv:
+                r0, r1 = TMP(RAX), TMP(RDX)
+            else:
+                r0, r1 = TMP(RDX), TMP(RAX)
+            emit(Ocopy, k, i.to, r0, R)
+            emit(Ocopy, k, R, r1, R)
+            if rtype(i.arg[1]) == RCon:
+                r0 = newtmp("isel", k, fn)
+            else:
+                r0 = i.arg[1]
+            if fn.tmp[rval(r0)].slot != -1:
+                err("unlikely argument %%%s in %s",
+                    fn.tmp[rval(r0)].name, optab[op].name)
+            if op == Odiv or op == Orem:
+                emit(Oxidiv, k, R, r0, R)
+                emit(Osign, k, TMP(RDX), TMP(RAX), R)
+            else:
+                emit(Oxdiv, k, R, r0, R)
+                emit(Ocopy, k, TMP(RDX), CON_Z, R)
+            emit(Ocopy, k, TMP(RAX), i.arg[0], R)
+            ci = D.insb[D.curi]
+            fixarg(ci.arg, 0, k, ci, fn)
+            if rtype(i.arg[1]) == RCon:
+                emit(Ocopy, k, r0, i.arg[1], R)
+    elif op in (Osar, Oshr, Oshl):
+        r0 = i.arg[1]
+        if rtype(r0) == RCon:
+            _emit_fix(i, fn)
+        else:
+            if fn.tmp[rval(r0)].slot != -1:
+                err("unlikely argument %%%s in %s",
+                    fn.tmp[rval(r0)].name, optab[op].name)
+            i.arg[1] = TMP(RCX)
+            emit(Ocopy, Kw, R, TMP(RCX), R)
+            emiti(i)
+            i1 = D.insb[D.curi]
+            emit(Ocopy, Kw, TMP(RCX), r0, R)
+            fixarg(i1.arg, 0, argcls(i, 0), i1, fn)
+    elif op == Ouwtof:
+        r0 = newtmp("utof", Kl, fn)
+        emit(Osltof, k, i.to, r0, R)
+        emit(Oextuw, Kl, r0, i.arg[0], R)
+        ci = D.insb[D.curi]
+        fixarg(ci.arg, 0, k, ci, fn)
+    elif op == Oultof:
+        r0 = newtmp("utof", k, fn)
+        if k == Ks:
+            kc, sh = Kw, 23
+        else:
+            kc, sh = Kl, 52
+        for j in range(4):
+            tmp[j] = newtmp("utof", Kl, fn)
+        for j in range(4, 7):
+            tmp[j] = newtmp("utof", kc, fn)
+        emit(Ocast, k, i.to, tmp[6], R)
+        emit(Oadd, kc, tmp[6], tmp[4], tmp[5])
+        emit(Oshl, kc, tmp[5], tmp[1], getcon(sh, fn))
+        emit(Ocast, kc, tmp[4], r0, R)
+        emit(Osltof, k, r0, tmp[3], R)
+        emit(Oor, Kl, tmp[3], tmp[0], tmp[2])
+        emit(Oshr, Kl, tmp[2], i.arg[0], tmp[1])
+        ii = D.insb[D.curi].copy()
+        D.curi += 1
+        sel(ii, None, fn)
+        emit(Oshr, Kl, tmp[1], i.arg[0], getcon(63, fn))
+        ci = D.insb[D.curi]
+        fixarg(ci.arg, 0, Kl, ci, fn)
+        emit(Oand, Kl, tmp[0], i.arg[0], getcon(1, fn))
+        ci = D.insb[D.curi]
+        fixarg(ci.arg, 0, Kl, ci, fn)
+    elif op in (Ostoui, Odtoui):
+        if op == Ostoui:
+            i.op = Ostosi
+            kc = Ks
+            tmp[4] = getcon(0xdf000000, fn)
+        else:
+            i.op = Odtosi
+            kc = Kd
+            tmp[4] = getcon(s64(0xc3e0000000000000), fn)
+        if k == Kw:
+            r0 = newtmp("ftou", Kl, fn)
+            emit(Ocopy, Kw, i.to, r0, R)
+            i.cls = Kl
+            i.to = r0
+            _emit_fix(i, fn)
+        else:
+            r0 = newtmp("ftou", kc, fn)
+            for j in range(4):
+                tmp[j] = newtmp("ftou", Kl, fn)
+            emit(Oor, Kl, i.to, tmp[0], tmp[3])
+            emit(Oand, Kl, tmp[3], tmp[2], tmp[1])
+            emit(i.op, Kl, tmp[2], r0, R)
+            emit(Oadd, kc, r0, tmp[4], i.arg[0])
+            i1 = D.insb[D.curi]
+            fixarg(i1.arg, 0, kc, i1, fn)
+            fixarg(i1.arg, 1, kc, i1, fn)
+            emit(Osar, Kl, tmp[1], tmp[0], getcon(63, fn))
+            emit(i.op, Kl, tmp[0], i.arg[0], R)
+            ci = D.insb[D.curi]
+            fixarg(ci.arg, 0, Kl, ci, fn)
+    elif op == Onop:
+        pass
+    elif op in (Ostored, Ostores, Ostorel, Ostorew, Ostoreh, Ostoreb):
+        if rtype(i.arg[0]) == RCon:
+            if i.op == Ostored:
+                i.op = Ostorel
+            if i.op == Ostores:
+                i.op = Ostorew
+        seladdr(i.arg, 1, tn, fn)
+        _emit_fix(i, fn)
+    elif isload(op):
+        seladdr(i.arg, 0, tn, fn)
+        _emit_fix(i, fn)
+    elif ((op in (Oswtof, Osltof) or op == Ocast and KBASE(k) == 1)
+          and rtype(i.arg[0]) == RCon and KBASE(argcls(i, 0)) == 0):
+        emiti(i)
+        r = newtmp("isel", argcls(i, 0), fn)
+        D.insb[D.curi].arg[0] = r
+        emit(Ocopy, argcls(i, 0), r, i.arg[0], R)
+        ci = D.insb[D.curi]
+        fixarg(ci.arg, 0, argcls(i, 0), ci, fn)
+    elif op in _EMIT or isext(op) or isxsel(op):
+        _emit_fix(i, fn)
+    elif op in _EXTOPS:
+        emiti(i)
+        i1 = D.insb[D.curi]
+        if op in _EXTINT and rtype(i1.arg[0]) == RCon:
+            r = newtmp("isel", k, fn)
+            i1.arg[0] = r
+            emit(Ocopy, k, r, i.arg[0], R)
+        else:
+            fixarg(i1.arg, 0, argcls(i, 0), i1, fn)
+    elif op in (Oalloc4, Oalloc8, Oalloc16):
+        salloc(i.to, i.arg[0], fn)
+    else:
+        kx = iscmp(op)
+        if kx is not None:
+            kc, x = kx
+            if x == NCmpI + Cfeq:
+                r0 = newtmp("isel", Kw, fn)
+                r1 = newtmp("isel", Kw, fn)
+                emit(Oand, Kw, i.to, r0, r1)
+                emit(Oflagfo, k, r1, R, R)
+                i.to = r0
+            elif x == NCmpI + Cfne:
+                r0 = newtmp("isel", Kw, fn)
+                r1 = newtmp("isel", Kw, fn)
+                emit(Oor, Kw, i.to, r0, r1)
+                emit(Oflagfuo, k, r1, R, R)
+                i.to = r0
+            swap = cmpswap(i.arg, x)
+            if swap:
+                x = cmpop(x)
+            emit(Oflag + x, k, i.to, R, R)
+            selcmp(i.arg, kc, swap, fn)
+        else:
+            die("unknown instruction %s", optab[op].name)
+    while i0 > D.curi:
+        i0 -= 1
+        assert rslot(D.insb[i0].arg[0], fn) == -1
+        assert rslot(D.insb[i0].arg[1], fn) == -1
+_EMIT = frozenset((Odbgloc, Ocall, Osalloc, Ocopy, Oadd, Osub, Oneg, Omul, Oand, Oor, Oxor,
+                   Oxtest, Ostosi, Odtosi, Oswtof, Osltof, Oexts, Otruncd, Ocast))
+_EXTINT = frozenset((D.Obclz, D.Obctz, D.Obswap, D.Obswap16))
+_EXTOPS = _EXTINT | frozenset((D.Ogetsp, D.Osetsp, D.Ofsqrt, D.Ofabs))
+def _emit_fix(i, fn):
+    emiti(i)
+    _fix2(i, fn)
+def flagi(ins, i0, i, fn):
+    while i > i0:
+        i -= 1
+        o = amd64_op[ins[i].op]
+        if o.zflag:
+            if ins[i].op in (Osar, Oshr, Oshl) and not _shiftsflags(ins[i], fn):
+                return None
+            return i
+        if o.lflag:
+            continue
+        return None
+    return None
+def _shiftsflags(i, fn):
+    r = i.arg[1]
+    if rtype(r) != RCon or fn.con[rval(r)].type != CBits:
+        return False
+    return fn.con[rval(r)].i & (63 if KWIDE(i.cls) else 31) != 0
+def selsel(fn, b, i, tn):
+    ins = b.ins
+    assert ins[i].op == Osel1
+    isel0 = i
+    while 0 < isel0:
+        if ins[isel0].op == Osel0:
+            break
+        assert ins[isel0].op == Osel1
+        isel0 -= 1
+    assert ins[isel0].op == Osel0
+    r = ins[isel0].arg[0]
+    assert rtype(r) == RTmp
+    t = fn.tmp[rval(r)]
+    fi = flagi(ins, 0, isel0, fn)
+    cr = [R, R]
+    gencmp = gencpy = swap = 0
+    k = Kw
+    c = Cine
+    other = False
+    if fi is None or ins[fi].to != r:
+        gencmp = 1
+        cr[0] = r
+        cr[1] = CON_Z
+    else:
+        kc = iscmp(ins[fi].op)
+        if kc is not None:
+            k, c = kc
+            if c == NCmpI + Cfeq or c == NCmpI + Cfne:
+                c = Cine
+                other = True
+            else:
+                swap = cmpswap(ins[fi].arg, c)
+                if swap:
+                    c = cmpop(c)
+                if t.nuse == 1:
+                    gencmp = 1
+                    cr[0] = ins[fi].arg[0]
+                    cr[1] = ins[fi].arg[1]
+                    ins[fi] = Ins(Onop)
+        elif (ins[fi].op == Oand and t.nuse == 1
+              and (rtype(ins[fi].arg[0]) == RTmp or rtype(ins[fi].arg[1]) == RTmp)):
+            f = ins[fi]
+            f.op = Oxtest
+            f.to = R
+            if rtype(f.arg[1]) == RCon:
+                r = f.arg[1]
+                f.arg[1] = f.arg[0]
+                f.arg[0] = r
+        else:
+            other = True
+    if other:
+        if t.nuse == 1:
+            gencpy = 1
+    isel1 = i
+    while isel0 < isel1:
+        ins[isel1].op = Oxsel + c
+        sel(ins[isel1].copy(), tn, fn)
+        isel1 -= 1
+    assert not gencmp or not gencpy
+    if gencmp:
+        selcmp(cr, k, swap, fn)
+    if gencpy:
+        emit(Ocopy, Kw, R, r, R)
+    ins[isel0] = Ins(Onop)
+    return isel0
+def seljmp(b, fn):
+    if b.jmp.type in (Jret0, Jjmp, Jhlt):
+        return
+    assert b.jmp.type == Jjnz
+    r = b.jmp.arg
+    b.jmp.arg = R
+    assert rtype(r) == RTmp
+    t = fn.tmp[rval(r)]
+    if b.s1 is b.s2:
+        chuse(r, -1, fn)
+        b.jmp.type = Jjmp
+        b.s2 = None
+        return
+    ins = b.ins
+    fi = flagi(ins, 0, b.nins, fn)
+    kc = iscmp(ins[fi].op) if fi is not None and ins[fi].to == r else None
+    if fi is None or ins[fi].to != r:
+        selcmp([r, CON_Z], Kw, 0, fn)
+        b.jmp.type = Jjf + Cine
+    elif (kc is not None and kc[1] != NCmpI + Cfeq
+          and kc[1] != NCmpI + Cfne):
+        k, c = kc
+        swap = cmpswap(ins[fi].arg, c)
+        if swap:
+            c = cmpop(c)
+        if t.nuse == 1:
+            selcmp(ins[fi].arg, k, swap, fn)
+            ins[fi] = Ins(Onop)
+        b.jmp.type = Jjf + c
+    elif (ins[fi].op == Oand and t.nuse == 1
+          and (rtype(ins[fi].arg[0]) == RTmp or rtype(ins[fi].arg[1]) == RTmp)):
+        f = ins[fi]
+        f.op = Oxtest
+        f.to = R
+        b.jmp.type = Jjf + Cine
+        if rtype(f.arg[1]) == RCon:
+            r = f.arg[1]
+            f.arg[1] = f.arg[0]
+            f.arg[0] = r
+    else:
+        if t.nuse == 1:
+            emit(Ocopy, Kw, R, r, R)
+        b.jmp.type = Jjf + Cine
+Pob, Pbis, Pois, Pobis, Pbi1, Pobi1 = range(6)
+_Oaddtbl = [
+    2,
+    2, 2,
+    4, 4, 5,
+    6, 6, 8, 8,
+    4, 4, 9, 10, 9,
+    7, 7, 5, 8, 9, 5,
+    4, 4, 12, 10, 12, 12, 12,
+    4, 4, 9, 10, 9, 9, 12, 9,
+    11, 11, 5, 8, 9, 5, 12, 9, 5,
+    7, 7, 5, 8, 9, 5, 12, 9, 5, 5,
+    11, 11, 5, 8, 9, 5, 12, 9, 5, 5, 5,
+    4, 4, 9, 10, 9, 9, 12, 9, 9, 9, 9, 9,
+    7, 7, 5, 8, 9, 5, 12, 9, 5, 5, 5, 9, 5,
+]
+assert len(_Oaddtbl) == 91
+def opn(op, l, r):
+    if l < r:
+        l, r = r, l
+    if op == Omul:
+        if 2 <= l:
+            if r == 0:
+                return 3
+        return 2
+    elif op == Oadd:
+        return _Oaddtbl[(l + l * l) // 2 + r]
+    return 2
+def refn(r, tn, con):
+    t = rtype(r)
+    if t == RTmp:
+        n = tn[rval(r)]
+        if not n.n:
+            n.n = 2
+        return n.n
+    elif t == RCon:
+        c = con[rval(r)]
+        if c.type != CBits:
+            return 1
+        n = c.i
+        if n == 8 or n == 4 or n == 2 or n == 1:
+            return 0
+        return 1
+    return INT_MIN
+match = [0] * 13
+match[4] = BIT(Pob)
+match[5] = BIT(Pbi1)
+match[6] = BIT(Pob) | BIT(Pois)
+match[7] = BIT(Pob) | BIT(Pobi1)
+match[8] = BIT(Pbi1) | BIT(Pbis)
+match[9] = BIT(Pbi1) | BIT(Pobi1)
+match[10] = BIT(Pbi1) | BIT(Pbis) | BIT(Pobi1) | BIT(Pobis)
+match[11] = BIT(Pob) | BIT(Pobi1) | BIT(Pobis)
+match[12] = BIT(Pbi1) | BIT(Pobi1) | BIT(Pobis)
+matcher = [None] * 6
+matcher[Pbi1] = [1, 3, 1, 3, 2, 0]
+matcher[Pbis] = [5, 1, 8, 5, 27, 1, 5, 1, 2, 5, 13, 3, 1, 1, 3, 3, 3, 2, 0, 1,
+                 3, 3, 3, 2, 3, 1, 0, 1, 29]
+matcher[Pob] = [1, 3, 0, 3, 1, 0]
+matcher[Pobi1] = [5, 3, 9, 9, 10, 33, 12, 35, 45, 1, 5, 3, 11, 9, 7, 9, 4, 9,
+                  17, 1, 3, 0, 3, 1, 3, 2, 0, 3, 1, 1, 3, 0, 34, 1, 37, 1, 5, 2,
+                  5, 7, 2, 7, 8, 37, 29, 1, 3, 0, 1, 32]
+matcher[Pobis] = [5, 2, 10, 7, 11, 19, 49, 1, 1, 3, 3, 3, 2, 1, 3, 0, 3, 1, 0,
+                  1, 3, 0, 5, 1, 8, 5, 25, 1, 5, 1, 2, 5, 13, 3, 1, 1, 3, 3, 3,
+                  2, 0, 1, 3, 3, 3, 2, 26, 1, 51, 1, 5, 1, 6, 5, 9, 1, 3, 0, 51,
+                  3, 1, 1, 3, 0, 45]
+matcher[Pois] = [1, 3, 0, 1, 3, 3, 3, 2, 0]
+def runmatch(code, tn, ref, var):
+    assert rtype(ref) == RTmp
+    stk = []
+    pc = 0
+    while True:
+        bc = code[pc]
+        if not bc:
+            return
+        if bc == 1 or bc == 2:
+            assert len(stk) < 20
+            assert rtype(ref) == RTmp
+            n = tn[rval(ref)]
+            if bc == 1 and n.nl > n.nr:
+                stk.append(n.l)
+                ref = n.r
+            else:
+                stk.append(n.r)
+                ref = n.l
+            pc += 1
+        elif bc == 3 or bc == 4:
+            if bc == 3:
+                pc += 1
+                var[code[pc]] = ref
+                if code[pc + 1] == 0:
+                    return
+            assert stk
+            ref = stk.pop()
+            pc += 1
+        elif bc == 5:
+            assert rtype(ref) == RTmp
+            n = tn[rval(ref)].n
+            s = pc + 1
+            i = code[s]
+            s += 1
+            while i > 0:
+                if n == code[s]:
+                    s += 1
+                    break
+                s += 2
+                i -= 1
+            pc += code[s]
+        else:
+            assert bc >= 10
+            pc = bc - 10
+class _NumTab(dict):
+    def __missing__(self, k):
+        v = self[k] = Num()
+        return v
+def anumber(tn, b, con):
+    for i in b.ins[:b.nins]:
+        if rtype(i.to) != RTmp:
+            continue
+        n = tn[rval(i.to)]
+        n.l = i.arg[0]
+        n.r = i.arg[1]
+        n.nl = refn(n.l, tn, con) & 0xff
+        n.nr = refn(n.r, tn, con) & 0xff
+        n.n = opn(i.op, n.nl, n.nr) & 0xff
+def adisp(c, tn, r, fn, s):
+    v = [R, R]
+    while r != R:
+        assert rtype(r) == RTmp
+        n = refn(r, tn, fn.con)
+        if not (match[n] & BIT(Pob)):
+            break
+        runmatch(matcher[Pob], tn, r, v)
+        assert rtype(v[0]) == RCon
+        addcon(c, fn.con[rval(v[0])], s)
+        r = v[1]
+    return r
+_pat = [Pobis, Pobi1, Pbis, Pois, Pbi1]
+def amatch(a, tn, r, fn):
+    if rtype(r) != RTmp:
+        return 0
+    n = refn(r, tn, fn.con)
+    v = [R, R, R, R]
+    p = -1
+    for q in _pat:
+        if match[n] & BIT(q):
+            runmatch(matcher[q], tn, r, v)
+            p = q
+            break
+    if p < 0:
+        v[1] = r
+    co = Con()
+    ro = v[0]
+    rb = adisp(co, tn, v[1], fn, 1)
+    ri = v[2]
+    rs = v[3]
+    s = 1
+    if p < 0 and co.type != CUndef:
+        if amatch(a, tn, rb, fn):
+            return addcon(a.offset, co, 1)
+    if ro != R:
+        assert rtype(ro) == RCon
+        c = fn.con[rval(ro)]
+        if not addcon(co, c, 1):
+            return 0
+    if rs != R:
+        assert rtype(rs) == RCon
+        c = fn.con[rval(rs)]
+        assert c.type == CBits
+        s = c.i
+    ri = adisp(co, tn, ri, fn, s)
+    a.offset = co
+    a.base = rb
+    a.index = ri
+    a.scale = s
+    if rtype(ri) == RTmp:
+        if fn.tmp[rval(ri)].slot != -1:
+            if a.scale != 1 or fn.tmp[rval(rb)].slot != -1:
+                return 0
+            a.base = ri
+            a.index = rb
+    if a.base != R:
+        assert rtype(a.base) == RTmp
+        s = fn.tmp[rval(a.base)].slot
+        if s != -1:
+            a.base = SLOT(s)
+    return 1
+def amd64_isel(fn):
+    b = fn.start
+    n = 4
+    for al in range(Oalloc, Oalloc1 + 1):
+        for k in range(b.nins):
+            i = b.ins[k]
+            if i.op == al:
+                if rtype(i.arg[0]) != RCon:
+                    break
+                sz = fn.con[rval(i.arg[0])].i
+                if sz < 0 or sz >= INT_MAX - 15:
+                    err("invalid alloc size %d", sz)
+                sz = (sz + n - 1) & -n
+                sz //= 4
+                if sz > INT_MAX - fn.slot:
+                    die("alloc too large")
+                fn.tmp[rval(i.to)].slot = fn.slot
+                fn.slot += sz
+                fn.salign = 2 + al - Oalloc
+                b.ins[k] = Ins(Onop)
+        n *= 2
+    b = fn.start
+    while b:
+        D.curi = NIns
+        for sb in (b.s1, b.s2):
+            if not sb:
+                break
+            p = sb.phi
+            while p:
+                a = 0
+                while p.blk[a] is not b:
+                    assert a + 1 < p.narg
+                    a += 1
+                fixarg(p.arg, a, p.cls, None, fn)
+                p = p.link
+        num = _NumTab()
+        anumber(num, b, fn.con)
+        seljmp(b, fn)
+        k = b.nins
+        while k != 0:
+            k -= 1
+            i = b.ins[k]
+            assert i.op != Osel0
+            if i.op == Osel1:
+                k = selsel(fn, b, k, num)
+            else:
+                sel(i.copy(), num, fn)
+        idup(b, D.curi, NIns - D.curi)
+        b = b.link
+    if D.debug['I']:
+        sys.stderr.write("\\n> After instruction selection:\\n")
+        printfn(fn, sys.stderr)
+''',
+'backend/amd64/regs.py': '''\
+from ..defs import RXX, Tmp0
+_gp = 'RAX RCX RDX RSI RDI R8 R9 R10 R11 RBX R12 R13 R14 R15 RBP RSP'.split()
+_fp = ['XMM%d' % i for i in range(16)]
+for _i, _r in enumerate(_gp + _fp):
+    globals()[_r] = RXX + 1 + _i
+del _i, _r
+NFPR = XMM14 - XMM0 + 1
+NGPR = RSP - RAX + 1
+NFPS = NFPR
+NGPS_SYSV = R11 - RAX + 1
+NCLR_SYSV = R15 - RBX + 1
+NGPS_WIN = R11 - RAX + 1 - 2
+NCLR_WIN = R15 - RBX + 1 + 2
+assert XMM15 < Tmp0
+''',
+'backend/amd64/sysv.py': '''\
+import sys
+from .. import defs as D
+from ..defs import (R, RTmp, RType, NIns, Ins, Phi, Jmp_, Kx, Kw, Kl, Kd, KBASE, BIT, TMP, INT,
+                    CALL, SLOT, CON_Z, rtype, rval, FEnd, FPad, Fs, Fd, Fb, Fh, Fw, Fl, FTyp,
+                    Ciult, Ocmpw, Ostorew, Ostorel, Oadd, Oload, Oloadsw, Ocopy, Ocall,
+                    Oblit0, Oblit1, Oalloc, Osalloc, Opar, Oarg, Oargc, Oarge, Oargv, Oparc,
+                    Opare, Ovastart, Ovaarg, Jret0, Jretc, Jretw, Jjmp, Jjnz, isret, isarg,
+                    ispar)
+from ..util import err, die, newtmp, getcon, emit, emiti, idup, icpy, vgrow
+from ..cfg import newblk
+from ..parse import printfn
+from .regs import (RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11, RBX, R12, R13, R14, R15, RBP,
+                   XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7, XMM8, XMM9, XMM10, XMM11,
+                   XMM12, XMM13, XMM14, NGPS_SYSV, NCLR_SYSV, NFPS)
+class AClass:
+    __slots__ = ('type', 'inmem', 'align', 'size', 'cls', 'ref')
+    def __init__(self):
+        self.type = None
+        self.inmem = 0
+        self.align = 0
+        self.size = 0
+        self.cls = [0, 0]
+        self.ref = [R, R]
+class RAlloc:
+    __slots__ = ('i', 'link')
+    def __init__(self, i, link):
+        self.i = i
+        self.link = link
+def classify(a, t, s):
+    s1 = s
+    for n in range(t.nunion):
+        for f in t.fields[n]:
+            if f.type == FEnd:
+                break
+            assert s <= 16
+            ci = s // 8
+            if f.type == FPad:
+                s += f.len
+            elif f.type in (Fs, Fd):
+                if a.cls[ci] == Kx:
+                    a.cls[ci] = Kd
+                s += f.len
+            elif f.type in (Fb, Fh, Fw, Fl):
+                a.cls[ci] = Kl
+                s += f.len
+            elif f.type == FTyp:
+                classify(a, D.typ[f.len], s)
+                s += D.typ[f.len].size
+            else:
+                die("unreachable")
+        s = s1
+def typclass(a, t):
+    sz = t.size
+    al = 1 << t.align
+    if al < 8:
+        al = 8
+    sz = (sz + al - 1) & -al & 0xffffffff
+    a.type = t
+    a.size = sz
+    a.align = t.align
+    if t.isdark or sz > 16 or sz == 0:
+        a.inmem = 1
+        return
+    a.cls[0] = Kx
+    a.cls[1] = Kx
+    a.inmem = 0
+    classify(a, t, 0)
+_retreg = [[RAX, RDX], [XMM0, XMM0 + 1]]
+def _second(a):
+    return a.size > 8 and a.cls[1] != Kx
+def retr(reg, aret):
+    nr = [0, 0]
+    ca = 0
+    n = 0
+    while n * 8 < aret.size:
+        if aret.cls[n] != Kx:
+            k = KBASE(aret.cls[n])
+            reg[n] = TMP(_retreg[k][nr[k]])
+            nr[k] += 1
+            ca += 1 << (2 * k)
+        n += 1
+    return ca
+def selret(b, fn):
+    j = b.jmp.type
+    if not isret(j) or j == Jret0:
+        return
+    r0 = b.jmp.arg
+    b.jmp.type = Jret0
+    if j == Jretc:
+        aret = AClass()
+        typclass(aret, D.typ[fn.retty])
+        if aret.inmem:
+            assert rtype(fn.retr) == RTmp
+            emit(Ocopy, Kl, TMP(RAX), fn.retr, R)
+            emit(Oblit1, 0, R, INT(aret.type.size), R)
+            emit(Oblit0, 0, R, r0, fn.retr)
+            ca = 1
+        else:
+            reg = [R, R]
+            ca = retr(reg, aret)
+            if _second(aret):
+                r = newtmp("abi", Kl, fn)
+                emit(Oload, Kl, reg[1], r, R)
+                emit(Oadd, Kl, r, r0, getcon(8, fn))
+            emit(Oload, Kl, reg[0], r0, R)
+    else:
+        k = j - Jretw
+        if KBASE(k) == 0:
+            emit(Ocopy, k, TMP(RAX), r0, R)
+            ca = 1
+        else:
+            emit(Ocopy, k, TMP(XMM0), r0, R)
+            ca = 1 << 2
+    b.jmp.arg = CALL(ca)
+def argsclass(ins, i0, i1, ac, op, aret, env):
+    if aret and aret.inmem:
+        nint = 5
+    else:
+        nint = 6
+    nsse = 8
+    varc = 0
+    envc = 0
+    for k in range(i0, i1):
+        i = ins[k]
+        a = ac[k - i0]
+        o = i.op - op + Oarg
+        if o == Oarg:
+            if KBASE(i.cls) == 0:
+                if nint > 0:
+                    nint -= 1
+                    a.inmem = 0
+                else:
+                    a.inmem = 2
+            else:
+                if nsse > 0:
+                    nsse -= 1
+                    a.inmem = 0
+                else:
+                    a.inmem = 2
+            a.align = 3
+            a.size = 8
+            a.cls[0] = i.cls
+        elif o == Oargc:
+            n = rval(i.arg[0])
+            typclass(a, D.typ[n])
+            if a.inmem:
+                continue
+            ni = ns = 0
+            n = 0
+            while n * 8 < a.size:
+                if a.cls[n] == Kx:
+                    pass
+                elif KBASE(a.cls[n]) == 0:
+                    ni += 1
+                else:
+                    ns += 1
+                n += 1
+            if nint >= ni and nsse >= ns:
+                nint -= ni
+                nsse -= ns
+            else:
+                a.inmem = 1
+        elif o == Oarge:
+            envc = 1
+            if op == Opar:
+                env[0] = i.to
+            else:
+                env[0] = i.arg[0]
+        elif o == Oargv:
+            varc = 1
+        else:
+            die("unreachable")
+    if varc and envc:
+        err("sysv abi does not support variadic env calls")
+    return ((varc | envc) << 12) | ((6 - nint) << 4) | ((8 - nsse) << 8)
+amd64_sysv_rsave = [
+    RDI, RSI, RDX, RCX, R8, R9, R10, R11, RAX,
+    XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+    XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, -1
+]
+amd64_sysv_rclob = [RBX, R12, R13, R14, R15, -1]
+assert (len(amd64_sysv_rsave) == NGPS_SYSV + NFPS + 1
+        and len(amd64_sysv_rclob) == NCLR_SYSV + 1)
+def amd64_sysv_retregs(r, p):
+    assert rtype(r) == D.RCall
+    b = 0
+    ni = rval(r) & 3
+    nf = (rval(r) >> 2) & 3
+    if ni >= 1:
+        b |= BIT(RAX)
+    if ni >= 2:
+        b |= BIT(RDX)
+    if nf >= 1:
+        b |= BIT(XMM0)
+    if nf >= 2:
+        b |= BIT(XMM1)
+    if p is not None:
+        p[0] = ni
+        p[1] = nf
+    return b
+def amd64_sysv_argregs(r, p):
+    assert rtype(r) == D.RCall
+    b = 0
+    ni = (rval(r) >> 4) & 15
+    nf = (rval(r) >> 8) & 15
+    ra = (rval(r) >> 12) & 1
+    for j in range(ni):
+        b |= BIT(amd64_sysv_rsave[j])
+    for j in range(nf):
+        b |= BIT(XMM0 + j)
+    if p is not None:
+        p[0] = ni + ra
+        p[1] = nf
+    return b | (BIT(RAX) if ra else 0)
+def rarg(ty, n):
+    if KBASE(ty) == 0:
+        r = TMP(amd64_sysv_rsave[n[0]])
+        n[0] += 1
+    else:
+        r = TMP(XMM0 + n[1])
+        n[1] += 1
+    return r
+def selcall(fn, ins, i0, i1, rap):
+    env = [R]
+    ac = [AClass() for _ in range(i1 - i0)]
+    ic = ins[i1]
+    aret = None
+    if ic.arg[1] != R:
+        assert rtype(ic.arg[1]) == RType
+        aret = AClass()
+        typclass(aret, D.typ[rval(ic.arg[1])])
+        ca = argsclass(ins, i0, i1, ac, Oarg, aret, env)
+    else:
+        ca = argsclass(ins, i0, i1, ac, Oarg, None, env)
+    stk = 0
+    for a in reversed(ac):
+        if a.inmem:
+            if a.align > 4:
+                err("sysv abi requires alignments of 16 or less")
+            stk += a.size
+            if a.align == 4:
+                stk += stk & 15
+    stk += stk & 15
+    if stk:
+        r = getcon(-stk, fn)
+        emit(Osalloc, Kl, R, r, R)
+    if ic.arg[1] != R:
+        if aret.inmem:
+            r1 = newtmp("abi", Kl, fn)
+            emit(Ocopy, Kl, ic.to, TMP(RAX), R)
+            ca += 1
+        else:
+            if _second(aret):
+                r = newtmp("abi", Kl, fn)
+                aret.ref[1] = newtmp("abi", aret.cls[1], fn)
+                emit(Ostorel, 0, R, aret.ref[1], r)
+                emit(Oadd, Kl, r, ic.to, getcon(8, fn))
+            aret.ref[0] = newtmp("abi", aret.cls[0], fn)
+            emit(Ostorel, 0, R, aret.ref[0], ic.to)
+            reg = [R, R]
+            ca += retr(reg, aret)
+            if _second(aret):
+                emit(Ocopy, aret.cls[1], aret.ref[1], reg[1], R)
+            emit(Ocopy, aret.cls[0], aret.ref[0], reg[0], R)
+            r1 = ic.to
+        al = aret.align - 2 if aret.align >= 2 else 0
+        ra = RAlloc(Ins(Oalloc + al, Kl, r1, getcon(aret.size, fn)), rap[0])
+        rap[0] = ra
+    else:
+        ra = None
+        if KBASE(ic.cls) == 0:
+            emit(Ocopy, ic.cls, ic.to, TMP(RAX), R)
+            ca += 1
+        else:
+            emit(Ocopy, ic.cls, ic.to, TMP(XMM0), R)
+            ca += 1 << 2
+    emit(Ocall, ic.cls, R, ic.arg[0], CALL(ca))
+    if env[0] != R:
+        emit(Ocopy, Kl, TMP(RAX), env[0], R)
+    elif (ca >> 12) & 1:
+        emit(Ocopy, Kw, TMP(RAX), getcon((ca >> 8) & 15, fn), R)
+    n = [0, 0]
+    if ra and aret.inmem:
+        emit(Ocopy, Kl, rarg(Kl, n), ra.i.to, R)
+    for k in range(i0, i1):
+        i = ins[k]
+        a = ac[k - i0]
+        if i.op >= Oarge or a.inmem:
+            continue
+        r1 = rarg(a.cls[0], n)
+        if i.op == Oargc:
+            if _second(a):
+                r2 = rarg(a.cls[1], n)
+                r = newtmp("abi", Kl, fn)
+                emit(Oload, a.cls[1], r2, r, R)
+                emit(Oadd, Kl, r, i.arg[1], getcon(8, fn))
+            emit(Oload, a.cls[0], r1, i.arg[1], R)
+        else:
+            emit(Ocopy, i.cls, r1, i.arg[0], R)
+    if not stk:
+        return
+    r = newtmp("abi", Kl, fn)
+    off = 0
+    for k in range(i0, i1):
+        i = ins[k]
+        a = ac[k - i0]
+        if i.op >= Oarge or not a.inmem:
+            continue
+        r1 = newtmp("abi", Kl, fn)
+        if i.op == Oargc:
+            if a.align == 4:
+                off += off & 15
+            emit(Oblit1, 0, R, INT(a.type.size), R)
+            emit(Oblit0, 0, R, i.arg[1], r1)
+        else:
+            emit(Ostorel, 0, R, i.arg[0], r1)
+        emit(Oadd, Kl, r1, r, getcon(off, fn))
+        off += a.size
+    emit(Osalloc, Kl, r, getcon(stk, fn), R)
+def selpar(fn, i0, i1):
+    ins = fn.start.ins
+    env = [R]
+    ac = [AClass() for _ in range(i1 - i0)]
+    D.curi = NIns
+    n = [0, 0]
+    aret = None
+    if fn.retty >= 0:
+        aret = AClass()
+        typclass(aret, D.typ[fn.retty])
+        fa = argsclass(ins, i0, i1, ac, Opar, aret, env)
+    else:
+        fa = argsclass(ins, i0, i1, ac, Opar, None, env)
+    fn.reg = amd64_sysv_argregs(CALL(fa), None)
+    for k in range(i0, i1):
+        i = ins[k]
+        a = ac[k - i0]
+        if i.op != Oparc or a.inmem:
+            continue
+        if _second(a):
+            r = newtmp("abi", Kl, fn)
+            a.ref[1] = newtmp("abi", Kl, fn)
+            emit(Ostorel, 0, R, a.ref[1], r)
+            emit(Oadd, Kl, r, i.to, getcon(8, fn))
+        a.ref[0] = newtmp("abi", Kl, fn)
+        emit(Ostorel, 0, R, a.ref[0], i.to)
+        al = a.align - 2 if a.align >= 2 else 0
+        emit(Oalloc + al, Kl, i.to, getcon(a.size, fn), R)
+    if fn.retty >= 0 and aret.inmem:
+        r = newtmp("abi", Kl, fn)
+        emit(Ocopy, Kl, r, rarg(Kl, n), R)
+        fn.retr = r
+    s = 4
+    for k in range(i0, i1):
+        i = ins[k]
+        a = ac[k - i0]
+        if a.inmem == 1:
+            if a.align > 4:
+                err("sysv abi requires alignments of 16 or less")
+            if a.align == 4:
+                s = (s + 3) & -4
+            fn.tmp[rval(i.to)].slot = -s
+            s += a.size // 4
+            continue
+        elif a.inmem == 2:
+            emit(Oload, i.cls, i.to, SLOT(-s), R)
+            s += 2
+            continue
+        if i.op == Opare:
+            continue
+        r = rarg(a.cls[0], n)
+        if i.op == Oparc:
+            emit(Ocopy, a.cls[0], a.ref[0], r, R)
+            if _second(a):
+                r = rarg(a.cls[1], n)
+                emit(Ocopy, a.cls[1], a.ref[1], r, R)
+        else:
+            emit(Ocopy, i.cls, i.to, r, R)
+    if env[0] != R:
+        emit(Ocopy, Kl, env[0], TMP(RAX), R)
+    return fa | (s * 4) << 12
+def split(fn, b):
+    fn.nblk += 1
+    bn = newblk()
+    idup(bn, D.curi, NIns - D.curi)
+    D.curi = NIns
+    b.visit += 1
+    bn.visit = b.visit
+    bn.name = "%s.%d" % (b.name, b.visit)
+    bn.loop = b.loop
+    bn.link = b.link
+    b.link = bn
+    return bn
+def chpred(b, bp, bp1):
+    p = b.phi
+    while p:
+        a = 0
+        while p.blk[a] is not bp:
+            assert a + 1 < p.narg
+            a += 1
+        p.blk[a] = bp1
+        p = p.link
+def selvaarg(fn, b, i):
+    c4 = getcon(4, fn)
+    c8 = getcon(8, fn)
+    c16 = getcon(16, fn)
+    ap = i.arg[0]
+    isint = KBASE(i.cls) == 0
+    loc = newtmp("abi", Kl, fn)
+    emit(Oload, i.cls, i.to, loc, R)
+    b0 = split(fn, b)
+    b0.jmp = Jmp_()
+    b0.jmp.type = b.jmp.type
+    b0.jmp.arg = b.jmp.arg
+    b0.s1 = b.s1
+    b0.s2 = b.s2
+    if b.s1:
+        chpred(b.s1, b, b0)
+    if b.s2 and b.s2 is not b.s1:
+        chpred(b.s2, b, b0)
+    lreg = newtmp("abi", Kl, fn)
+    nr = newtmp("abi", Kl, fn)
+    r0 = newtmp("abi", Kw, fn)
+    r1 = newtmp("abi", Kl, fn)
+    emit(Ostorew, Kw, R, r0, r1)
+    emit(Oadd, Kl, r1, ap, CON_Z if isint else c4)
+    emit(Oadd, Kw, r0, nr, c8 if isint else c16)
+    r0 = newtmp("abi", Kl, fn)
+    r1 = newtmp("abi", Kl, fn)
+    emit(Oadd, Kl, lreg, r1, nr)
+    emit(Oload, Kl, r1, r0, R)
+    emit(Oadd, Kl, r0, ap, c16)
+    breg = split(fn, b)
+    breg.jmp.type = Jjmp
+    breg.s1 = b0
+    lstk = newtmp("abi", Kl, fn)
+    r0 = newtmp("abi", Kl, fn)
+    r1 = newtmp("abi", Kl, fn)
+    emit(Ostorel, Kw, R, r1, r0)
+    emit(Oadd, Kl, r1, lstk, c8)
+    emit(Oload, Kl, lstk, r0, R)
+    emit(Oadd, Kl, r0, ap, c8)
+    bstk = split(fn, b)
+    bstk.jmp.type = Jjmp
+    bstk.s1 = b0
+    p = Phi()
+    p.cls = Kl
+    p.to = loc
+    p.narg = 2
+    p.blk = [bstk, breg]
+    p.arg = [lstk, lreg]
+    b0.phi = p
+    r0 = newtmp("abi", Kl, fn)
+    r1 = newtmp("abi", Kw, fn)
+    b.jmp.type = Jjnz
+    b.jmp.arg = r1
+    b.s1 = breg
+    b.s2 = bstk
+    c = getcon(48 if isint else 176, fn)
+    emit(Ocmpw + Ciult, Kw, r1, nr, c)
+    emit(Oloadsw, Kl, nr, r0, R)
+    emit(Oadd, Kl, r0, ap, CON_Z if isint else c4)
+def selvastart(fn, fa, ap):
+    gp = ((fa >> 4) & 15) * 8
+    fp = 48 + ((fa >> 8) & 15) * 16
+    sp = fa >> 12
+    r0 = newtmp("abi", Kl, fn)
+    r1 = newtmp("abi", Kl, fn)
+    emit(Ostorel, Kw, R, r1, r0)
+    emit(Oadd, Kl, r1, TMP(RBP), getcon(-176, fn))
+    emit(Oadd, Kl, r0, ap, getcon(16, fn))
+    r0 = newtmp("abi", Kl, fn)
+    r1 = newtmp("abi", Kl, fn)
+    emit(Ostorel, Kw, R, r1, r0)
+    emit(Oadd, Kl, r1, TMP(RBP), getcon(sp, fn))
+    emit(Oadd, Kl, r0, ap, getcon(8, fn))
+    r0 = newtmp("abi", Kl, fn)
+    emit(Ostorew, Kw, R, getcon(fp, fn), r0)
+    emit(Oadd, Kl, r0, ap, getcon(4, fn))
+    emit(Ostorew, Kw, R, getcon(gp, fn), ap)
+def amd64_sysv_abi(fn):
+    b = fn.start
+    while b:
+        b.visit = 0
+        b = b.link
+    b = fn.start
+    i = 0
+    while i < b.nins:
+        if not ispar(b.ins[i].op):
+            break
+        i += 1
+    fa = selpar(fn, 0, i)
+    n0 = NIns - D.curi
+    ioff = i
+    n1 = b.nins - ioff
+    vgrow(b.ins, n0 + n1)
+    icpy(b.ins, n0, b.ins, ioff, n1)
+    icpy(b.ins, 0, D.insb, D.curi, n0)
+    b.nins = n0 + n1
+    ral = [None]
+    b = fn.start
+    while True:
+        b = b.link
+        if not b:
+            b = fn.start
+        if not b.visit:
+            D.curi = NIns
+            selret(b, fn)
+            ins = b.ins
+            i = b.nins
+            while i != 0:
+                i -= 1
+                op = ins[i].op
+                if op == Ocall:
+                    i0 = i
+                    while i0 > 0:
+                        if not isarg(ins[i0 - 1].op):
+                            break
+                        i0 -= 1
+                    selcall(fn, ins, i0, i, ral)
+                    i = i0
+                elif op == Ovastart:
+                    selvastart(fn, fa, ins[i].arg[0])
+                elif op == Ovaarg:
+                    selvaarg(fn, b, ins[i])
+                elif op == Oarg or op == Oargc:
+                    die("unreachable")
+                else:
+                    emiti(ins[i])
+            if b is fn.start:
+                ra = ral[0]
+                while ra:
+                    emiti(ra.i)
+                    ra = ra.link
+                ral[0] = None
+            idup(b, D.curi, NIns - D.curi)
+        if b is fn.start:
+            break
+    if D.debug['A']:
+        sys.stderr.write("\\n> After ABI lowering:\\n")
+        printfn(fn, sys.stderr)
+''',
+'backend/amd64/targ.py': '''\
+from .. import defs as D
+from ..defs import Target, BIT, NOp
+from .regs import *
+from .regs import RAX, XMM0, NGPR, NFPR, NGPS_SYSV, NGPS_WIN, NFPS, RBP, RSP, R11
+class Amd64Op:
+    __slots__ = ('nmem', 'zflag', 'lflag')
+    def __init__(self, nmem=0, zflag=0, lflag=0):
+        self.nmem = nmem
+        self.zflag = zflag
+        self.lflag = lflag
+_X = """
+add 2 1 0;sub 2 1 0;neg 1 1 0;mul 2 0 0;and 2 1 0;or 2 1 0;xor 2 1 0;sar 1 1 0;shr 1 1 0;
+shl 1 1 0;ceqw 0 1 0;cnew 0 1 0;csgew 0 1 0;csgtw 0 1 0;cslew 0 1 0;csltw 0 1 0;cugew 0 1 0;
+cugtw 0 1 0;culew 0 1 0;cultw 0 1 0;ceql 0 1 0;cnel 0 1 0;csgel 0 1 0;csgtl 0 1 0;
+cslel 0 1 0;csltl 0 1 0;cugel 0 1 0;cugtl 0 1 0;culel 0 1 0;cultl 0 1 0;ceqs 0 1 0;
+cges 0 1 0;cgts 0 1 0;cles 0 1 0;clts 0 1 0;cnes 0 1 0;cos 0 1 0;cuos 0 1 0;ceqd 0 1 0;
+cged 0 1 0;cgtd 0 1 0;cled 0 1 0;cltd 0 1 0;cned 0 1 0;cod 0 1 0;cuod 0 1 0;storeb 0 0 1;
+storeh 0 0 1;storew 0 0 1;storel 0 0 1;stores 0 0 1;stored 0 0 1;loadsb 0 0 1;loadub 0 0 1;
+loadsh 0 0 1;loaduh 0 0 1;loadsw 0 0 1;loaduw 0 0 1;load 0 0 1;extsb 0 0 1;extub 0 0 1;
+extsh 0 0 1;extuh 0 0 1;extsw 0 0 1;extuw 0 0 1;exts 0 0 1;truncd 0 0 1;stosi 0 0 1;
+stoui 0 0 1;dtosi 0 0 1;dtoui 0 0 1;swtof 0 0 1;uwtof 0 0 1;sltof 0 0 1;ultof 0 0 1;
+cast 0 0 1;copy 0 0 1;dbgloc 0 0 1;nop 0 0 1;addr 0 0 1;blit0 0 1 0;blit1 0 1 0;swap 1 0 0;
+xidiv 1 0 0;xdiv 1 0 0;xcmp 1 1 0;xtest 1 1 0;flagieq 0 0 1;flagine 0 0 1;flagisge 0 0 1;
+flagisgt 0 0 1;flagisle 0 0 1;flagislt 0 0 1;flagiuge 0 0 1;flagiugt 0 0 1;flagiule 0 0 1;
+flagiult 0 0 1;flagfeq 0 0 1;flagfge 0 0 1;flagfgt 0 0 1;flagfle 0 0 1;flagflt 0 0 1;
+flagfne 0 0 1;flagfo 0 0 1;flagfuo 0 0 1
+"""
+amd64_op = [Amd64Op() for _ in range(NOp)]
+for _e in _X.replace('\\n', '').split(';'):
+    _n, _m, _z, _l = _e.split()
+    amd64_op[getattr(D, 'O' + _n)] = Amd64Op(int(_m), int(_z), int(_l))
+del _e, _n, _m, _z, _l
+def amd64_memargs(op):
+    return amd64_op[op].nmem
+def _sysv():
+    from . import sysv
+    return sysv
+def _winabi():
+    from . import winabi
+    return winabi
+def _isel():
+    from . import isel
+    return isel
+def _emit():
+    from . import emit
+    return emit
+def _gemit():
+    from .. import emit
+    return emit
+def _elimsb(fn):
+    from ..abi import elimsb
+    elimsb(fn)
+def _common(**kw):
+    kw.setdefault('rglob', BIT(RBP) | BIT(RSP))
+    kw.setdefault('nrglob', 2)
+    return Target(
+        gpr0=RAX,
+        ngpr=NGPR,
+        fpr0=XMM0,
+        nfpr=NFPR,
+        memargs=amd64_memargs,
+        abi0=_elimsb,
+        isel=lambda fn: _isel().amd64_isel(fn),
+        cansel=1,
+        **kw)
+def _sysv_common(**kw):
+    return _common(
+        abi1=lambda fn: _sysv().amd64_sysv_abi(fn),
+        rsave=_sysv().amd64_sysv_rsave,
+        nrsave=[NGPS_SYSV, NFPS],
+        retregs=lambda r, p: _sysv().amd64_sysv_retregs(r, p),
+        argregs=lambda r, p: _sysv().amd64_sysv_argregs(r, p),
+        emitfn=lambda fn, f: _emit().amd64_sysv_emitfn(fn, f),
+        **kw)
+T_amd64_sysv = _sysv_common(
+    name="amd64_sysv",
+    emitfin=lambda f: _gemit().elf_emitfin(f),
+    asloc=".L",
+)
+T_amd64_apple = _sysv_common(
+    name="amd64_apple",
+    apple=1,
+    emitfin=lambda f: _gemit().macho_emitfin(f),
+    asloc="L",
+    assym="_",
+)
+def _win_common(**kw):
+    return _common(
+        windows=1,
+        abi1=lambda fn: _winabi().amd64_winabi_abi(fn),
+        retregs=lambda r, p: _winabi().amd64_winabi_retregs(r, p),
+        argregs=lambda r, p: _winabi().amd64_winabi_argregs(r, p),
+        emitfn=lambda fn, f: _emit().amd64_winabi_emitfn(fn, f),
+        **kw)
+T_amd64_win = _win_common(
+    name="amd64_win",
+    emitfin=lambda f: _gemit().pe_emitfin(f),
+    asloc="L",
+    rsave=_winabi().amd64_winabi_rsave,
+    nrsave=[NGPS_WIN, NFPS],
+)
+T_amd64_windows = _win_common(
+    name="amd64_windows",
+    rglob=BIT(RBP) | BIT(RSP) | BIT(R11),
+    nrglob=3,
+    rsave=_winabi().amd64_windows_rsave,
+    nrsave=[NGPS_WIN, _winabi().NFPS_WINDOWS],
+    emitfin=lambda f: _gemit().elf_emitfin(f),
+    asloc=".L",
+)
+''',
+'backend/amd64/winabi.py': '''\
+import sys
+from .. import defs as D
+from ..defs import (R, RTmp, NIns, Ins, Kw, Kl, KBASE, BIT, TMP, INT, CALL, SLOT, rtype,
+                    rval, Ostorel, Oadd, Oload, Ocopy, Ocall, Ocast, Oblit0, Oblit1, Oalloc8,
+                    Osalloc, Oarg, Opar, Oargc, Oparc, Oarge, Opare, Oargv, Ovastart, Ovaarg,
+                    Jret0, Jretc, Jretw, isret, isarg, ispar)
+from ..util import err, die, newtmp, getcon, emit, emiti, idup, icpy
+from ..parse import printfn
+from .regs import (RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11, RBX, R12, R13, R14, R15, RBP,
+                   XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7, XMM8, XMM9, XMM10, XMM11,
+                   XMM12, XMM13, XMM14, NGPS_WIN, NCLR_WIN, NFPS)
+(APS_Invalid, APS_Register, APS_InlineOnStack, APS_CopyAndPointerInRegister,
+ APS_CopyAndPointerOnStack, APS_VarargsTag, APS_EnvTag) = range(7)
+class ArgClass:
+    __slots__ = ('type', 'style', 'align', 'size', 'cls', 'ref')
+    def __init__(self):
+        self.type = None
+        self.style = APS_Invalid
+        self.align = 0
+        self.size = 0
+        self.cls = 0
+        self.ref = R
+class ExtraAlloc:
+    __slots__ = ('instr', 'link')
+    def __init__(self, instr, link):
+        self.instr = instr
+        self.link = link
+def ALIGN_DOWN(n, a):
+    return n & ~(a - 1)
+def ALIGN_UP(n, a):
+    return ALIGN_DOWN(n + a - 1, a)
+SHADOW_SPACE_SIZE = 32
+amd64_winabi_rsave = [RCX, RDX, R8, R9, R10, R11, RAX, XMM0,
+                      XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7, XMM8,
+                      XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, -1]
+amd64_winabi_rclob = [RBX, R12, R13, R14, R15, RSI, RDI, -1]
+assert (len(amd64_winabi_rsave) == NGPS_WIN + NFPS + 1
+        and len(amd64_winabi_rclob) == NCLR_WIN + 1)
+WIN_XCLOB = [XMM6, XMM7, XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14]
+amd64_windows_rsave = [RCX, RDX, R8, R9, R10, R11, RAX,
+                       XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, -1]
+NFPS_WINDOWS = 6
+def amd64_winabi_retregs(r, p):
+    assert rtype(r) == D.RCall
+    b = 0
+    num_int_returns = rval(r) & 1
+    num_float_returns = rval(r) & 2
+    if num_int_returns == 1:
+        b |= BIT(RAX)
+    else:
+        b |= BIT(XMM0)
+    if p is not None:
+        p[0] = num_int_returns
+        p[1] = num_float_returns
+    return b
+def popcnt(b):
+    return bin(b & 0xffffffffffffffff).count('1') & 0xff
+def amd64_winabi_argregs(r, p):
+    assert rtype(r) == D.RCall
+    int_passed = (rval(r) >> 4) & 15
+    float_passed = (rval(r) >> 8) & 15
+    env_param = (rval(r) >> 12) & 1
+    b = 0
+    b |= BIT(RCX) if int_passed & 1 else 0
+    b |= BIT(RDX) if int_passed & 2 else 0
+    b |= BIT(R8) if int_passed & 4 else 0
+    b |= BIT(R9) if int_passed & 8 else 0
+    b |= BIT(XMM0) if float_passed & 1 else 0
+    b |= BIT(XMM1) if float_passed & 2 else 0
+    b |= BIT(XMM2) if float_passed & 4 else 0
+    b |= BIT(XMM3) if float_passed & 8 else 0
+    b |= BIT(RAX) if env_param else 0
+    if p is not None:
+        p[0] = popcnt(int_passed)
+        p[1] = popcnt(float_passed)
+    return b
+class RegisterUsage:
+    __slots__ = ('num_regs_passed', 'regs_passed', 'rax_returned', 'xmm0_returned',
+                 'num_named_args_passed', 'is_varargs_call', 'has_env')
+    def __init__(self):
+        self.num_regs_passed = 0
+        self.regs_passed = [[False] * 4, [False] * 4]
+        self.rax_returned = False
+        self.xmm0_returned = False
+        self.num_named_args_passed = 0
+        self.is_varargs_call = False
+        self.has_env = False
+def register_usage_to_call_arg_value(u):
+    rp = u.regs_passed
+    return ((int(u.rax_returned) << 0)
+            | (int(u.xmm0_returned) << 1)
+            | (int(rp[0][0]) << 4)
+            | (int(rp[0][1]) << 5)
+            | (int(rp[0][2]) << 6)
+            | (int(rp[0][3]) << 7)
+            | (int(rp[1][0]) << 8)
+            | (int(rp[1][1]) << 9)
+            | (int(rp[1][2]) << 10)
+            | (int(rp[1][3]) << 11)
+            | (int(u.has_env) << 12))
+def assign_register_or_stack(u, arg, is_float, by_copy):
+    if u.num_regs_passed == 4:
+        arg.style = APS_CopyAndPointerOnStack if by_copy else APS_InlineOnStack
+    else:
+        u.regs_passed[is_float][u.num_regs_passed] = True
+        u.num_regs_passed += 1
+        arg.style = APS_CopyAndPointerInRegister if by_copy else APS_Register
+    u.num_named_args_passed += 1
+def type_is_by_copy(type):
+    return bool(type.isdark or type.size not in (1, 2, 4, 8))
+def classify_arguments(u, ins, begin, end, arg_classes, env):
+    for k in range(begin, end):
+        instr = ins[k]
+        arg = arg_classes[k - begin]
+        op = instr.op
+        if op == Oarg or op == Opar:
+            assign_register_or_stack(u, arg, KBASE(instr.cls), False)
+            arg.cls = instr.cls
+            arg.align = 3
+            arg.size = 8
+        elif op == Oargc or op == Oparc:
+            type = D.typ[rval(instr.arg[0])]
+            by_copy = type_is_by_copy(type)
+            assign_register_or_stack(u, arg, False, by_copy)
+            arg.cls = Kl
+            if not by_copy and type.size <= 4:
+                arg.cls = Kw
+            arg.align = 3
+            arg.size = type.size
+        elif op == Oarge:
+            env[0] = instr.arg[0]
+            arg.style = APS_EnvTag
+            u.has_env = True
+        elif op == Opare:
+            env[0] = instr.to
+            arg.style = APS_EnvTag
+            u.has_env = True
+        elif op == Oargv:
+            u.is_varargs_call = True
+            arg.style = APS_VarargsTag
+    if u.has_env and u.is_varargs_call:
+        die("can't use env with varargs")
+    if u.is_varargs_call:
+        for i in range(4):
+            if u.regs_passed[1][i]:
+                u.regs_passed[0][i] = True
+def is_integer_type(ty):
+    assert 0 <= ty < 4, "expecting Kw Kl Ks Kd"
+    return KBASE(ty) == 0
+def register_for_arg(cls, counter):
+    assert counter < 4
+    if is_integer_type(cls):
+        return TMP(amd64_winabi_rsave[counter])
+    else:
+        return TMP(XMM0 + counter)
+def lower_call(func, block, call_idx, pextra_alloc):
+    ins = block.ins
+    call_instr = ins[call_idx]
+    instr_past_args = call_idx - 1
+    while instr_past_args >= 0:
+        if not isarg(ins[instr_past_args].op):
+            break
+        instr_past_args -= 1
+    earliest_arg_instr = instr_past_args + 1
+    num_args = call_idx - earliest_arg_instr
+    arg_classes = [ArgClass() for _ in range(num_args)]
+    reg_usage = RegisterUsage()
+    ret_arg_class = ArgClass()
+    il_has_struct_return = call_instr.arg[1] != R
+    is_struct_return = False
+    if il_has_struct_return:
+        ret_type = D.typ[rval(call_instr.arg[1])]
+        is_struct_return = type_is_by_copy(ret_type)
+        if is_struct_return:
+            assign_register_or_stack(reg_usage, ret_arg_class, False, True)
+        ret_arg_class.size = ret_type.size
+    env = [R]
+    classify_arguments(reg_usage, ins, earliest_arg_instr, call_idx, arg_classes, env)
+    stack_usage = 0
+    for arg in arg_classes:
+        if arg.style == APS_InlineOnStack:
+            if arg.align > 4:
+                err("win abi cannot pass alignments > 16")
+            stack_usage += 8
+        elif arg.style == APS_CopyAndPointerOnStack:
+            stack_usage += 8
+    stack_usage = ALIGN_UP(stack_usage, 16) & 0xffffffff
+    stack_size_ref = getcon(-(stack_usage + SHADOW_SPACE_SIZE), func)
+    emit(Osalloc, Kl, R, stack_size_ref, R)
+    return_pad = None
+    if is_struct_return:
+        ret_pad_ref = newtmp("abi.ret_pad", Kl, func)
+        return_pad = ExtraAlloc(
+            Ins(Oalloc8, Kl, ret_pad_ref, getcon(ret_arg_class.size, func)), pextra_alloc[0])
+        pextra_alloc[0] = return_pad
+        reg_usage.rax_returned = True
+        emit(Ocopy, call_instr.cls, call_instr.to, TMP(RAX), R)
+    else:
+        if il_has_struct_return:
+            return_copy = ExtraAlloc(
+                Ins(Oalloc8, Kl, call_instr.to, getcon(8, func)), pextra_alloc[0])
+            pextra_alloc[0] = return_copy
+            copy = newtmp("abi.copy", Kl, func)
+            emit(Ostorel, 0, R, copy, call_instr.to)
+            emit(Ocopy, Kl, copy, TMP(RAX), R)
+            reg_usage.rax_returned = True
+        elif is_integer_type(call_instr.cls):
+            emit(Ocopy, call_instr.cls, call_instr.to, TMP(RAX), R)
+            reg_usage.rax_returned = True
+        else:
+            emit(Ocopy, call_instr.cls, call_instr.to, TMP(XMM0), R)
+            reg_usage.xmm0_returned = True
+    emit(Ocall, call_instr.cls, R, call_instr.arg[0],
+         CALL(register_usage_to_call_arg_value(reg_usage)))
+    if env[0] != R:
+        emit(Ocopy, Kl, TMP(RAX), env[0], R)
+    if reg_usage.is_varargs_call:
+        for index, floatreg, intreg in ((0, XMM0, RCX), (1, XMM1, RDX), (2, XMM2, R8),
+                                        (3, XMM3, R9)):
+            if reg_usage.regs_passed[1][index]:
+                emit(Ocast, Kl, TMP(intreg), TMP(floatreg), R)
+    reg_counter = 0
+    if is_struct_return:
+        first_reg = register_for_arg(Kl, reg_counter)
+        reg_counter += 1
+        emit(Ocopy, Kl, first_reg, return_pad.instr.to, R)
+    arg_stack_slots = newtmp("abi.args", Kl, func)
+    slot_offset = SHADOW_SPACE_SIZE
+    for k in range(earliest_arg_instr, call_idx):
+        instr = ins[k]
+        arg = arg_classes[k - earliest_arg_instr]
+        st = arg.style
+        if st == APS_Register:
+            into = register_for_arg(arg.cls, reg_counter)
+            reg_counter += 1
+            if instr.op == Oargc:
+                emit(Oload, arg.cls, into, instr.arg[1], R)
+            else:
+                emit(Ocopy, instr.cls, into, instr.arg[0], R)
+        elif st == APS_InlineOnStack:
+            slot = newtmp("abi.off", Kl, func)
+            if instr.op == Oargc:
+                smalltmp = newtmp("abi.smalltmp", arg.cls, func)
+                emit(Ostorel, 0, R, smalltmp, slot)
+                emit(Oload, arg.cls, smalltmp, instr.arg[1], R)
+            else:
+                emit(Ostorel, 0, R, instr.arg[0], slot)
+            emit(Oadd, Kl, slot, arg_stack_slots, getcon(slot_offset, func))
+            slot_offset += 8
+        elif st in (APS_CopyAndPointerInRegister, APS_CopyAndPointerOnStack):
+            copy_ref = newtmp("abi.copy", Kl, func)
+            arg_copy = ExtraAlloc(Ins(Oalloc8, Kl, copy_ref, getcon(arg.size, func)),
+                                  pextra_alloc[0])
+            pextra_alloc[0] = arg_copy
+            emit(Oblit1, 0, R, INT(arg.size), R)
+            emit(Oblit0, 0, R, instr.arg[1], copy_ref)
+            if st == APS_CopyAndPointerInRegister:
+                into = register_for_arg(arg.cls, reg_counter)
+                reg_counter += 1
+                emit(Ocopy, Kl, into, copy_ref, R)
+            else:
+                slot = newtmp("abi.off", Kl, func)
+                emit(Ostorel, 0, R, copy_ref, slot)
+                emit(Oadd, Kl, slot, arg_stack_slots, getcon(slot_offset, func))
+                slot_offset += 8
+        elif st in (APS_EnvTag, APS_VarargsTag):
+            pass
+        else:
+            die("unreachable")
+    if stack_usage:
+        emit(Osalloc, Kl, arg_stack_slots,
+             getcon(stack_usage + SHADOW_SPACE_SIZE, func), R)
+    else:
+        emit(Osalloc, Kl, R, getcon(SHADOW_SPACE_SIZE, func), R)
+    return instr_past_args
+def lower_block_return(func, block):
+    jmp_type = block.jmp.type
+    if not isret(jmp_type) or jmp_type == Jret0:
+        return
+    ret_arg = block.jmp.arg
+    block.jmp.type = Jret0
+    u = RegisterUsage()
+    if jmp_type == Jretc:
+        type = D.typ[func.retty]
+        if type_is_by_copy(type):
+            assert rtype(func.retr) == RTmp
+            emit(Ocopy, Kl, TMP(RAX), func.retr, R)
+            emit(Oblit1, 0, R, INT(type.size), R)
+            emit(Oblit0, 0, R, ret_arg, func.retr)
+        else:
+            emit(Oload, Kl, TMP(RAX), ret_arg, R)
+        u.rax_returned = True
+    else:
+        k = jmp_type - Jretw
+        if is_integer_type(k):
+            emit(Ocopy, k, TMP(RAX), ret_arg, R)
+            u.rax_returned = True
+        else:
+            emit(Ocopy, k, TMP(XMM0), ret_arg, R)
+            u.xmm0_returned = True
+    block.jmp.arg = CALL(register_usage_to_call_arg_value(u))
+def lower_vastart(func, param_reg_usage, valist):
+    assert func.vararg
+    offset = newtmp("abi.vastart", Kl, func)
+    emit(Ostorel, 0, R, offset, valist)
+    emit(Oadd, Kl, offset, TMP(RBP),
+         getcon(param_reg_usage.num_named_args_passed * 8 + 16, func))
+def lower_vaarg(func, vaarg_instr):
+    inc = newtmp("abi.vaarg.inc", Kl, func)
+    ptr = newtmp("abi.vaarg.ptr", Kl, func)
+    emit(Ostorel, 0, R, inc, vaarg_instr.arg[0])
+    emit(Oadd, Kl, inc, ptr, getcon(8, func))
+    emit(Oload, vaarg_instr.cls, vaarg_instr.to, ptr, R)
+    emit(Oload, Kl, ptr, vaarg_instr.arg[0], R)
+def lower_args_for_block(func, block, param_reg_usage, pextra_alloc):
+    D.curi = NIns
+    lower_block_return(func, block)
+    if block.nins:
+        ins = block.ins
+        k = block.nins - 1
+        while k >= 0:
+            instr = ins[k]
+            op = instr.op
+            if op == Ocall:
+                k = lower_call(func, block, k, pextra_alloc)
+            elif op == Ovastart:
+                lower_vastart(func, param_reg_usage, instr.arg[0])
+                k -= 1
+            elif op == Ovaarg:
+                lower_vaarg(func, instr)
+                k -= 1
+            elif op == Oarg or op == Oargc:
+                die("unreachable")
+            else:
+                emiti(instr)
+                k -= 1
+    if block is func.start:
+        ea = pextra_alloc[0]
+        while ea:
+            emiti(ea.instr)
+            ea = ea.link
+    idup(block, D.curi, NIns - D.curi)
+def lower_func_parameters(func):
+    start_block = func.start
+    ins = start_block.ins
+    end_of_params = 0
+    while end_of_params < start_block.nins:
+        if not ispar(ins[end_of_params].op):
+            break
+        end_of_params += 1
+    num_params = end_of_params
+    arg_classes = [ArgClass() for _ in range(num_params)]
+    arg_ret = ArgClass()
+    D.curi = NIns
+    reg_counter = 0
+    u = RegisterUsage()
+    if func.retty >= 0:
+        by_copy = type_is_by_copy(D.typ[func.retty])
+        if by_copy:
+            assign_register_or_stack(u, arg_ret, False, by_copy)
+            ret_ref = newtmp("abi.ret", Kl, func)
+            emit(Ocopy, Kl, ret_ref, TMP(RCX), R)
+            func.retr = ret_ref
+            reg_counter += 1
+    env = [R]
+    classify_arguments(u, ins, 0, end_of_params, arg_classes, env)
+    func.reg = amd64_winabi_argregs(CALL(register_usage_to_call_arg_value(u)), None)
+    slot_offset = SHADOW_SPACE_SIZE // 4 + 4
+    for k in range(end_of_params):
+        instr = ins[k]
+        arg = arg_classes[k]
+        st = arg.style
+        if st == APS_Register:
+            frm = register_for_arg(arg.cls, reg_counter)
+            reg_counter += 1
+            if instr.op == Oparc:
+                arg.ref = newtmp("abi", Kl, func)
+                emit(Ostorel, 0, R, arg.ref, instr.to)
+                emit(Ocopy, instr.cls, arg.ref, frm, R)
+                emit(Oalloc8, Kl, instr.to, getcon(arg.size, func), R)
+            else:
+                emit(Ocopy, instr.cls, instr.to, frm, R)
+        elif st == APS_InlineOnStack:
+            if instr.op == Oparc:
+                arg.ref = newtmp("abi", Kl, func)
+                emit(Ostorel, 0, R, arg.ref, instr.to)
+                emit(Ocopy, instr.cls, arg.ref, SLOT(-slot_offset), R)
+                emit(Oalloc8, Kl, instr.to, getcon(arg.size, func), R)
+            else:
+                emit(Oload, instr.cls, instr.to, SLOT(-slot_offset), R)
+            slot_offset += 2
+        elif st == APS_CopyAndPointerOnStack:
+            emit(Oload, Kl, instr.to, SLOT(-slot_offset), R)
+            slot_offset += 2
+        elif st == APS_CopyAndPointerInRegister:
+            frm = register_for_arg(Kl, reg_counter)
+            reg_counter += 1
+            emit(Ocopy, Kl, instr.to, frm, R)
+        elif st == APS_EnvTag:
+            pass
+        else:
+            die("unreachable")
+    if env[0] != R:
+        emit(Ocopy, Kl, env[0], TMP(RAX), R)
+    num_created_instrs = NIns - D.curi
+    num_other_after_instrs = start_block.nins - num_params
+    new_instrs = []
+    icpy(new_instrs, 0, D.insb, D.curi, num_created_instrs)
+    icpy(new_instrs, num_created_instrs, ins, end_of_params, num_other_after_instrs)
+    start_block.nins = num_other_after_instrs + num_created_instrs
+    start_block.ins = new_instrs
+    return u
+def amd64_winabi_abi(func):
+    param_reg_usage = lower_func_parameters(func)
+    extra_alloc = [None]
+    block = func.start.link
+    while block:
+        lower_args_for_block(func, block, param_reg_usage, extra_alloc)
+        block = block.link
+    lower_args_for_block(func, func.start, param_reg_usage, extra_alloc)
+    if D.debug['A']:
+        sys.stderr.write("\\n> After ABI lowering:\\n")
+        printfn(func, sys.stderr)
 ''',
 'backend/arm64/__init__.py': '''\
 pass
@@ -6751,16 +10494,31 @@ def isvstore(o): return Ovstoreb <= o <= Ovstored
 def unvolatile(fn, sink=None):
     b = fn.start
     while b:
-        for i in b.ins:
+        extra = None
+        for k, i in enumerate(b.ins[:b.nins]):
             if Ovloadsb <= i.op <= Ovload:
                 fn.hasvolatile = True
                 i.op = Oloadsb + i.op - Ovloadsb
                 if sink is not None and rtype(i.to) == RTmp and fn.tmp[rval(i.to)].nuse == 0:
-                    i.to = sink
-                    i.cls = Kw if i.cls in (Kw, Ks) else Kl
+                    if sink == 'use':
+                        fn.tmp[rval(i.to)].nuse = 1
+                        extra = extra or []
+                        extra.append(k)
+                    else:
+                        i.to = sink
+                        i.cls = Kw if i.cls in (Kw, Ks) else Kl
             elif Ovstoreb <= i.op <= Ovstored:
                 fn.hasvolatile = True
                 i.op = Ostoreb + i.op - Ovstoreb
+        if extra:
+            ins = []
+            for k, i in enumerate(b.ins[:b.nins]):
+                ins.append(i)
+                if extra and k == extra[0]:
+                    extra.pop(0)
+                    ins.append(Ins(Ocopy, i.cls, R, i.to))
+            b.ins = ins
+            b.nins = len(ins)
         b = b.link
 def isalloc(o): return Oalloc4 <= o <= Oalloc16
 def isext(o): return Oextsb <= o <= Oextuw
@@ -7797,6 +11555,8 @@ def schedblk(fn):
         b = b.link
 def cheap(i):
     if KBASE(i.cls) != 0:
+        return 0
+    if i.op == Omul and _ext.cse:
         return 0
     if i.op in (Oneg, Oadd, Osub, Omul, Oand, Oor, Oxor, Osar, Oshr, Oshl):
         return 1
@@ -9644,7 +13404,9 @@ from .arm64.regs import IP1 as _IP1
 from .parse import parse, printfn
 def _targets():
     from .arm64 import targ
-    return [targ.T_arm64, targ.T_arm64_apple, targ.T_arm64_win]
+    from .amd64 import targ as atarg
+    return [targ.T_arm64, targ.T_arm64_apple, targ.T_arm64_win,
+            atarg.T_amd64_sysv, atarg.T_amd64_apple, atarg.T_amd64_win, atarg.T_amd64_windows]
 class _Lazy:
     def __init__(self, name):
         self.name = name
@@ -9821,7 +13583,8 @@ class _Driver:
         simpl.simpl(fn)
         cfg.fillcfg(fn)
         ssa.filluse(fn)
-        D.unvolatile(fn, D.TMP(_IP1) if T.name.startswith('arm64') else None)
+        D.unvolatile(fn, D.TMP(_IP1) if T.name.startswith('arm64') else
+                     'use' if T.name.startswith('amd64') else None)
         T.isel(fn)
         cfg.fillcfg(fn)
         live.filllive(fn)
@@ -12000,6 +15763,9 @@ from .util import (bsinit, bszero, bsset, bsclr, bscopy, bshas, bselems, die, em
                    idup, isreg, phicls, strf)
 from .cfg import newblk
 from .parse import printfn
+from . import ext as _ext
+curphis = []
+curdefs = {}
 class RMap:
     __slots__ = ('t', 'r', 'w', 'b', 'n')
     def __init__(self):
@@ -12092,6 +15858,12 @@ def ralloctry(m, t, try_):
             return R
         regs = tmp[phicls(t, tmp)].hint_m
         regs |= m.b.t & M64
+        at = curdefs.get(t, -1)
+        for p, last in curphis:
+            if last > at and KBASE(tmp[t].cls) == 1:
+                h = hint(p)
+                if h != -1:
+                    regs |= BIT(h)
         if KBASE(tmp[t].cls) == 0:
             r0 = T.gpr0
             r1 = r0 + T.ngpr
@@ -12259,7 +16031,35 @@ def insert(r, rs, p):
         rs[i + 1] = rs[i]
         rs[i] = r
 def doblk(b, cur):
-    global stmov
+    global stmov, curphis, curdefs
+    curphis = []
+    curdefs = {}
+    if _ext.isel and b.phi:
+        last = {}
+        for n, x in enumerate(b.ins[:b.nins]):
+            if rtype(x.to) == RTmp:
+                curdefs[rval(x.to)] = n
+            for a in x.arg[:2]:
+                if rtype(a) == RTmp:
+                    last[rval(a)] = n
+                elif rtype(a) == RMem:
+                    for y in (mem[rval(a)].base, mem[rval(a)].index):
+                        if rtype(y) == RTmp:
+                            last[rval(y)] = n
+        shared = {}
+        p = b.phi
+        while p:
+            if rtype(p.to) == RTmp:
+                k = phicls(rval(p.to), tmp)
+                shared[k] = shared.get(k, 0) + 1
+            p = p.link
+        p = b.phi
+        while p:
+            if rtype(p.to) == RTmp and KBASE(p.cls) == 1 and shared[phicls(rval(p.to), tmp)] == 1:
+                t = rval(p.to)
+                live = bshas(b.out, t) or (rtype(b.jmp.arg) == RTmp and rval(b.jmp.arg) == t)
+                curphis.append((t, b.nins if live else last.get(t, -1)))
+            p = p.link
     T = D.T
     insb = D.insb
     ra = [None] * 4
@@ -17069,8 +20869,19 @@ def _image_put(key, blob):
     _memory_cache[key + '.img'] = blob
 _APPLE = sys.platform == 'darwin'
 _WINDOWS = sys.platform == 'win32'
-TARGET = 'arm64_apple' if _APPLE else 'arm64_win' if _WINDOWS else 'arm64'
-_FRONTEND = {'arm64': 'aarch64', 'arm64_apple': 'aarch64-apple', 'arm64_win': 'aarch64-windows'}
+_AMD64 = _jit._X86
+if _AMD64:
+    TARGET = 'amd64_windows' if _WINDOWS else 'amd64_sysv'
+else:
+    TARGET = 'arm64_apple' if _APPLE else 'arm64_win' if _WINDOWS else 'arm64'
+_FRONTEND = {'arm64': 'aarch64', 'arm64_apple': 'aarch64-apple', 'arm64_win': 'aarch64-windows',
+             'amd64_sysv': 'x86_64-sysv', 'amd64_windows': 'x86_64-windows'}
+_VASTRUCT = {'arm64': 'aapcs', 'arm64_apple': 'slots', 'arm64_win': 'slots',
+             'amd64_sysv': 'sysv', 'amd64_windows': 'win64'}
+_X86_BUILTINS = frozenset(('fsqrt', 'fabs'))
+_X86_BITOPS = frozenset(('bclz', 'bctz', 'bswap', 'bswap16'))
+def _is_amd64(target=None):
+    return (target or TARGET).startswith('amd64')
 _PYODIDE = sys.platform == 'emscripten'
 _VERSION = b'cimo-2'
 MIDDLE = os.environ.get('CIMO_MIDDLE', '1') != '0'
@@ -17080,6 +20891,10 @@ _wrapv = contextvars.ContextVar('cimo_wrapv', default=None)
 WRAPV = os.environ.get('CIMO_WRAPV', '0') not in ('', '0')
 _compile_lock = threading.RLock()
 INLINE = int(os.environ.get('CIMO_INLINE', '40'))
+def _backend_ext(target=None):
+    arm = not _is_amd64(target)
+    return dict(fma=arm, ldp=arm, layout=arm, math=True, trap=True, volatile=True, vla=True,
+                cse=True, isel=arm, nowrap=True)
 def _qbe(ssa, params=None, middle=None, stkchk=None, target=None):
     from .backend import defs as D
     from .backend.main import _Driver, _targets
@@ -17090,8 +20905,8 @@ def _qbe(ssa, params=None, middle=None, stkchk=None, target=None):
     try:
         with _compile_lock, _middle.options(enabled=MIDDLE if middle is None else middle,
                              params=params or {}), \\
-                _ext.options(fma=True, ldp=True, layout=True, math=True, trap=True, volatile=True, vla=True, cse=True, isel=True, nowrap=True, bigcopy=256,
-                             inline=INLINE, stkchk=stkchk), _Recursion():
+                _ext.options(**_backend_ext(target), bigcopy=256, inline=INLINE,
+                             stkchk=stkchk), _Recursion():
             D.T = next(t for t in _targets() if t.name == (target or TARGET))
             drv = _Driver(out, 0)
             parse(ssa.encode('latin-1'), '<cimo>', drv.dbgfile, drv.data, drv.func)
@@ -17128,8 +20943,13 @@ def _frontend(pp, filename, target=None, **kw):
     kw.setdefault('vlafree', True)
     kw.setdefault('bitops', True)
     kw.setdefault('bigcopy', 256)
-    kw.setdefault('vastruct', 'slots' if (target or TARGET) in ('arm64_apple', 'arm64_win')
-                  else 'aapcs')
+    kw.setdefault('vastruct', _VASTRUCT[target or TARGET])
+    if _is_amd64(target):
+        if kw.get('builtins') is True:
+            kw['builtins'] = _X86_BUILTINS
+        if kw.get('bitops') is True:
+            kw['bitops'] = _X86_BITOPS
+        kw['fma'] = False
     with _compile_lock:
         _fq.paraminfo = {}
         try:
@@ -17173,15 +20993,23 @@ def _host_include_dirs():
         dirs = [os.path.join(sdk, 'usr', 'include')]
     else:
         import sysconfig
-        multiarch = sysconfig.get_config_var('MULTIARCH') or 'aarch64-linux-gnu'
+        multiarch = sysconfig.get_config_var('MULTIARCH') or (
+            'x86_64-linux-gnu' if _AMD64 else 'aarch64-linux-gnu')
         dirs = ['/usr/local/include', '/usr/include/' + multiarch, '/usr/include']
     dirs = [d for d in dirs if os.path.isdir(d)]
     if not dirs:
         raise CompileError('host_headers=True: no system header directory found')
     return dirs
 def _check_machine():
-    if platform.machine().lower() not in ('arm64', 'aarch64'):
-        raise CompileError('cimo generates arm64 code only; this machine is %s'
+    if not _jit._64BIT:
+        raise CompileError('cimo needs a 64-bit Python; this one is 32-bit')
+    if _AMD64:
+        if _APPLE:
+            raise CompileError('cimo does not support Intel Macs (x86-64 macOS); it runs on '
+                               'Apple silicon, and on x86-64 Linux and Windows')
+        return
+    if not _jit._ARM64:
+        raise CompileError('cimo generates arm64 and x86-64 code only; this machine is %s'
                            % platform.machine())
 def _preprocess(src, filename='<string>', include_dirs=(), host_headers=False, defines=(),
                 target=None):
@@ -17207,6 +21035,8 @@ def _ir(pp, filename='<string>', host_headers=False):
     except FrontendError as e:
         raise CompileError(_hint(str(e), host_headers)) from None
 def _contract():
+    if _is_amd64():
+        return False
     v = _fma.get()
     return FMA if v is None else v
 def _wraps():
@@ -17306,8 +21136,7 @@ class Module:
         names = [l.split(' ')[0] for l in sigs.splitlines() if l and not l.startswith('#')]
         libsyms = {}
         try:
-            obj = _asm.assemble(text + _exe.glue(names, _APPLE, _WINDOWS),
-                                'macho' if _APPLE else 'elf')
+            obj = _link.assemble(text + _exe.glue(names, _APPLE, _WINDOWS, TARGET), TARGET)
             obj, resolve = _link.link(obj, libs=link, libsyms=libsyms)
             image = _jit.Image(obj, resolve, snapshot=snapshot)
         except (_asm.AssemblerError, _jit.LoadError, _link.LinkError) as e:
@@ -17430,6 +21259,10 @@ import threading
 from . import loader as _jit
 __all__ = ['KernelError', 'glue', 'stack_checked', 'State']
 CTX_SIZE = 8192
+_WIN_X64 = sys.platform == 'win32' and _jit._X86
+WFRAMES, WFRAMESZ = 8192, 248
+if _WIN_X64:
+    CTX_SIZE = 12288
 ERR, MSG, FILE, LINE, FUNC, PC, DEPTH, LIMIT, TID = range(0, 72, 8)
 FRAMES, FRAMESZ, MAXDEPTH = 128, 176, 16
 CTX_HEAP = 3072
@@ -17496,7 +21329,9 @@ def _find(apple, s, windows=False):
 _SAVE = [('x19', 'x20', 0), ('x21', 'x22', 16), ('x23', 'x24', 32), ('x25', 'x26', 48),
          ('x27', 'x28', 64)]
 _DSAVE = [('d8', 'd9', 104), ('d10', 'd11', 120), ('d12', 'd13', 136), ('d14', 'd15', 152)]
-def glue(names, apple=False, windows=False):
+def glue(names, apple=False, windows=False, target=None):
+    if target and target.startswith('amd64'):
+        return _glue_amd64(names, windows)
     p = '_' if apple else ''
     L = 'L' if apple else '.L'
     tab = p + '__cimo_ctxtab'
@@ -17564,6 +21399,104 @@ def glue(names, apple=False, windows=False):
                     p + name + '@PAGEOFF' if apple else '#:lo12:' + name, p))
     o.append('\\t.data\\n\\t.p2align\\t3\\n\\t.globl\\t%s\\n%s:\\n\\t.quad\\t0\\n' % (tab, tab))
     return ''.join(o)
+_RDSSP_R10 = '\\t.byte\\t0xf3, 0x49, 0x0f, 0x1e, 0xca\\n'
+_RDSSP_RCX = '\\t.byte\\t0xf3, 0x48, 0x0f, 0x1e, 0xc9\\n'
+_INCSSP_RCX = '\\t.byte\\t0xf3, 0x48, 0x0f, 0xae, 0xe9\\n'
+def _glue_amd64(names, windows):
+    key = '\\tmovq\\t%gs:0x30, %r10\\n' if windows else '\\tmovq\\t%fs:0, %r10\\n'
+    if windows:
+        frames, framesz = WFRAMES, WFRAMESZ
+        regs = [('rbx', 0), ('rbp', 8), ('r12', 16), ('r13', 24), ('r14', 32), ('r15', 40),
+                ('rdi', 48), ('rsi', 56)]
+        xregs = [('xmm%d' % (6 + k), 80 + 16 * k) for k in range(10)]
+    else:
+        frames, framesz = FRAMES, FRAMESZ
+        regs = [('rbx', 0), ('rbp', 8), ('r12', 16), ('r13', 24), ('r14', 32), ('r15', 40)]
+        xregs = []
+    RET, RSP = 64, 72
+    SSP = 240 if windows else 80
+    def fn(name):
+        return '\\t.globl\\t%s\\n\\t.p2align\\t4\\n%s:\\n' % (name, name)
+    o = ['\\t.text\\n']
+    o.append(fn('__cimo_find') + '\\tpushq\\t%rax\\n\\tpushq\\t%rcx\\n\\tpushq\\t%rdx\\n' + key +
+             '\\tmovq\\t__cimo_ctxtab(%%rip), %%r11\\n'
+             '\\ttestq\\t%%r11, %%r11\\n\\tjz\\t.Lcimo_none\\n'
+             '\\tmovabsq\\t$%d, %%rax\\n\\timulq\\t%%r10, %%rax\\n'
+             '\\tmovq\\t8(%%r11), %%rcx\\n\\tshrq\\t%%cl, %%rax\\n\\tshlq\\t$4, %%rax\\n'
+             '\\tleaq\\t16(%%r11,%%rax), %%rax\\n'
+             '\\tmovq\\t(%%r11), %%rdx\\n\\tshlq\\t$4, %%rdx\\n\\tleaq\\t16(%%r11,%%rdx), %%rdx\\n'
+             '.Lcimo_probe:\\n\\tmovq\\t(%%rax), %%rcx\\n\\tcmpq\\t%%r10, %%rcx\\n\\tje\\t.Lcimo_found\\n'
+             '\\ttestq\\t%%rcx, %%rcx\\n\\tjz\\t.Lcimo_none\\n\\taddq\\t$16, %%rax\\n'
+             '\\tcmpq\\t%%rdx, %%rax\\n\\tjne\\t.Lcimo_probe\\n\\tleaq\\t16(%%r11), %%rax\\n'
+             '\\tjmp\\t.Lcimo_probe\\n'
+             '.Lcimo_found:\\n\\tmovq\\t8(%%rax), %%r11\\n\\tjmp\\t.Lcimo_done\\n'
+             '.Lcimo_none:\\n\\txorl\\t%%r11d, %%r11d\\n'
+             '.Lcimo_done:\\n\\tpopq\\t%%rdx\\n\\tpopq\\t%%rcx\\n\\tpopq\\t%%rax\\n\\tret\\n'
+             % (_HASH_K - (1 << 64) if _HASH_K >> 63 else _HASH_K))
+    o.append(fn('__cimo_enter') +
+             '\\tpushq\\t%r11\\n\\tcallq\\t__cimo_find\\n\\ttestq\\t%r11, %r11\\n\\tjnz\\t.Lcimo_ctx\\n'
+             '\\tpopq\\t%r11\\n\\tjmp\\t*%r11\\n'
+             '.Lcimo_ctx:\\n')
+    o.append('\\tmovq\\t%d(%%r11), %%r10\\n\\tcmpq\\t$%d, %%r10\\n\\tjae\\t.Lcimo_deep\\n'
+             '\\taddq\\t$1, %d(%%r11)\\n\\timulq\\t$%d, %%r10, %%r10\\n\\tleaq\\t%d(%%r11,%%r10), %%r10\\n'
+             % (DEPTH, MAXDEPTH, DEPTH, framesz, frames))
+    o += ['\\tmovq\\t%%%s, %d(%%r10)\\n' % r for r in regs]
+    o += ['\\tmovdqu\\t%%%s, %d(%%r10)\\n' % r for r in xregs]
+    o.append('\\tmovq\\t%%r11, %%r13\\n\\tmovq\\t%%r10, %%r12\\n'
+             '\\tpopq\\t%%r11\\n\\tpopq\\t%%r10\\n'
+             '\\tmovq\\t%%r10, %d(%%r12)\\n\\tmovq\\t%%rsp, %d(%%r12)\\n'
+             '\\txorl\\t%%r10d, %%r10d\\n%s\\tmovq\\t%%r10, %d(%%r12)\\n'
+             '\\tcallq\\t*%%r11\\n'
+             '\\tsubq\\t$1, %d(%%r13)\\n\\tmovq\\t%d(%%r12), %%r10\\n'
+             '\\tmovq\\t24(%%r12), %%r13\\n\\tmovq\\t16(%%r12), %%r12\\n\\tpushq\\t%%r10\\n\\tret\\n'
+             % (RET, RSP, _RDSSP_R10, SSP, DEPTH, RET))
+    o.append('.Lcimo_deep:\\n\\tmovq\\t$%d, (%%r11)\\n\\taddq\\t$8, %%rsp\\n\\tjmp\\t.Lcimo_ret0\\n'
+             % E_DEPTH)
+    o.append('.Lcimo_unwind:\\n\\tmovq\\t%d(%%r11), %%r10\\n\\ttestq\\t%%r10, %%r10\\n'
+             '\\tjz\\t.Lcimo_noframe\\n\\tsubq\\t$1, %%r10\\n\\tmovq\\t%%r10, %d(%%r11)\\n'
+             '\\timulq\\t$%d, %%r10, %%r10\\n\\tleaq\\t%d(%%r11,%%r10), %%r10\\n'
+             % (DEPTH, DEPTH, framesz, frames))
+    o += ['\\tmovq\\t%d(%%r10), %%%s\\n' % (off, r) for r, off in regs]
+    o += ['\\tmovdqu\\t%d(%%r10), %%%s\\n' % (off, r) for r, off in xregs]
+    o.append('\\tmovq\\t%d(%%r10), %%rax\\n\\ttestq\\t%%rax, %%rax\\n\\tjz\\t.Lcimo_nossp\\n'
+             % SSP + _RDSSP_RCX + '\\tsubq\\t%rcx, %rax\\n\\tshrq\\t$3, %rax\\n'
+             '\\tjz\\t.Lcimo_nossp\\n.Lcimo_ssp:\\n\\tmovl\\t$255, %ecx\\n\\tcmpq\\t%rcx, %rax\\n'
+             '\\tcmovbq\\t%rax, %rcx\\n' + _INCSSP_RCX + '\\tsubq\\t%rcx, %rax\\n\\tjnz\\t.Lcimo_ssp\\n'
+             '.Lcimo_nossp:\\n')
+    o.append('\\tmovq\\t%d(%%r10), %%rsp\\n\\tmovq\\t%d(%%r10), %%r10\\n\\tpushq\\t%%r10\\n' % (RSP, RET))
+    o.append('.Lcimo_ret0:\\n\\txorl\\t%eax, %eax\\n\\txorl\\t%edx, %edx\\n\\tpxor\\t%xmm0, %xmm0\\n'
+             '\\tpxor\\t%xmm1, %xmm1\\n\\tret\\n.Lcimo_noframe:\\n\\tud2\\n')
+    a = ['rcx', 'rdx', 'r8', 'r9'] if windows else ['rdi', 'rsi', 'rdx', 'rcx', 'r8']
+    o.append(fn('__cimo_fail') + '\\tcallq\\t__cimo_find\\n\\ttestq\\t%r11, %r11\\n'
+             '\\tjz\\t.Lcimo_noframe\\n')
+    o.append('\\tmovslq\\t%%%s, %%r10\\n\\tmovq\\t%%r10, (%%r11)\\n' % _w32(a[0]))
+    o.append('\\tmovq\\t%%%s, %d(%%r11)\\n\\tmovq\\t%%%s, %d(%%r11)\\n' % (a[1], MSG, a[2], FILE))
+    o.append('\\tmovslq\\t%%%s, %%r10\\n\\tmovq\\t%%r10, %d(%%r11)\\n' % (_w32(a[3]), LINE))
+    o.append('\\tmovq\\t40(%%rsp), %%r10\\n\\tmovq\\t%%r10, %d(%%r11)\\n' % FUNC if windows else
+             '\\tmovq\\t%%%s, %d(%%r11)\\n' % (a[4], FUNC))
+    o.append('\\tmovq\\t8(%%rbp), %%r10\\n\\tmovq\\t%%r10, %d(%%r11)\\n\\tjmp\\t.Lcimo_unwind\\n' % PC)
+    o.append(fn('__builtin_trap') + fn('__cimo_trap'))
+    o.append('\\tcallq\\t__cimo_find\\n\\ttestq\\t%%r11, %%r11\\n\\tjz\\t.Lcimo_noframe\\n'
+             '\\tmovq\\t$%d, (%%r11)\\n\\tmovq\\t(%%rsp), %%r10\\n\\tmovq\\t%%r10, %d(%%r11)\\n'
+             '\\tjmp\\t.Lcimo_unwind\\n' % (E_TRAP, PC))
+    o.append(fn('__cimo_stkchk') +
+             '\\tcallq\\t__cimo_find\\n\\ttestq\\t%%r11, %%r11\\n\\tjz\\t.Lcimo_stkok\\n'
+             '\\tcmpq\\t%d(%%r11), %%rsp\\n\\tjb\\t.Lcimo_stkovf\\n.Lcimo_stkok:\\n\\tret\\n'
+             '.Lcimo_stkovf:\\n\\tmovq\\t$%d, (%%r11)\\n\\tmovq\\t(%%rsp), %%r10\\n'
+             '\\tmovq\\t%%r10, %d(%%r11)\\n\\tjmp\\t.Lcimo_unwind\\n' % (LIMIT, E_STACK, PC))
+    o.append(fn('__cimo_ctx') + '\\tcallq\\t__cimo_find\\n\\tmovq\\t%r11, %rax\\n\\tret\\n')
+    o.append(fn('__cimo_tid') + key + '\\tmovq\\t%r10, %rax\\n\\tret\\n')
+    o.append(fn('__cimo_cas') + ('\\tmovq\\t%rdx, %rax\\n\\tlock cmpxchgq\\t%r8, (%rcx)\\n\\tret\\n'
+                                 if windows else
+                                 '\\tmovq\\t%rsi, %rax\\n\\tlock cmpxchgq\\t%rdx, (%rdi)\\n\\tret\\n'))
+    o.append(fn('__cimo_barrier') + '\\tmfence\\n\\tret\\n')
+    for name in names:
+        o.append(fn('__cimo_entry_' + name))
+        o.append('\\tleaq\\t%s(%%rip), %%r11\\n\\tjmp\\t__cimo_enter\\n' % name)
+    o.append('\\t.data\\n\\t.p2align\\t3\\n\\t.globl\\t__cimo_ctxtab\\n__cimo_ctxtab:\\n\\t.quad\\t0\\n')
+    return ''.join(o)
+def _w32(r):
+    return r + 'd' if r[1].isdigit() else 'e' + r[1:]
 def stack_checked(ssa):
     import re
     funcs = {}
@@ -21507,6 +25440,10 @@ class _Recursion(object):
         sys.setrecursionlimit(self.old)
 def _tostr(s):
     return s.encode('latin-1').decode('utf-8', 'surrogateescape')
+def _opset(v):
+    if isinstance(v, (bool, int)) or v is None:
+        return bool(v)
+    return frozenset(v)
 def compile(text, filename='<stdin>', target=DEFAULT_TARGET, pponly=False, fma=False,
             builtins=False, diagnostics=False, prune=False, volatile=False, vlafree=False, vastruct=None, bitops=False, bigcopy=None, nowrap=False):
     if isinstance(text, str):
@@ -21516,11 +25453,11 @@ def compile(text, filename='<stdin>', target=DEFAULT_TARGET, pponly=False, fma=F
     try:
         _qbe.contract = bool(fma)
         _qbe.nowrap = bool(nowrap)
-        _qbe.builtins = bool(builtins)
+        _qbe.builtins = _opset(builtins)
         _qbe.volatile = bool(volatile)
         _qbe.vlafree = bool(vlafree)
         _qbe.vastruct = vastruct
-        _qbe.bitops = bool(bitops)
+        _qbe.bitops = _opset(bitops)
         _qbe.bigcopy = bigcopy
         U.diagnostics = bool(diagnostics)
         if diagnostics:
@@ -22788,6 +26725,101 @@ def _tempalloc(f, size, align):
     v = funcinst(f, IALLOC16 if align > 8 else IALLOC8, ptrclass, mkintconst(size), None)
     f.end = end
     return v
+def _sysv_unaligned(ty, off):
+    if ty.kind == TYPEARRAY:
+        n = ty.size // ty.base.size if ty.base.size else 0
+        return any(_sysv_unaligned(ty.base, off + k * ty.base.size) for k in range(min(n, 2)))
+    if ty.kind in (TYPESTRUCT, TYPEUNION):
+        m = ty.members
+        while m:
+            if not (m.bits[0] or m.bits[1]) and _sysv_unaligned(m.type, off + m.offset):
+                return True
+            m = m.next
+        return False
+    return bool(ty.size) and off % min(ty.align, 8) != 0
+def _sysv_classes(t):
+    from ..backend import defs as BD
+    from ..backend.amd64 import sysv
+    q = BD.Typ()
+    q.size = t.size
+    q.align = t.align.bit_length() - 1
+    q.isdark = int(_sysv_unaligned(t, 0))
+    def walk(ty, off):
+        if ty.kind == TYPEARRAY:
+            if ty.base.size:
+                for k in range(ty.size // ty.base.size):
+                    walk(ty.base, off + k * ty.base.size)
+        elif ty.kind in (TYPESTRUCT, TYPEUNION):
+            m = ty.members
+            while m:
+                if m.bits[0] or m.bits[1]:
+                    leaf(off + m.offset, BD.Fw)
+                else:
+                    walk(m.type, off + m.offset)
+                m = m.next
+        elif ty.size:
+            leaf(off, BD.Fs if ty.prop & PROPFLOAT else BD.Fl)
+    def leaf(off, kind):
+        if off < 16:
+            q.fields.append([BD.Field(BD.FPad, off), BD.Field(kind, 1), BD.Field(BD.FEnd)])
+            q.nunion += 1
+    if t.size <= 16:
+        walk(t, 0)
+    a = sysv.AClass()
+    sysv.typclass(a, q)
+    if a.inmem:
+        return None
+    return [{BD.Kl: 'i', BD.Kd: 's', BD.Kx: 'n'}[c] for c in a.cls[:a.size // 8]]
+def _vaargsysv(f, t, ap, add, load, align16):
+    size, align = t.size, t.align
+    n8 = (size + 7) & -8
+    cls = _sysv_classes(t)
+    if cls is None:
+        p = load(ILOADL, 'l', add(ap, 8))
+        if align > 8:
+            p = align16(p)
+        funcinst(f, ISTOREL, 0, add(p, n8), add(ap, 8))
+        return p
+    ni, ns = cls.count('i'), cls.count('s')
+    slot = _tempalloc(f, 8, 8)
+    buf = _tempalloc(f, 8 * len(cls), max(align, 8))
+    breg, bstk, bjoin = mkblock("vaarg_reg"), mkblock("vaarg_stack"), mkblock("vaarg_join")
+    gp = load(ILOADW, 'w', ap)
+    fpp = add(ap, 4)
+    fp = load(ILOADW, 'w', fpp)
+    ok = None
+    if ni:
+        ok = funcinst(f, ICULEW, 'w', gp, mkintconst(48 - 8 * ni))
+    if ns:
+        c = funcinst(f, ICULEW, 'w', fp, mkintconst(176 - 16 * ns))
+        ok = c if ok is None else funcinst(f, IAND, 'w', ok, c)
+    funcjnz(f, ok, None, breg, bstk)
+    funclabel(f, breg)
+    save = load(ILOADL, 'l', add(ap, 16))
+    for k, c in enumerate(cls):
+        if c == 'n':
+            continue
+        if c == 'i':
+            src = funcinst(f, IADD, ptrclass, save, funcinst(f, IEXTUW, 'l', gp, None))
+            gp = funcinst(f, IADD, 'w', gp, mkintconst(8))
+        else:
+            src = funcinst(f, IADD, ptrclass, save, funcinst(f, IEXTUW, 'l', fp, None))
+            fp = funcinst(f, IADD, 'w', fp, mkintconst(16))
+        funcinst(f, ISTOREL, 0, load(ILOADL, 'l', src), add(buf, 8 * k))
+    if ni:
+        funcinst(f, ISTOREW, 0, gp, ap)
+    if ns:
+        funcinst(f, ISTOREW, 0, fp, fpp)
+    funcinst(f, ISTOREL, 0, buf, slot)
+    funcjmp(f, bjoin)
+    funclabel(f, bstk)
+    p = load(ILOADL, 'l', add(ap, 8))
+    if align > 8:
+        p = align16(p)
+    funcinst(f, ISTOREL, 0, add(p, n8), add(ap, 8))
+    funcinst(f, ISTOREL, 0, p, slot)
+    funclabel(f, bjoin)
+    return load(ILOADL, 'l', slot)
 def funcvaargstruct(f, t, ap):
     size, align = t.size, t.align
     def add(p, n):
@@ -22796,6 +26828,12 @@ def funcvaargstruct(f, t, ap):
         return funcinst(f, op, cls, p, None)
     def align16(p):
         return funcinst(f, IAND, ptrclass, add(p, 15), mkintconst(-16))
+    if vastruct == 'sysv':
+        return _vaargsysv(f, t, ap, add, load, align16)
+    if vastruct == 'win64':
+        p = load(ILOADL, 'l', ap)
+        funcinst(f, ISTOREL, 0, add(p, 8), ap)
+        return p if size in (1, 2, 4, 8) else load(ILOADL, 'l', p)
     hfa = _hfa(t) if TG.targ.name != 'aarch64-windows' else None
     if size > 16 and not hfa:
         if vastruct == 'slots':
@@ -23134,6 +27172,8 @@ def funcbuiltin(f, e):
         return None
     d = b.base.decl
     bit = bitops and not d.asmname and _BITBUILTINS.get(d.name)
+    if bit and bitops is not True and instname[bit[0]] not in bitops:
+        bit = None
     if bit and d.kind == DECLFUNC and d.linkage == LINKEXTERN and d.type.nparam == 1 \\
             and e.args and not e.args.next and e.args.type.prop & PROPINT:
         op, cls = bit
@@ -23147,6 +27187,9 @@ def funcbuiltin(f, e):
         return None
     if spec is None:
         return _libcall(f, e, name, d)
+    if builtins is not True and (spec[0] == IFMA and 'fma' not in builtins
+                                 or spec[0] != IFMA and instname[spec[0]] not in builtins):
+        return None
     op, nargs, size = spec
     t = TY.typedouble if size == 8 else TY.typefloat
     ft = d.type
@@ -23523,6 +27566,10 @@ def emittype(t):
         m = m.next
     w("type ")
     emitname(t.value)
+    if TG.targ.name == 'x86_64-sysv' and _sysv_unaligned(t, 0):
+        w(" = align %d { %d }\\n" % (t.align, t.size))
+        t.value.qalign = t.align
+        return
     if t is TG.targ.typevalist:
         w(" = align %d { %d }\\n" % (t.align, t.size))
         t.value.qalign = t.align
@@ -23578,13 +27625,19 @@ def emittype(t):
     if not out:
         out.append("b 0, ")
     end = qoff if t.kind == TYPESTRUCT else usize
-    if t.size > ((end + qalign - 1) & -qalign):
+    qround = max(qalign, t.align) if TG.targ.name.startswith('x86_64') else qalign
+    if t.size > ((end + qround - 1) & -qround):
         out.append("b %d, " % (t.size - end) if t.kind == TYPESTRUCT
                    else "{ b %d } " % t.size)
     align = t.align
     if t.fieldalign is not None and TG.targ.name == 'aarch64':
         align = t.fieldalign
     t.value.qalign = max(qalign, align)
+    qa = t.value.qalign
+    if TG.targ.name == 'x86_64-windows' and t.size != ((max(end, t.size) + qa - 1) & -qa):
+        t.value.qalign = t.align
+        w(" = align %d { %d }\\n" % (t.align, t.size))
+        return
     w(" = align %d { " % align if align > qalign else " = { ")
     w("".join(out))
     w("}\\n")
@@ -24575,6 +28628,9 @@ def _alltargs():
         Target("aarch64-windows",
                Type(kind=TYPEPOINTER, prop=PROPSCALAR, align=8, size=8, base=TY.typechar),
                TY.typeushort, 1, 8),
+        Target("x86_64-windows",
+               Type(kind=TYPEPOINTER, prop=PROPSCALAR, align=8, size=8, base=TY.typechar),
+               TY.typeushort, 1, 8),
     ]
 def targinit(name):
     global targ
@@ -25530,7 +29586,7 @@ typedef unsigned long size_t;
 #endif
 #ifndef __CIMO_WCHAR_T
 #define __CIMO_WCHAR_T
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__x86_64__) && !defined(_WIN32)
 typedef int wchar_t;
 #elif defined(_WIN32)
 typedef unsigned short wchar_t;
@@ -25661,6 +29717,11 @@ typedef unsigned long uintmax_t;
 #define WCHAR_MAX 2147483647
 #define WINT_MIN (-2147483647 - 1)
 #define WINT_MAX 2147483647
+#elif defined(__x86_64__)
+#define WCHAR_MIN (-2147483647 - 1)
+#define WCHAR_MAX 2147483647
+#define WINT_MIN 0U
+#define WINT_MAX 4294967295U
 #else
 #define WCHAR_MIN 0U
 #define WCHAR_MAX 4294967295U
@@ -25708,7 +29769,7 @@ typedef unsigned long size_t;
 #endif
 #ifndef __CIMO_WCHAR_T
 #define __CIMO_WCHAR_T
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__x86_64__) && !defined(_WIN32)
 typedef int wchar_t;
 #elif defined(_WIN32)
 typedef unsigned short wchar_t;
@@ -25817,7 +29878,7 @@ RUNTIME_INCLUDE = os.path.join(RUNTIME_DIR, 'internal')
 _APPLE = sys.platform == 'darwin'
 _WINDOWS = sys.platform == 'win32'
 _COMPILER = ('preprocessor.py', 'frontend', 'middle', 'backend', 'include', 'wasm', 'driver.py',
-             'linker.py', 'execution.py', 'assembler.py', 'loader.py')
+             'linker.py', 'execution.py', 'assembler.py', 'assembler_amd64.py', 'loader.py')
 SYMBOLS = os.path.join(RUNTIME_DIR, 'symbols.txt')
 last_build = None
 progress = None
@@ -25837,7 +29898,12 @@ def _compiler_paths():
         paths += [p] if c.endswith('.py') else _res.files(p, ('.py', '.h'))
     return paths
 _compiler_key = None
-_TARGETS = ('arm64', 'arm64_apple', 'arm64_win')
+_TARGETS = ('arm64', 'arm64_apple', 'arm64_win', 'amd64_sysv', 'amd64_windows')
+def assemble(text, target):
+    if target.startswith('amd64'):
+        from . import assembler_amd64
+        return assembler_amd64.assemble(text, 'elf')
+    return _asm.assemble(text, 'macho' if target == 'arm64_apple' else 'elf')
 def _onefile_keys():
     p = _res.path('onefile-keys.json')
     return json.loads(_res.read_text(p)) if _res.isfile(p) else None
@@ -25887,8 +29953,9 @@ def compile_runtime_source(path, target):
     from . import execution as _exe
     from .preprocessor import preprocess
     src = _res.read_text(path)
-    pp = preprocess(src, path, include_dirs=(RUNTIME_INCLUDE,),
-                    defines={'__FP_FAST_FMA': '1', '__FP_FAST_FMAF': '1'}, target=target,
+    fast = ({'__CIMO_SOFT_MATH': '1'} if target.startswith('amd64')
+            else {'__FP_FAST_FMA': '1', '__FP_FAST_FMAF': '1'})
+    pp = preprocess(src, path, include_dirs=(RUNTIME_INCLUDE,), defines=fast, target=target,
                     warn=lambda *a, **k: None)
     ssa, params = driver._frontend(pp, path, target, fma=False, builtins=True, prune=True)
     return driver._qbe(ssa, params, stkchk=_exe.stack_checked(ssa), target=target)
@@ -25908,8 +29975,7 @@ def symbol_table(target=None):
              '# source defines, so a link compiles only the members it needs. Checked by',
              '# tests/test_runtime.py.']
     for rel in runtime_sources():
-        obj = _asm.assemble(compile_runtime_source(os.path.join(RUNTIME_DIR, rel), target),
-                            syntax)
+        obj = assemble(compile_runtime_source(os.path.join(RUNTIME_DIR, rel), target), target)
         defs = sorted(d[len(pre):] if d.startswith(pre) else d for d in _globals(obj)[0])
         lines.append('%s: %s' % (rel.replace(os.sep, '/'), ' '.join(defs)))
     return '\\n'.join(lines) + '\\n'
@@ -25962,7 +30028,7 @@ class Runtime:
         with self._lock:
             o = self._objs.get(member)
             if o is None:
-                obj = _asm.assemble(self.text(member), self.syntax)
+                obj = assemble(self.text(member), self.target)
                 defs, undefs = _globals(obj)
                 pre = '_' if self.syntax == 'macho' else ''
                 if sorted(d[len(pre):] if d.startswith(pre) else d for d in defs) != \\
@@ -26201,6 +30267,7 @@ import os
 import platform
 import struct
 import sys
+import sysconfig
 import threading
 __all__ = ['Image', 'LoadError', 'flush_icache']
 PROT_READ, PROT_WRITE, PROT_EXEC = 1, 2, 4
@@ -26211,10 +30278,15 @@ MAP_ANON = 0x1000 if _MAC else 0x20
 MAP_JIT = 0x800
 MAP_FIXED = 0x10
 PAGE = _mmap.PAGESIZE
-_ARM64 = platform.machine().lower() in ('arm64', 'aarch64')
+_MACHINE = (sysconfig.get_platform().rpartition('-')[2] if sys.platform == 'win32'
+            else platform.machine()).lower()
+_64BIT = ctypes.sizeof(ctypes.c_void_p) == 8
+_ARM64 = _64BIT and _MACHINE in ('arm64', 'aarch64')
+_X86 = _64BIT and _MACHINE in ('x86_64', 'amd64', 'x64')
 _FAILED = (1 << (8 * ctypes.sizeof(ctypes.c_void_p))) - 1
 class LoadError(Exception):
     pass
+_UNSUPPORTED = 'cimo loads 64-bit arm64 and x86-64 code only; this machine is %s%s'
 class _RangeError(LoadError):
     pass
 if not _WIN:
@@ -26359,8 +30431,20 @@ def _rd(buf, off):
     return struct.unpack_from('<I', buf, off)[0]
 def _wr(buf, off, w):
     struct.pack_into('<I', buf, off, w)
+_STUB = {'CALL26', 'JUMP26', 'PLT32'}
+_GOT = {'ADR_GOT_PAGE', 'LD64_GOT_LO12_NC', 'GOTPCREL'}
 def _apply(buf, off, P, typ, S, sym):
-    if typ in ('CALL26', 'JUMP26'):
+    if typ in ('PC32', 'PLT32', 'GOTPCREL'):
+        d = S - P
+        if not -(1 << 31) <= d < 1 << 31:
+            raise _RangeError('%s is out of the +-2 GB range of the code' % sym)
+        struct.pack_into('<i', buf, off, d)
+    elif typ in ('ABS32S', 'ABS8'):
+        n = 4 if typ == 'ABS32S' else 1
+        if not -(1 << (8 * n - 1)) <= S < 1 << (8 * n - (typ == 'ABS32S')):
+            raise LoadError('address of %s does not fit a %d-byte value' % (sym, n))
+        buf[off:off + n] = (S & ((1 << (8 * n)) - 1)).to_bytes(n, 'little')
+    elif typ in ('CALL26', 'JUMP26'):
         d = S - P
         if d & 3 or not -(1 << 27) <= d < 1 << 27:
             raise _RangeError('branch to %s out of range' % sym)
@@ -26401,8 +30485,9 @@ _SKIP = ('.note', '.debug', '.comment')
 _MAGIC = b'cimo-image-1\\0'
 class Image:
     def __init__(self, obj, resolve=None, snapshot=False):
-        if not _ARM64:
-            raise LoadError('cimo loads arm64 code only; this machine is %s' % platform.machine())
+        if not (_ARM64 or _X86):
+            raise LoadError(_UNSUPPORTED % (platform.machine(), '' if _64BIT else ', 32-bit Python'))
+        self._x86 = _X86
         self._maps = []
         self.prefix = obj.prefix
         self._snapshot = snapshot
@@ -26412,8 +30497,8 @@ class Image:
         self._perfmap()
     @classmethod
     def load(cls, blob, make_resolve=None):
-        if not _ARM64:
-            raise LoadError('cimo loads arm64 code only; this machine is %s' % platform.machine())
+        if not (_ARM64 or _X86):
+            raise LoadError(_UNSUPPORTED % (platform.machine(), '' if _64BIT else ', 32-bit Python'))
         blob = memoryview(blob)
         if bytes(blob[:len(_MAGIC)]) != _MAGIC:
             raise LoadError('not a cimo image')
@@ -26499,9 +30584,9 @@ class Image:
         for s in secs:
             for r in s.relocs:
                 y = obj.symbols[r.sym]
-                if r.type in ('CALL26', 'JUMP26') and not y.defined and not y.common:
+                if r.type in _STUB and not y.defined and not y.common:
                     stubs.setdefault(r.sym, None)
-                elif r.type in ('ADR_GOT_PAGE', 'LD64_GOT_LO12_NC'):
+                elif r.type in _GOT:
                     got.setdefault(r.sym, None)
         off = _align(off, 8)
         for k in stubs:
@@ -26604,8 +30689,12 @@ class Image:
         snap = self._snapshot and (not self.data_size or data == code + self.code_size)
         ext_slots, rebases = [], []
         for name, o in self._stubs.items():
-            struct.pack_into('<IIQ', cimg, o, 0x58000050, 0xd61f0200, ext(name))
-            ext_slots.append((o + 8, name, 0))
+            if self._x86:
+                struct.pack_into('<6sQ', cimg, o, b'\\xff\\x25\\0\\0\\0\\0', ext(name))
+                ext_slots.append((o + 6, name, 0))
+            else:
+                struct.pack_into('<IIQ', cimg, o, 0x58000050, 0xd61f0200, ext(name))
+                ext_slots.append((o + 8, name, 0))
         for name, o in self._got.items():
             struct.pack_into('<Q', dimg, o, ext(name))
             if name in self.symbols:
@@ -26617,9 +30706,12 @@ class Image:
             for r in s.relocs:
                 off = so + r.offset
                 P = base[k] + off
-                if r.type in ('ADR_GOT_PAGE', 'LD64_GOT_LO12_NC'):
-                    S = data + self._got[r.sym]
-                elif r.sym in self._stubs and r.type in ('CALL26', 'JUMP26'):
+                if r.type == 'GOTPCREL' and r.sym in self.symbols and img[k][off - 2] == 0x8b:
+                    img[k][off - 2] = 0x8d
+                    S = ext(r.sym) + r.addend
+                elif r.type in _GOT:
+                    S = data + self._got[r.sym] + (r.addend if r.type == 'GOTPCREL' else 0)
+                elif r.sym in self._stubs and r.type in _STUB:
                     S = code + self._stubs[r.sym] + r.addend
                 else:
                     S = ext(r.sym) + r.addend
@@ -26630,7 +30722,8 @@ class Image:
                                 rebases.append(at)
                             else:
                                 ext_slots.append((at, r.sym, r.addend))
-                        elif r.type in ('ABS32', 'ABS16') or r.sym not in self.symbols:
+                        elif r.type in ('ABS32', 'ABS16', 'ABS32S', 'ABS8') \\
+                                or r.sym not in self.symbols:
                             snap = False
                 _apply(img[k], off, P, r.type, S, r.sym)
         if snap:
@@ -27254,7 +31347,7 @@ class Control:
 class Group:
     __slots__ = ('W', 'key', 'L0', 'S', 'c0', 'init', 'ks', 'idx')
 class Chain:
-    __slots__ = ('op', 'cls', 'Lr', 'S', 'qmin', 'qmax', 'pos', 'fresh')
+    __slots__ = ('idx', 'op', 'cls', 'Lr', 'S', 'qmin', 'qmax', 'pos', 'fresh')
 class Fast:
     def __init__(self, fn, lp, sh, A, rts):
         self.fn = fn
@@ -27411,6 +31504,7 @@ class Fast:
             if len(qs) < 2 or qs[-1] - qs[0] + 1 != len(qs) or len(qs) > SR_MAXSPAN:
                 continue
             ch = Chain()
+            ch.idx = len(self.chains)
             ch.op, ch.cls, ch.S = op, cls, S
             f0 = lst[0][1]
             q0 = (f0.L.c - r) // S
@@ -27491,10 +31585,10 @@ class Fast:
                 if t is not None and t in self.srload:
                     ch, q = self.srload[t]
                     if q != ch.qmax:
-                        env[t] = state[('sr', id(ch), q)]
+                        env[t] = state[('sr', ch.idx, q)]
                         continue
-                    if id(ch) in fresh:
-                        env[t] = fresh[id(ch)]
+                    if ch.idx in fresh:
+                        env[t] = fresh[ch.idx]
                         continue
                 args = [self.opmap(a, k, env, state, closed) if a != R else R for a in i.arg]
                 if i.op == D.Osel0:
@@ -27510,7 +31604,7 @@ class Fast:
                     if v is not None:
                         env[t] = v
                         if t in self.srload:
-                            fresh[id(self.srload[t][0])] = v
+                            fresh[self.srload[t][0].idx] = v
                         continue
                 if t is None:
                     em.ins(Ins(i.op, i.cls, R, args[0], args[1]))
@@ -27521,7 +31615,7 @@ class Fast:
                     v = em.raw(i.op, i.cls, args[0], args[1])
                 env[t] = v
                 if t in self.srload:
-                    fresh[id(self.srload[t][0])] = v
+                    fresh[self.srload[t][0].idx] = v
             if final:
                 break
             new = {}
@@ -27531,7 +31625,7 @@ class Fast:
                     new[('phi', t)] = self.opmap(ir.phiargof(p, sh.latch), k, env, state,
                                                  closed)
             for ch in self.chains:
-                c = id(ch)
+                c = ch.idx
                 for q in range(ch.qmin, ch.qmax - 1):
                     new[('sr', c, q)] = state[('sr', c, q + 1)]
                 new[('sr', c, ch.qmax - 1)] = fresh[c]
@@ -27861,7 +31955,7 @@ def emit_versioned(fn, lp, sh, A, ctl, fast, U, done):
     for ch in fast.chains:
         for q in range(ch.qmin, ch.qmax):
             addr = fast.lin(Lin(ch.Lr.t, ch.Lr.c + q * ch.S), 64)
-            state0[('sr', id(ch), q)] = ef.raw(ch.op, ch.cls, addr)
+            state0[('sr', ch.idx, q)] = ef.raw(ch.op, ch.cls, addr)
     kc = Kw if ctlg.W == 32 else Kl
     T4 = ef.op(D.Oand, Kl, T, ef.con(-U)) if U > 1 else T
     end4 = ef.add(kc, ctlg.init, ef.mulc(kc, T4, ctlg.S.c))
@@ -27967,7 +32061,7 @@ def _svcls(fn, sv, fast, vals):
     if sv[0] == 'phi':
         return fn.tmp[sv[1]].cls
     if sv[0] == 'sr':
-        ch = [c for c in fast.chains if id(c) == sv[1]][0]
+        ch = [c for c in fast.chains if c.idx == sv[1]][0]
         return ch.cls
     raise AssertionError(sv)
 class Sym:
@@ -29008,10 +33102,12 @@ def transform(fn, lp):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "c472c2e12051c508d3d7",
-"runtime-arm64": "47404a155a3e3b2c218a",
-"runtime-arm64_apple": "f5eb49e8ba17edd46d3c",
-"runtime-arm64_win": "ced7ede90e0382958495"
+"compiler": "6ac6a76b253a567d6655",
+"runtime-amd64_sysv": "a6083747f6d5cf302059",
+"runtime-amd64_windows": "49d40fbfb54699863cbd",
+"runtime-arm64": "b9432b787a1c4f07af9d",
+"runtime-arm64_apple": "6a3154e8257161fae75f",
+"runtime-arm64_win": "93f67b90ae12af952aa9"
 }
 ''',
 'onefile.py': '''\
@@ -29466,7 +33562,6 @@ _COMMON_DEFINES = [
     ('__BYTE_ORDER__', '__STDC_ENDIAN_NATIVE__'),
     ('__FLT_EVAL_METHOD__', '0'),
     ('__BITINT_MAXWIDTH__', '64'),
-    ('__aarch64__', None),
     ('__LP64__', None),
     ('__SIZEOF_LONG__', '8'),
     ('__SIZEOF_POINTER__', '8'),
@@ -29544,6 +33639,10 @@ _APPLE_OVERRIDE = {
     '__WINT_TYPE__': 'int', '__WINT_MAX__': '2147483647', '__WINT_MIN__': '(-2147483647-1)',
 }
 _APPLE_TYPES = [(k, _APPLE_OVERRIDE.get(k, v)) for k, v in _GCC_TYPES]
+_X86_LINUX_OVERRIDE = {
+    '__WCHAR_TYPE__': 'int', '__WCHAR_MAX__': '0x7fffffff', '__WCHAR_MIN__': '(-0x7fffffff - 1)',
+}
+_X86_LINUX_TYPES = [(k, _X86_LINUX_OVERRIDE.get(k, v)) for k, v in _GCC_TYPES]
 _WIN_OVERRIDE = dict(_APPLE_OVERRIDE, **{
     '__SIZEOF_WCHAR_T__': '2', '__SIZEOF_WINT_T__': '2',
     '__WCHAR_TYPE__': 'short unsigned int', '__WCHAR_MAX__': '0xffff', '__WCHAR_MIN__': '0',
@@ -29552,23 +33651,34 @@ _WIN_OVERRIDE = dict(_APPLE_OVERRIDE, **{
     '__WINT_WIDTH__': '16',
 })
 _WIN_TYPES = [(k, _WIN_OVERRIDE.get(k, v)) for k, v in _GCC_TYPES]
+_ARM64 = [('__aarch64__', None)]
+_AMD64 = [('__x86_64__', None), ('__x86_64', None), ('__amd64__', None), ('__amd64', None)]
 TARGETS = {
-    'arm64': (_COMMON_DEFINES + [('__linux__', None), ('__unix__', None),
+    'arm64': (_COMMON_DEFINES + _ARM64 + [('__linux__', None), ('__unix__', None),
                                  ('__USER_LABEL_PREFIX__', '')] + _TAIL_DEFINES
               + _LINUX_TYPES),
-    'arm64_apple': (_COMMON_DEFINES + [('__APPLE__', None), ('__MACH__', None),
+    'arm64_apple': (_COMMON_DEFINES + _ARM64 + [('__APPLE__', None), ('__MACH__', None),
                                        ('__arm64__', None), ('__arm64', None),
                                        ('__AARCH64EL__', None), ('__LITTLE_ENDIAN__', None),
                                        ('__USER_LABEL_PREFIX__', '_')]
                     + [('_OSSwapInt%d(x)' % n, '__builtin_bswap%d(x)' % n) for n in (16, 32, 64)]
                     + _TAIL_DEFINES
                     + _APPLE_TYPES),
-    'arm64_win': (_COMMON_DEFINES + [('_WIN32', '1'), ('_WIN64', '1'), ('_M_ARM64', '1'),
-                                     ('__USER_LABEL_PREFIX__', '')]
+    'arm64_win': (_COMMON_DEFINES + _ARM64 + [('_WIN32', '1'), ('_WIN64', '1'),
+                                              ('_M_ARM64', '1'), ('__USER_LABEL_PREFIX__', '')]
                   + _TAIL_DEFINES + _WIN_TYPES),
+    'amd64_sysv': (_COMMON_DEFINES + _AMD64 + [('__linux__', None), ('__unix__', None),
+                                              ('__USER_LABEL_PREFIX__', '')] + _TAIL_DEFINES
+                   + _X86_LINUX_TYPES),
+    'amd64_windows': (_COMMON_DEFINES + _AMD64 + [('_WIN32', '1'), ('_WIN64', '1'),
+                                                  ('_M_X64', '100'), ('_M_AMD64', '100'),
+                                                  ('__USER_LABEL_PREFIX__', '')]
+                      + _TAIL_DEFINES + _WIN_TYPES),
 }
-_CHAR_SIGNED = {'arm64': False, 'arm64_apple': True, 'arm64_win': True}
-_WCHAR = {'arm64': (32, False), 'arm64_apple': (32, True), 'arm64_win': (16, False)}
+_CHAR_SIGNED = {'arm64': False, 'arm64_apple': True, 'arm64_win': True, 'amd64_sysv': True,
+                'amd64_windows': True}
+_WCHAR = {'arm64': (32, False), 'arm64_apple': (32, True), 'arm64_win': (16, False),
+          'amd64_sysv': (32, True), 'amd64_windows': (16, False)}
 BUNDLED_INCLUDE = _res.path('include')
 _CPROC_BUILTINS = frozenset(\'''__builtin_alloca __builtin_constant_p __builtin_expect
 __builtin_inff __builtin_nanf __builtin_offsetof __builtin_types_compatible_p
@@ -31994,6 +36104,272 @@ typedef struct __cimo_sfile {
 	((f)->buf = (f)->rpos = (const unsigned char *)(s))
 #endif
 ''',
+'runtime/internal/softfma.h': '''\
+typedef unsigned long u64;
+struct u128 {
+	u64 hi, lo;
+};
+union dbl {
+	double f;
+	u64 i;
+};
+union flt {
+	float f;
+	unsigned i;
+};
+static int
+clz64(u64 x)
+{
+	int n = 0;
+	if (!x)
+		return 64;
+	while (!(x >> 63)) {
+		x <<= 1;
+		n++;
+	}
+	return n;
+}
+static int
+clz128(struct u128 a)
+{
+	return a.hi ? clz64(a.hi) : 64 + clz64(a.lo);
+}
+static struct u128
+shl(struct u128 a, int s)
+{
+	struct u128 r;
+	if (s == 0)
+		return a;
+	if (s >= 128) {
+		r.hi = r.lo = 0;
+	} else if (s >= 64) {
+		r.hi = a.lo << (s - 64);
+		r.lo = 0;
+	} else {
+		r.hi = a.hi << s | a.lo >> (64 - s);
+		r.lo = a.lo << s;
+	}
+	return r;
+}
+static struct u128
+shr_jam(struct u128 a, int s)
+{
+	struct u128 r;
+	u64 lost;
+	if (s == 0)
+		return a;
+	if (s >= 128) {
+		r.hi = 0;
+		r.lo = (a.hi | a.lo) != 0;
+		return r;
+	}
+	if (s >= 64) {
+		lost = a.lo | (s > 64 ? a.hi << (128 - s) : 0);
+		r.lo = s == 64 ? a.hi : a.hi >> (s - 64);
+		r.hi = 0;
+	} else {
+		lost = a.lo << (64 - s);
+		r.lo = a.lo >> s | a.hi << (64 - s);
+		r.hi = a.hi >> s;
+	}
+	r.lo |= lost != 0;
+	return r;
+}
+static struct u128
+mul64(u64 a, u64 b)
+{
+	u64 a0 = a & 0xffffffff, a1 = a >> 32, b0 = b & 0xffffffff, b1 = b >> 32;
+	u64 p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+	u64 mid = (p00 >> 32) + (p01 & 0xffffffff) + (p10 & 0xffffffff);
+	struct u128 r;
+	r.lo = mid << 32 | (p00 & 0xffffffff);
+	r.hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+	return r;
+}
+static int
+lt(struct u128 a, struct u128 b)
+{
+	return a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo);
+}
+static struct u128
+add(struct u128 a, struct u128 b)
+{
+	struct u128 r;
+	r.lo = a.lo + b.lo;
+	r.hi = a.hi + b.hi + (r.lo < a.lo);
+	return r;
+}
+static struct u128
+sub(struct u128 a, struct u128 b)
+{
+	struct u128 r;
+	r.lo = a.lo - b.lo;
+	r.hi = a.hi - b.hi - (a.lo < b.lo);
+	return r;
+}
+static void
+decode(double d, u64 *m, int *e, int *s)
+{
+	union dbl u;
+	int be;
+	u.f = d;
+	*s = u.i >> 63;
+	be = u.i >> 52 & 0x7ff;
+	*m = u.i & ((1UL << 52) - 1);
+	if (be) {
+		*m |= 1UL << 52;
+		*e = be - 1075;
+	} else {
+		*e = -1074;
+	}
+}
+static int
+core(double x, double y, double z, int p, int emin, int emax, int *sign, u64 *keep, int *exp)
+{
+	u64 mx, my, mz;
+	int ex, ey, ez, sx, sy, sz, sp, ep, eb, sb, lz, e, shift, prec;
+	struct u128 P, Z, big, small, R;
+	u64 rem_hi_bit, kept;
+	int roundbit, sticky;
+	decode(x, &mx, &ex, &sx);
+	decode(y, &my, &ey, &sy);
+	decode(z, &mz, &ez, &sz);
+	P = mul64(mx, my);
+	sp = sx ^ sy;
+	lz = clz128(P);
+	P = shl(P, lz - 2);
+	ep = ex + ey - (lz - 2);
+	Z.hi = 0;
+	Z.lo = mz;
+	lz = clz128(Z);
+	Z = shl(Z, lz - 2);
+	ez -= lz - 2;
+	if (ep >= ez) {
+		big = P;
+		sb = sp;
+		eb = ep;
+		small = shr_jam(Z, ep - ez > 200 ? 200 : ep - ez);
+		if (sp == sz) {
+			R = add(big, small);
+		} else if (!lt(big, small)) {
+			R = sub(big, small);
+		} else {
+			R = sub(small, big);
+			sb = sz;
+		}
+	} else {
+		big = Z;
+		sb = sz;
+		eb = ez;
+		small = shr_jam(P, ez - ep > 200 ? 200 : ez - ep);
+		if (sp == sz) {
+			R = add(big, small);
+		} else if (!lt(big, small)) {
+			R = sub(big, small);
+		} else {
+			R = sub(small, big);
+			sb = sp;
+		}
+	}
+	if (!R.hi && !R.lo)
+		return 1;
+	lz = clz128(R);
+	R = shl(R, lz);
+	e = eb - lz + 127;
+	prec = p;
+	if (e < emin)
+		prec = p - (emin - e);
+	*sign = sb;
+	if (prec <= 0) {
+		kept = 0;
+		if (prec == 0) {
+			roundbit = 1;
+			sticky = (R.hi << 1) != 0 || R.lo != 0;
+			kept = roundbit && sticky;
+		}
+		*keep = kept;
+		*exp = emin;
+		return 0;
+	}
+	shift = 128 - prec;
+	if (shift >= 64) {
+		kept = R.hi >> (shift - 64);
+		rem_hi_bit = shift - 64 ? (R.hi >> (shift - 65)) & 1 : R.lo >> 63;
+		roundbit = rem_hi_bit;
+		if (shift - 64 >= 1)
+			sticky = (R.hi & ((1UL << (shift - 65)) - 1)) != 0 || R.lo != 0;
+		else
+			sticky = (R.lo << 1) != 0;
+	} else {
+		kept = R.hi << (64 - shift) | R.lo >> shift;
+		roundbit = R.lo >> (shift - 1) & 1;
+		sticky = shift > 1 && (R.lo & ((1UL << (shift - 1)) - 1)) != 0;
+	}
+	if (roundbit && (sticky || (kept & 1)))
+		kept++;
+	if (prec == p && kept >> p) {
+		kept >>= 1;
+		e++;
+	}
+	if (e > emax)
+		return 2;
+	*keep = kept;
+	*exp = e < emin ? emin : e;
+	return 0;
+}
+static double
+__cimo_softfma(double x, double y, double z)
+{
+	union dbl u;
+	int sign, exp, r;
+	u64 keep;
+	u.f = x;
+	if ((u.i >> 52 & 0x7ff) == 0x7ff || x == 0)
+		return x * y + z;
+	u.f = y;
+	if ((u.i >> 52 & 0x7ff) == 0x7ff || y == 0)
+		return x * y + z;
+	u.f = z;
+	if ((u.i >> 52 & 0x7ff) == 0x7ff)
+		return z + z;
+	if (z == 0)
+		return x * y;
+	r = core(x, y, z, 53, -1022, 1023, &sign, &keep, &exp);
+	if (r == 1)
+		return 0.0;
+	if (r == 2)
+		u.i = 0x7ffUL << 52;
+	else if (keep >> 52)
+		u.i = (u64)(exp + 1023) << 52 | (keep & ((1UL << 52) - 1));
+	else
+		u.i = keep;
+	u.i |= (u64)sign << 63;
+	return u.f;
+}
+static float
+__cimo_softfmaf(float x, float y, float z)
+{
+	union flt u;
+	int sign, exp, r;
+	u64 keep;
+	if (x != x || y != y || z != z || x == 0 || y == 0 || x - x != 0 || y - y != 0 ||
+	    z - z != 0)
+		return (float)((double)x * y + z);
+	if (z == 0)
+		return x * y;
+	r = core(x, y, z, 24, -126, 127, &sign, &keep, &exp);
+	if (r == 1)
+		return 0.0f;
+	if (r == 2)
+		u.i = 0xffU << 23;
+	else if (keep >> 23)
+		u.i = (unsigned)(exp + 127) << 23 | (unsigned)(keep & ((1U << 23) - 1));
+	else
+		u.i = (unsigned)keep;
+	u.i |= (unsigned)sign << 31;
+	return u.f;
+}
+''',
 'runtime/internal/sqrt_data.h': '''\
 #ifndef _SQRT_DATA_H
 #define _SQRT_DATA_H
@@ -33630,18 +38006,68 @@ float cbrtf(float x)
 'runtime/math/ceil.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __CIMO_SOFT_MATH
+#include <float.h>
+#include <stdint.h>
+static const double toint = 1 / DBL_EPSILON;
+double ceil(double x)
+{
+	union {double f; uint64_t i;} u = {x};
+	int e = u.i >> 52 & 0x7ff;
+	double y;
+	if (e >= 0x3ff + 52 || x == 0)
+		return x;
+	if (u.i >> 63)
+		y = x - toint + toint - x;
+	else
+		y = x + toint - toint - x;
+	if (e <= 0x3ff - 1)
+		return u.i >> 63 ? -0.0 : 1;
+	if (y < 0)
+		return x + y + 1;
+	return x + y;
+}
+#else
 double ceil(double x)
 {
 	return __builtin_ceil(x);
 }
+#endif
 ''',
 'runtime/math/ceilf.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __CIMO_SOFT_MATH
+#include <float.h>
+#include <stdint.h>
+float ceilf(float x)
+{
+	union {float f; uint32_t i;} u = {x};
+	int e = (int)(u.i >> 23 & 0xff) - 0x7f;
+	uint32_t m;
+	if (e >= 23)
+		return x;
+	if (e >= 0) {
+		m = 0x007fffff >> e;
+		if ((u.i & m) == 0)
+			return x;
+		if (u.i >> 31 == 0)
+			u.i += m;
+		u.i &= ~m;
+	} else {
+		if (u.i >> 31)
+			u.f = -0.0f;
+		else if (u.i << 1)
+			u.f = 1.0f;
+	}
+	return u.f;
+}
+#else
 float ceilf(float x)
 {
 	return __builtin_ceilf(x);
 }
+#endif
 ''',
 'runtime/math/copysign.c': '''\
 #include "libm.h"
@@ -34844,66 +39270,196 @@ float fdimf(float x, float y)
 'runtime/math/floor.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __CIMO_SOFT_MATH
+#include <float.h>
+#include <stdint.h>
+static const double toint = 1 / DBL_EPSILON;
+double floor(double x)
+{
+	union {double f; uint64_t i;} u = {x};
+	int e = u.i >> 52 & 0x7ff;
+	double y;
+	if (e >= 0x3ff + 52 || x == 0)
+		return x;
+	if (u.i >> 63)
+		y = x - toint + toint - x;
+	else
+		y = x + toint - toint - x;
+	if (e <= 0x3ff - 1)
+		return u.i >> 63 ? -1 : 0;
+	if (y > 0)
+		return x + y - 1;
+	return x + y;
+}
+#else
 double floor(double x)
 {
 	return __builtin_floor(x);
 }
+#endif
 ''',
 'runtime/math/floorf.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __CIMO_SOFT_MATH
+#include <float.h>
+#include <stdint.h>
+float floorf(float x)
+{
+	union {float f; uint32_t i;} u = {x};
+	int e = (int)(u.i >> 23 & 0xff) - 0x7f;
+	uint32_t m;
+	if (e >= 23)
+		return x;
+	if (e >= 0) {
+		m = 0x007fffff >> e;
+		if ((u.i & m) == 0)
+			return x;
+		if (u.i >> 31)
+			u.i += m;
+		u.i &= ~m;
+	} else {
+		if (u.i >> 31 == 0)
+			u.i = 0;
+		else if (u.i << 1)
+			u.f = -1.0f;
+	}
+	return u.f;
+}
+#else
 float floorf(float x)
 {
 	return __builtin_floorf(x);
 }
+#endif
 ''',
 'runtime/math/fma.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __FP_FAST_FMA
 double fma(double x, double y, double z)
 {
 	return __builtin_fma(x, y, z);
 }
+#else
+#include "softfma.h"
+double fma(double x, double y, double z)
+{
+	return __cimo_softfma(x, y, z);
+}
+#endif
 ''',
 'runtime/math/fmaf.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __FP_FAST_FMAF
 float fmaf(float x, float y, float z)
 {
 	return __builtin_fmaf(x, y, z);
 }
+#else
+#include "softfma.h"
+float fmaf(float x, float y, float z)
+{
+	return __cimo_softfmaf(x, y, z);
+}
+#endif
 ''',
 'runtime/math/fmax.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __CIMO_SOFT_MATH
+#include <float.h>
+#include <stdint.h>
+double fmax(double x, double y)
+{
+	union {double f; uint64_t i;} ux = {x}, uy = {y};
+	if (ux.i << 1 > 0xffe0000000000000ULL)
+		return y;
+	if (uy.i << 1 > 0xffe0000000000000ULL)
+		return x;
+	if ((ux.i ^ uy.i) >> 63)
+		return ux.i >> 63 ? y : x;
+	return x < y ? y : x;
+}
+#else
 double fmax(double x, double y)
 {
 	return __builtin_fmax(x, y);
 }
+#endif
 ''',
 'runtime/math/fmaxf.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __CIMO_SOFT_MATH
+#include <float.h>
+#include <stdint.h>
+float fmaxf(float x, float y)
+{
+	union {float f; uint32_t i;} ux = {x}, uy = {y};
+	if (ux.i << 1 > 0xff000000U)
+		return y;
+	if (uy.i << 1 > 0xff000000U)
+		return x;
+	if ((ux.i ^ uy.i) >> 31)
+		return ux.i >> 31 ? y : x;
+	return x < y ? y : x;
+}
+#else
 float fmaxf(float x, float y)
 {
 	return __builtin_fmaxf(x, y);
 }
+#endif
 ''',
 'runtime/math/fmin.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __CIMO_SOFT_MATH
+#include <float.h>
+#include <stdint.h>
+double fmin(double x, double y)
+{
+	union {double f; uint64_t i;} ux = {x}, uy = {y};
+	if (ux.i << 1 > 0xffe0000000000000ULL)
+		return y;
+	if (uy.i << 1 > 0xffe0000000000000ULL)
+		return x;
+	if ((ux.i ^ uy.i) >> 63)
+		return ux.i >> 63 ? x : y;
+	return x < y ? x : y;
+}
+#else
 double fmin(double x, double y)
 {
 	return __builtin_fmin(x, y);
 }
+#endif
 ''',
 'runtime/math/fminf.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __CIMO_SOFT_MATH
+#include <float.h>
+#include <stdint.h>
+float fminf(float x, float y)
+{
+	union {float f; uint32_t i;} ux = {x}, uy = {y};
+	if (ux.i << 1 > 0xff000000U)
+		return y;
+	if (uy.i << 1 > 0xff000000U)
+		return x;
+	if ((ux.i ^ uy.i) >> 31)
+		return ux.i >> 31 ? x : y;
+	return x < y ? x : y;
+}
+#else
 float fminf(float x, float y)
 {
 	return __builtin_fminf(x, y);
 }
+#endif
 ''',
 'runtime/math/fmod.c': '''\
 #include <math.h>
@@ -37806,18 +42362,74 @@ float rintf(float x)
 'runtime/math/round.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __CIMO_SOFT_MATH
+#include <float.h>
+#include <stdint.h>
+static const double toint = 1 / DBL_EPSILON;
+double round(double x)
+{
+	union {double f; uint64_t i;} u = {x};
+	int e = u.i >> 52 & 0x7ff;
+	double y;
+	if (e >= 0x3ff + 52)
+		return x;
+	if (u.i >> 63)
+		x = -x;
+	if (e < 0x3ff - 1)
+		return 0 * u.f;
+	y = x + toint - toint - x;
+	if (y > 0.5)
+		y = y + x - 1;
+	else if (y <= -0.5)
+		y = y + x + 1;
+	else
+		y = y + x;
+	if (u.i >> 63)
+		y = -y;
+	return y;
+}
+#else
 double round(double x)
 {
 	return __builtin_round(x);
 }
+#endif
 ''',
 'runtime/math/roundf.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __CIMO_SOFT_MATH
+#include <float.h>
+#include <stdint.h>
+static const float toint = 1 / FLT_EPSILON;
+float roundf(float x)
+{
+	union {float f; uint32_t i;} u = {x};
+	int e = u.i >> 23 & 0xff;
+	float y;
+	if (e >= 0x7f + 23)
+		return x;
+	if (u.i >> 31)
+		x = -x;
+	if (e < 0x7f - 1)
+		return 0 * u.f;
+	y = x + toint - toint - x;
+	if (y > 0.5f)
+		y = y + x - 1;
+	else if (y <= -0.5f)
+		y = y + x + 1;
+	else
+		y = y + x;
+	if (u.i >> 31)
+		y = -y;
+	return y;
+}
+#else
 float roundf(float x)
 {
 	return __builtin_roundf(x);
 }
+#endif
 ''',
 'runtime/math/scalbln.c': '''\
 #include <limits.h>
@@ -38383,18 +42995,58 @@ float tgammaf(float x)
 'runtime/math/trunc.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __CIMO_SOFT_MATH
+#include <float.h>
+#include <stdint.h>
+double trunc(double x)
+{
+	union {double f; uint64_t i;} u = {x};
+	int e = (int)(u.i >> 52 & 0x7ff) - 0x3ff + 12;
+	uint64_t m;
+	if (e >= 52 + 12)
+		return x;
+	if (e < 12)
+		e = 1;
+	m = -1ULL >> e;
+	if ((u.i & m) == 0)
+		return x;
+	u.i &= ~m;
+	return u.f;
+}
+#else
 double trunc(double x)
 {
 	return __builtin_trunc(x);
 }
+#endif
 ''',
 'runtime/math/truncf.c': '''\
 #include <math.h>
 #include "musl.h"
+#if __CIMO_SOFT_MATH
+#include <float.h>
+#include <stdint.h>
+float truncf(float x)
+{
+	union {float f; uint32_t i;} u = {x};
+	int e = (int)(u.i >> 23 & 0xff) - 0x7f + 9;
+	uint32_t m;
+	if (e >= 23 + 9)
+		return x;
+	if (e < 9)
+		e = 1;
+	m = -1U >> e;
+	if ((u.i & m) == 0)
+		return x;
+	u.i &= ~m;
+	return u.f;
+}
+#else
 float truncf(float x)
 {
 	return __builtin_truncf(x);
 }
+#endif
 ''',
 'runtime/stdio/snprintf.c': '''\
 /* cimo: snprintf and friends over musl's formatter (see ../COPYRIGHT). */
@@ -41604,269 +46256,16 @@ class WasmKernel:
         return '<cimo kernel %s (wasm)>' % self.__name__
 ''',
 'wasm/runtime/fma.c': '''\
-typedef unsigned long u64;
-struct u128 {
-	u64 hi, lo;
-};
-union dbl {
-	double f;
-	u64 i;
-};
-union flt {
-	float f;
-	unsigned i;
-};
-static int
-clz64(u64 x)
-{
-	int n = 0;
-	if (!x)
-		return 64;
-	while (!(x >> 63)) {
-		x <<= 1;
-		n++;
-	}
-	return n;
-}
-static int
-clz128(struct u128 a)
-{
-	return a.hi ? clz64(a.hi) : 64 + clz64(a.lo);
-}
-static struct u128
-shl(struct u128 a, int s)
-{
-	struct u128 r;
-	if (s == 0)
-		return a;
-	if (s >= 128) {
-		r.hi = r.lo = 0;
-	} else if (s >= 64) {
-		r.hi = a.lo << (s - 64);
-		r.lo = 0;
-	} else {
-		r.hi = a.hi << s | a.lo >> (64 - s);
-		r.lo = a.lo << s;
-	}
-	return r;
-}
-static struct u128
-shr_jam(struct u128 a, int s)
-{
-	struct u128 r;
-	u64 lost;
-	if (s == 0)
-		return a;
-	if (s >= 128) {
-		r.hi = 0;
-		r.lo = (a.hi | a.lo) != 0;
-		return r;
-	}
-	if (s >= 64) {
-		lost = a.lo | (s > 64 ? a.hi << (128 - s) : 0);
-		r.lo = s == 64 ? a.hi : a.hi >> (s - 64);
-		r.hi = 0;
-	} else {
-		lost = a.lo << (64 - s);
-		r.lo = a.lo >> s | a.hi << (64 - s);
-		r.hi = a.hi >> s;
-	}
-	r.lo |= lost != 0;
-	return r;
-}
-static struct u128
-mul64(u64 a, u64 b)
-{
-	u64 a0 = a & 0xffffffff, a1 = a >> 32, b0 = b & 0xffffffff, b1 = b >> 32;
-	u64 p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
-	u64 mid = (p00 >> 32) + (p01 & 0xffffffff) + (p10 & 0xffffffff);
-	struct u128 r;
-	r.lo = mid << 32 | (p00 & 0xffffffff);
-	r.hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
-	return r;
-}
-static int
-lt(struct u128 a, struct u128 b)
-{
-	return a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo);
-}
-static struct u128
-add(struct u128 a, struct u128 b)
-{
-	struct u128 r;
-	r.lo = a.lo + b.lo;
-	r.hi = a.hi + b.hi + (r.lo < a.lo);
-	return r;
-}
-static struct u128
-sub(struct u128 a, struct u128 b)
-{
-	struct u128 r;
-	r.lo = a.lo - b.lo;
-	r.hi = a.hi - b.hi - (a.lo < b.lo);
-	return r;
-}
-static void
-decode(double d, u64 *m, int *e, int *s)
-{
-	union dbl u;
-	int be;
-	u.f = d;
-	*s = u.i >> 63;
-	be = u.i >> 52 & 0x7ff;
-	*m = u.i & ((1UL << 52) - 1);
-	if (be) {
-		*m |= 1UL << 52;
-		*e = be - 1075;
-	} else {
-		*e = -1074;
-	}
-}
-static int
-core(double x, double y, double z, int p, int emin, int emax, int *sign, u64 *keep, int *exp)
-{
-	u64 mx, my, mz;
-	int ex, ey, ez, sx, sy, sz, sp, ep, eb, sb, lz, e, shift, prec;
-	struct u128 P, Z, big, small, R;
-	u64 rem_hi_bit, kept;
-	int roundbit, sticky;
-	decode(x, &mx, &ex, &sx);
-	decode(y, &my, &ey, &sy);
-	decode(z, &mz, &ez, &sz);
-	P = mul64(mx, my);
-	sp = sx ^ sy;
-	lz = clz128(P);
-	P = shl(P, lz - 2);
-	ep = ex + ey - (lz - 2);
-	Z.hi = 0;
-	Z.lo = mz;
-	lz = clz128(Z);
-	Z = shl(Z, lz - 2);
-	ez -= lz - 2;
-	if (ep >= ez) {
-		big = P;
-		sb = sp;
-		eb = ep;
-		small = shr_jam(Z, ep - ez > 200 ? 200 : ep - ez);
-		if (sp == sz) {
-			R = add(big, small);
-		} else if (!lt(big, small)) {
-			R = sub(big, small);
-		} else {
-			R = sub(small, big);
-			sb = sz;
-		}
-	} else {
-		big = Z;
-		sb = sz;
-		eb = ez;
-		small = shr_jam(P, ez - ep > 200 ? 200 : ez - ep);
-		if (sp == sz) {
-			R = add(big, small);
-		} else if (!lt(big, small)) {
-			R = sub(big, small);
-		} else {
-			R = sub(small, big);
-			sb = sp;
-		}
-	}
-	if (!R.hi && !R.lo)
-		return 1;
-	lz = clz128(R);
-	R = shl(R, lz);
-	e = eb - lz + 127;
-	prec = p;
-	if (e < emin)
-		prec = p - (emin - e);
-	*sign = sb;
-	if (prec <= 0) {
-		kept = 0;
-		if (prec == 0) {
-			roundbit = 1;
-			sticky = (R.hi << 1) != 0 || R.lo != 0;
-			kept = roundbit && sticky;
-		}
-		*keep = kept;
-		*exp = emin;
-		return 0;
-	}
-	shift = 128 - prec;
-	if (shift >= 64) {
-		kept = R.hi >> (shift - 64);
-		rem_hi_bit = shift - 64 ? (R.hi >> (shift - 65)) & 1 : R.lo >> 63;
-		roundbit = rem_hi_bit;
-		if (shift - 64 >= 1)
-			sticky = (R.hi & ((1UL << (shift - 65)) - 1)) != 0 || R.lo != 0;
-		else
-			sticky = (R.lo << 1) != 0;
-	} else {
-		kept = R.hi << (64 - shift) | R.lo >> shift;
-		roundbit = R.lo >> (shift - 1) & 1;
-		sticky = shift > 1 && (R.lo & ((1UL << (shift - 1)) - 1)) != 0;
-	}
-	if (roundbit && (sticky || (kept & 1)))
-		kept++;
-	if (prec == p && kept >> p) {
-		kept >>= 1;
-		e++;
-	}
-	if (e > emax)
-		return 2;
-	*keep = kept;
-	*exp = e < emin ? emin : e;
-	return 0;
-}
+#include "softfma.h"
 double
 fma(double x, double y, double z)
 {
-	union dbl u;
-	int sign, exp, r;
-	u64 keep;
-	u.f = x;
-	if ((u.i >> 52 & 0x7ff) == 0x7ff || x == 0)
-		return x * y + z;
-	u.f = y;
-	if ((u.i >> 52 & 0x7ff) == 0x7ff || y == 0)
-		return x * y + z;
-	u.f = z;
-	if ((u.i >> 52 & 0x7ff) == 0x7ff)
-		return z + z;
-	if (z == 0)
-		return x * y + z;
-	r = core(x, y, z, 53, -1022, 1023, &sign, &keep, &exp);
-	if (r == 1)
-		return 0.0;
-	if (r == 2)
-		u.i = 0x7ffUL << 52;
-	else if (keep >> 52)
-		u.i = (u64)(exp + 1023) << 52 | (keep & ((1UL << 52) - 1));
-	else
-		u.i = keep;
-	u.i |= (u64)sign << 63;
-	return u.f;
+	return __cimo_softfma(x, y, z);
 }
 float
 fmaf(float x, float y, float z)
 {
-	union flt u;
-	int sign, exp, r;
-	u64 keep;
-	if (x != x || y != y || z != z || x == 0 || y == 0 || x - x != 0 || y - y != 0 ||
-	    z - z != 0)
-		return (float)((double)x * y + z);
-	if (z == 0)
-		return x * y + z;
-	r = core(x, y, z, 24, -126, 127, &sign, &keep, &exp);
-	if (r == 1)
-		return 0.0f;
-	if (r == 2)
-		u.i = 0xffU << 23;
-	else if (keep >> 23)
-		u.i = (unsigned)(exp + 127) << 23 | (unsigned)(keep & ((1U << 23) - 1));
-	else
-		u.i = (unsigned)keep;
-	u.i |= (unsigned)sign << 31;
-	return u.f;
+	return __cimo_softfmaf(x, y, z);
 }
 ''',
 }

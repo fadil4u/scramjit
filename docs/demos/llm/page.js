@@ -26,6 +26,7 @@ let compiled = false, runningPlain = true, nudged = false, startedAt = 0, stage 
 let tokens = 0, recent = [], version = 0, span = null, pyRate = 0;
 let compiler = null, compilerUp = false, compilerDog, background = null, want = null, editTimer = null, typing = false, carryIntro = false, barOn = false;
 const known = new Set(), infos = new Map();
+let sharedWaiting = false;                             // the editor holds code from a link: nothing runs it until asked
 // A second Python uses memory; a machine that can't spare it compiles in the writing worker, pausing the story.
 const roomy = () => (navigator.deviceMemory || 8) >= 4 && (navigator.hardwareConcurrency || 4) >= 4 && !/Mobi/.test(navigator.userAgent);
 let firstToken = false;
@@ -40,7 +41,7 @@ function arm(ms) { clearTimeout(watchdog); watchdog = setTimeout(hung, ms); }
 function calm() { clearTimeout(watchdog); }
 function showError(text) { $('err').textContent = text; $('err').style.display = text ? 'block' : 'none'; }
 function controls(on) {
-  for (const b of ['reset', 'again', 'pause', 'sj']) $(b).disabled = !on;
+  for (const b of ['reset', 'again', 'pause', 'sj', 'runshared']) $(b).disabled = !on;
   document.querySelectorAll('.chip').forEach(c => { c.disabled = !on; });
 }
 function note(t, busy) { $('note').textContent = t; $('note').classList.toggle('busy', !!busy); }
@@ -140,7 +141,7 @@ function onMessage({ data: m }) {
     for (const code of m.kept || []) known.add(code);    // compiled on an earlier visit
     buildChips();
     if (compiled) { note('compiling…', true); progress(true); }
-    swapIn(restarting || editor.getValue(), '', false, undefined, compiled);
+    swapIn(restarting || (sharedWaiting ? original : editor.getValue()), '', false, undefined, compiled);
   }
   if (m.type === 'compiled') swapped(m);
   if (m.type === 'text') gotText(m);
@@ -160,6 +161,7 @@ function request(code, name, intro) {
   clearTimeout(editTimer);
   typing = false;
   if (!ready) return;
+  if (sharedWaiting) code = original;                  // whatever asked, code from a link isn't run without saying so
   showError('');
   if (compiled && (want?.intro || background?.intro || carryIntro)) intro = true;
   carryIntro = false;
@@ -434,6 +436,7 @@ function flash(found) {
 const isOn = e => editor.getValue().includes(toText(e));
 function toggle(e) {
   showStage('python');
+  if (sharedWaiting) return showError('Run the code from the link, or go back to the original, before trying an edit.');
   const found = { lines: [], marks: [] }, on = isOn(e), to = toText(e);
   showError('');
   if (on) {
@@ -468,7 +471,36 @@ function changedLines() {
   editor.operation(() => { for (let i = 0; i < editor.lineCount(); i++) { const c = !orig.has(editor.getLine(i)); editor[c ? 'addLineClass' : 'removeLineClass'](i, 'background', 'changed'); } });
 }
 // ---- controls
-$('reset').onclick = () => { showStage('python'); editor.setValue(original); showChips(); request(original, 'reset'); };
+$('reset').onclick = () => { showStage('python'); endShared(); editor.setValue(original); showChips(); request(original, 'reset'); };
+// ---- a link to the code: it travels in the part of the URL no server sees, compressed
+const toLink = b => btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const fromLink = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+async function packed(code) {
+  return toLink(new Uint8Array(await new Response(new Blob([code]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer()));
+}
+async function unpacked(text) {
+  const reader = new Blob([fromLink(text)]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader(), parts = [];
+  for (let got = 0; ;) {
+    const { done, value } = await reader.read();
+    if (done) return new TextDecoder('utf-8', { fatal: true }).decode(await new Blob(parts).arrayBuffer());
+    if ((got += value.length) > 1e6) throw new Error('too long');
+    parts.push(value);
+  }
+}
+function endShared() { sharedWaiting = false; $('shared').hidden = true; }
+function clearLink() { history.replaceState(null, '', location.pathname + location.search); }
+$('share').onclick = async () => {
+  const code = editor.getValue();
+  if (code === original) clearLink(); else history.replaceState(null, '', '#code=' + await packed(code));
+  let copied = false;
+  try { await navigator.clipboard.writeText(location.href); copied = true; } catch { /* the link is in the address bar */ }
+  say(code === original ? (copied ? 'Copied a link to the page: the code is unedited' : 'The code is unedited, so this page\'s address is the link')
+    : copied ? 'Copied a link to this code' : 'The link to this code is in the address bar');
+  state({ shareLength: location.href.length });
+};
+$('runshared').onclick = () => { endShared(); showChips(); request(editor.getValue(), 'the shared code'); };
+$('dropshared').onclick = () => { endShared(); clearLink(); editor.setValue(original); showChips(); changedLines(); };
+addEventListener('hashchange', () => location.reload());
 $('sj').onclick = () => setMode(!compiled);
 $('ask').onsubmit = e => {
   e.preventDefault();
@@ -520,6 +552,12 @@ async function kept() { try { const c = await caches.open('scramjit-llm-1'); ret
 (async () => {
   original = await (await fetch('forward.py')).text();
   editor.setValue(original);
+  if (location.hash.startsWith('#code=')) {
+    try {
+      const code = await unpacked(location.hash.slice(6));
+      if (code !== original) { editor.setValue(code); sharedWaiting = true; $('shared').hidden = false; changedLines(); }
+    } catch { showError('This link\'s code couldn\'t be read, so this is the original.'); clearLink(); }
+  }
   const net = navigator.connection || {};
   const careful = net.saveData || net.type === 'cellular' || /(^|-)2g$/.test(net.effectiveType || '');
   if (careful && !(await kept())) { $('load').hidden = false; $('wait').hidden = true; say('Ready when you are: 60 MB to download.'); } else start();

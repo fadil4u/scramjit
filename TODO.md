@@ -45,19 +45,15 @@ LLM demo's code; spills per line, once cimo can report them.
 4. **Loop lifting, what's left:** a loop stays in Python if a variable read afterwards may be unbound
    (`for i ...` then reading `i`, with nothing assigned first), inside `try` or `with`, or containing `return`.
    "Partly compiled" is per function, not per signature. Tracebacks show one extra frame for a loop that raises.
-5. **numpy calls in compiled functions:** `np.sum(x)`, `x.sum()`, `m[i].sum()` and `x * 2` still run as Python.
+5. **numpy calls in compiled functions:** `x * 2` and other calls that make arrays still run as Python.
    No cimo work is required for any step; its SIMD only adds speed. In this order:
    - **numpy functions on single numbers: built.** See `loops-and-builtins.md`. Left in Python: `np.tanh` and `np.power`, which aren't libm's, and
      combinations whose result depends on the platform or numpy version. Bit for bit checked on arm64 and wasm only: check x86-64 when it lands,
      where numpy may use SIMD routines for `exp` and `sin`. Not yet: `np.mod`, `np.floor_divide`, `np.degrees`, `np.radians`.
    - **Views: built.** Pointer, extents and strides, no allocation; `m[i]`, slices of any step, `m[:, j]`, `for row in m`. Not yet: returning one,
      assigning to a slice, `a, b = m[0], m[1]`, rows in `enumerate()` and `zip()`, strided arrays as arguments (`f(x[::2])` from Python runs as Python).
-   - **Reductions on a whole array:** `sum`, `prod`, `min`, `max`, `mean`, `any`, `all`, `argmax`. A plain loop doesn't match `np.sum` (it differs from
-     about 100 elements up), so port numpy's pairwise order. The gain is inside loops: outside one, lifting already gives numpy for the
-     reduction and native code for the loop. numpy is faster on big arrays, with SIMD: at 1,000,000 elements `np.sum` 162 µs against our loop's
-     1,019, `np.max` 114 against 1,358; at 8, 1.5 µs against 2.8, nearly all call overhead. So numpy should win above roughly 1,000 to 2,000
-     elements, an estimate. **Undecided:** should a function that compiles whole because of this get slower on huge arrays until cimo
-     has SIMD, with a gotcha and a preflight note, or do whole-array reductions stay in Python until then? Recommended: the former.
+   - **Reductions: built,** for one number from `float64` or `int64`. `axis=` that returns an array, `keepdims=True`, `dtype=`, `out=`, `where=`, `initial=` stay Python.
+     Not yet: integer `mean` (numpy converts in chunks), strided n-D (numpy's order depends on strides), other dtypes, `std`, `var`, `argmax` on wasm32 (it's `int32`).
    - **Not now, operations that create arrays:** `x * 2`, `a + b` need allocation, lifetimes, broadcasting and dtype rules, which is rewriting numpy.
      They stay in Python, with the loops around them lifted.
    - **Not `np.dot`, and no MKL or BLAS:** they would break "standard library plus cimo", and their results depend on the library, CPU and thread count.

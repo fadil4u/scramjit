@@ -17,6 +17,7 @@ from ._compiler import Compiler, StaticNumpy
 from ._errors import Unsupported
 
 _OTHER = object()     # a module-level name whose value static analysis can't know
+REDUCTIONS = {'sum', 'prod', 'mean', 'max', 'min', 'any', 'all', 'argmax', 'argmin'}
 SKIP_DIRS = {'__pycache__', 'node_modules', 'venv', 'env', 'site-packages', 'build', 'dist'}
 
 # What to do about a reason: the first match wins. Hints must be something to act on.
@@ -126,6 +127,11 @@ def assumed_signature(fdef):
             ndim.setdefault(n.value.id, 1)
         elif isinstance(n, ast.For) and isinstance(n.iter, ast.Name):
             ndim.setdefault(n.iter.id, 1)
+        elif isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.attr in REDUCTIONS:
+            ndim.setdefault(n.value.id, 1)
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in REDUCTIONS and n.args \
+                and isinstance(n.args[0], ast.Name):
+            ndim.setdefault(n.args[0].id, 1)
         elif isinstance(n, ast.comprehension) and isinstance(n.iter, ast.Name):
             ndim.setdefault(n.iter.id, 1)
         elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ('len', 'enumerate', 'zip', 'reversed'):

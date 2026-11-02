@@ -1065,6 +1065,68 @@ def _regoffset(ops, sz):
             raise AssemblerError('bad shift in %r' % ops[1])
         s = int(sz == 0 or n == sz)
     return rm[1] << 16 | _OPTION[how] << 13 | s << 12 | base[1] << 5
+_NEON3 = {'add': (0x4e208400, 's'), 'sub': (0x6e208400, 's'), 'mul': (0x4e209c00, 's'), 'cmeq': (0x6e208c00, 's'),
+          'cmgt': (0x4e203400, 's'), 'cmge': (0x4e203c00, 's'), 'cmhi': (0x6e203400, 's'), 'cmhs': (0x6e203c00, 's'),
+          'smin': (0x4e206c00, 's'), 'smax': (0x4e206400, 's'), 'umin': (0x6e206c00, 's'), 'umax': (0x6e206400, 's'),
+          'fadd': (0x4e20d400, 'f'), 'fsub': (0x4ea0d400, 'f'), 'fmul': (0x6e20dc00, 'f'), 'fdiv': (0x6e20fc00, 'f'),
+          'fminnm': (0x4ea0c400, 'f'), 'fmaxnm': (0x4e20c400, 'f'), 'fmla': (0x4e20cc00, 'f'), 'fcmeq': (0x4e20e400, 'f'),
+          'fcmge': (0x6e20e400, 'f'), 'fcmgt': (0x6ea0e400, 'f'), 'and': (0x4e201c00, ''), 'orr': (0x4ea01c00, ''),
+          'eor': (0x6e201c00, ''), 'bsl': (0x6e601c00, '')}
+_NEON2 = {'neg': (0x6e20b800, 's'), 'fneg': (0x6ea0f800, 'f'), 'fabs': (0x4ea0f800, 'f'), 'fsqrt': (0x6ea1f800, 'f'),
+          'mvn': (0x6e205800, '')}
+_NEONSH = {'shl': 0x4f005400, 'ushr': 0x6f000400, 'sshr': 0x4f000400}
+_LANES = {'16b': 0, '8h': 1, '4s': 2, '2d': 3}
+_VREG = re.compile(r'v(\\d+)\\.(16b|8h|4s|2d)$')
+_VELEM = re.compile(r'v(\\d+)\\.([bhsd])\\[(\\d+)\\]$')
+def _isneon(ops):
+    return bool(ops) and ops[0].strip().lower()[:1] == 'v' and _VREG.match(ops[0].strip().lower()) is not None
+def _v(s):
+    m = _VREG.match(s.strip().lower())
+    if m is None:
+        raise AssemblerError('expected a vector register, got %r' % s)
+    return int(m[1]), m[2]
+def _neon(mn, ops):
+    d, lane = _v(ops[0])
+    size = _LANES[lane]
+    if mn == 'mov':
+        n, _ = _v(ops[1])
+        return 0x4ea01c00 | n << 16 | n << 5 | d
+    if mn == 'dup':
+        s = ops[1].strip().lower()
+        e = _VELEM.match(s)
+        if e:
+            imm5 = {'b': 1, 'h': 2, 's': 4, 'd': 8}[e[2]] | int(e[3]) << ({'b': 1, 'h': 2, 's': 3, 'd': 4}[e[2]])
+            return 0x4e000400 | imm5 << 16 | int(e[1]) << 5 | d
+        r = _reg(s, 'wx')
+        return 0x4e000c00 | (1 << size) << 16 | r[1] << 5 | d
+    if mn in _NEONSH:
+        n, _ = _v(ops[1])
+        amount = _imm(ops[2], True)
+        bits = 8 << size
+        immhb = bits + amount if mn == 'shl' else 2 * bits - amount
+        return _NEONSH[mn] | immhb << 16 | n << 5 | d
+    if mn in _NEON2:
+        op, kind = _NEON2[mn]
+        n, _ = _v(ops[1])
+        w = op | n << 5 | d
+        return w | (size << 22 if kind == 's' else (lane == '2d') << 22 if kind == 'f' else 0)
+    if mn in _NEON3:
+        op, kind = _NEON3[mn]
+        n, _ = _v(ops[1])
+        m, _ = _v(ops[2])
+        w = op | m << 16 | n << 5 | d
+        return w | (size << 22 if kind == 's' else (lane == '2d') << 22 if kind == 'f' else 0)
+    raise AssemblerError('unsupported vector instruction %r' % mn)
+def _i_vscalar(a, mn, ops):
+    e = _VELEM.match(ops[1].strip().lower())
+    if e is None:
+        raise AssemblerError('expected a vector element, got %r' % ops[1])
+    imm5 = {'b': 1, 'h': 2, 's': 4, 'd': 8}[e[2]] | int(e[3]) << ({'b': 1, 'h': 2, 's': 3, 'd': 4}[e[2]])
+    if mn == 'umov':
+        r = _reg(ops[0], 'wx')
+        return (0x4e003c00 if r[0] == 'x' else 0x0e003c00) | imm5 << 16 | int(e[1]) << 5 | r[1]
+    r = _reg(ops[0], 'sd')
+    return 0x5e000400 | imm5 << 16 | int(e[1]) << 5 | r[1]
 def _i_ldst(a, mn, ops):
     if len(ops) < 2:
         raise AssemblerError('%s needs 2 operands' % mn)
@@ -1443,12 +1505,17 @@ class _Asm:
                 if mn[0] == '.':
                     self.directive(mn, rest)
                     continue
+                ops = _split(rest)
                 f = insns.get(mn)
+                if _isneon(ops):
+                    f = lambda a, mn, ops: _neon(mn, ops)
+                elif mn in ('umov', 'dup') and ops:
+                    f = _i_vscalar
                 if f is None:
                     raise AssemblerError('unsupported instruction %r' % parts[0])
                 if self.sec.nobits:
                     raise AssemblerError('instruction in nobits section %s' % self.sec.name)
-                word = f(self, mn, _split(rest))
+                word = f(self, mn, ops)
                 if self.sec.size % 4:
                     raise AssemblerError('misaligned instruction')
                 self.sec.align = max(self.sec.align, 4)
@@ -6281,7 +6348,7 @@ def _storesz(i):
     from ..load import storesz
     return storesz(i)
 class E:
-    __slots__ = ('f', 'fn', 'frame', 'padding', 'tbzok')
+    __slots__ = ('f', 'fn', 'frame', 'padding', 'tbzok', 'qthird')
     def __init__(self, f, fn):
         self.f = f
         self.fn = fn
@@ -6660,9 +6727,105 @@ def _table(i, e):
                 break
         o += 1
     emitf(fmt, i, e)
+_QLANE = {'b': '16b', 'h': '8h', 'w': '4s', 'l': '2d', 's': '4s', 'd': '2d'}
+_QINT = {'qadd': 'add', 'qsub': 'sub', 'qmul': 'mul', 'qmin': 'smin', 'qmax': 'smax', 'qumin': 'umin', 'qumax': 'umax',
+         'qceq': 'cmeq', 'qcgt': 'cmgt', 'qcge': 'cmge', 'qcugt': 'cmhi', 'qcuge': 'cmhs', 'qneg': 'neg'}
+_QFP = {'qadd': 'fadd', 'qsub': 'fsub', 'qmul': 'fmul', 'qdiv': 'fdiv', 'qmin': 'fminnm', 'qmax': 'fmaxnm',
+        'qceq': 'fcmeq', 'qcgt': 'fcmgt', 'qcge': 'fcmge', 'qneg': 'fneg', 'qabs': 'fabs', 'qsqrt': 'fsqrt'}
+def _qv(r, lane='16b'):
+    return 'v%d.%s' % (rval(r) - V0, lane)
+def _qaddr(r, e):
+    if rtype(r) == RSlot:
+        off = slot(r, e)
+        base = "x29"
+        if off < 4096:
+            e.f.write("\\tadd\\tx17, %s, #%d\\n" % (base, off))
+        else:
+            e.f.write("\\tmov\\tx17, #%d\\n\\tadd\\tx17, %s, x17\\n" % (off, base))
+        return "[x17]"
+    return "[%s]" % rname(rval(r), Kl)
+def _qins(i, e):
+    f = e.f
+    op = i.op
+    if op == Ocopy and i.cls == D.Kq:
+        if rtype(i.to) == RSlot or rtype(i.arg[0]) == RSlot:
+            die("128-bit copy through memory")
+        if not req(i.to, i.arg[0]):
+            f.write("\\tmov\\t%s, %s\\n" % (_qv(i.to), _qv(i.arg[0])))
+        return True
+    if op == Oswap and i.cls == D.Kq:
+        a, b = _qv(i.arg[0]), _qv(i.arg[1])
+        f.write("\\tmov\\tv31.16b, %s\\n\\tmov\\t%s, %s\\n\\tmov\\t%s, v31.16b\\n" % (a, a, b, b))
+        return True
+    if (op == D.Oload and i.cls == D.Kq) or op == D.Oqload:
+        f.write("\\tldr\\tq%d, %s\\n" % (rval(i.to) - V0, _qaddr(i.arg[0], e)))
+        return True
+    if op == D.Oqstore:
+        f.write("\\tstr\\tq%d, %s\\n" % (rval(i.arg[0]) - V0, _qaddr(i.arg[1], e)))
+        return True
+    if not D.isqop(op):
+        return False
+    name = optab[op].name
+    if name in ('qsel0', 'qfma0'):
+        return True
+    if name in ('qand', 'qor', 'qxor'):
+        f.write("\\t%s\\t%s, %s, %s\\n" % ({'qand': 'and', 'qor': 'orr', 'qxor': 'eor'}[name], _qv(i.to), _qv(i.arg[0]), _qv(i.arg[1])))
+        return True
+    if name == 'qnot':
+        f.write("\\tmvn\\t%s, %s\\n" % (_qv(i.to), _qv(i.arg[0])))
+        return True
+    if name in ('qsel1', 'qfma1s', 'qfma1d'):
+        third = e.qthird
+        l = _QLANE[name[-1]] if name != 'qsel1' else '16b'
+        mn = 'bsl' if name == 'qsel1' else 'fmla'
+        if name == 'qsel1':
+            if rval(i.to) in (rval(i.arg[0]), rval(i.arg[1])) or not req(i.to, third):
+                f.write("\\tmov\\tv31.16b, %s\\n\\tbsl\\tv31.16b, %s, %s\\n\\tmov\\t%s, v31.16b\\n" % (_qv(third), _qv(i.arg[0]), _qv(i.arg[1]), _qv(i.to)))
+            else:
+                f.write("\\tbsl\\t%s, %s, %s\\n" % (_qv(i.to), _qv(i.arg[0]), _qv(i.arg[1])))
+            return True
+        if req(i.to, third):
+            f.write("\\tfmla\\t%s, %s, %s\\n" % (_qv(i.to, l), _qv(i.arg[0], l), _qv(i.arg[1], l)))
+        elif rval(i.to) in (rval(i.arg[0]), rval(i.arg[1])):
+            f.write("\\tmov\\tv31.16b, %s\\n\\tfmla\\tv31.%s, %s, %s\\n\\tmov\\t%s, v31.16b\\n" % (_qv(third), l, _qv(i.arg[0], l), _qv(i.arg[1], l), _qv(i.to)))
+        else:
+            f.write("\\tmov\\t%s, %s\\n\\tfmla\\t%s, %s, %s\\n" % (_qv(i.to), _qv(third), _qv(i.to, l), _qv(i.arg[0], l), _qv(i.arg[1], l)))
+        return True
+    x = name[-1]
+    base = name[:-1]
+    l = _QLANE[x]
+    if base == 'qdup':
+        if x in 'sd':
+            f.write("\\tdup\\t%s, v%d.%s[0]\\n" % (_qv(i.to, l), rval(i.arg[0]) - V0, x))
+        else:
+            f.write("\\tdup\\t%s, %s\\n" % (_qv(i.to, l), rname(rval(i.arg[0]), Kl if x == 'l' else Kw)))
+        return True
+    if base == 'qget':
+        n = e.fn.con[rval(i.arg[1])].i
+        if x in 'sd':
+            f.write("\\tdup\\t%s, v%d.%s[%d]\\n" % (rname(rval(i.to), i.cls), rval(i.arg[0]) - V0, x, n))
+        else:
+            lane = {'b': 'b', 'h': 'h', 'w': 's', 'l': 'd'}[x]
+            f.write("\\tumov\\t%s, v%d.%s[%d]\\n" % (rname(rval(i.to), i.cls), rval(i.arg[0]) - V0, lane, n))
+        return True
+    if base in ('qshl', 'qshr', 'qsar'):
+        n = e.fn.con[rval(i.arg[1])].i
+        f.write("\\t%s\\t%s, %s, #%d\\n" % ({'qshl': 'shl', 'qshr': 'ushr', 'qsar': 'sshr'}[base], _qv(i.to, l), _qv(i.arg[0], l), n))
+        return True
+    mn = (_QFP if x in 'sd' else _QINT)[base]
+    if i.arg[1] == R:
+        f.write("\\t%s\\t%s, %s\\n" % (mn, _qv(i.to, l), _qv(i.arg[0], l)))
+    else:
+        f.write("\\t%s\\t%s, %s, %s\\n" % (mn, _qv(i.to, l), _qv(i.arg[0], l), _qv(i.arg[1], l)))
+    return True
 def emitins(i, e):
     T = D.T
     op = i.op
+    if i.cls == D.Kq or D.isqop(op):
+        if op == D.Oqsel0 or op == D.Oqfma0:
+            e.qthird = i.arg[0]
+        if _qins(i, e):
+            return
     if op == Onop:
         pass
     elif op == Ocopy:
@@ -8367,6 +8530,14 @@ def callable(r, fn):
                 return 1
     return 0
 def sel(i, fn):
+    if D.isqop(i.op):
+        emiti(i)
+        iarg = D.insb[D.curi].arg
+        for n in (0, 1):
+            if iarg[n] != R and argcls(i, n) != D.Kx and not (i.op >= D.Oqshlb and i.op <= D.Oqsarl and n == 1) \\
+                    and not (i.op >= D.Oqgetb and i.op <= D.Oqgetd and n == 1):
+                fixarg(iarg, n, argcls(i, n), 0, fn)
+        return
     if INRANGE(i.op, Oalloc, Oalloc1):
         i0 = D.curi - 1
         salloc(i.to, i.arg[0], fn)
@@ -8652,6 +8823,81 @@ def sinkinc(fn):
                 b.ins[n:last + 1] = b.ins[n + 1:last + 1] + [b.ins[n]]
             n -= 1
         b = b.link
+def qacrosscalls(fn):
+    from ..live import filllive
+    if not any(i.cls == D.Kq and rtype(i.to) == RTmp for b in fn.rpo[:fn.nblk] for i in b.ins[:b.nins]) \\
+            and not any(p.cls == D.Kq for b in fn.rpo[:fn.nblk] for p in _philist(b)):
+        return
+    filllive(fn)
+    across = set()
+    for b in fn.rpo[:fn.nblk]:
+        live = set(t for t in _elems(b.out) if fn.tmp[t].cls == D.Kq)
+        for r in (b.jmp.arg,):
+            if rtype(r) == RTmp and rval(r) >= Tmp0 and fn.tmp[rval(r)].cls == D.Kq:
+                live.add(rval(r))
+        for x in reversed(b.ins[:b.nins]):
+            if rtype(x.to) == RTmp:
+                live.discard(rval(x.to))
+            if x.op == Ocall:
+                across |= live
+            for a in x.arg[:2]:
+                if rtype(a) == RTmp and rval(a) >= Tmp0 and fn.tmp[rval(a)].cls == D.Kq:
+                    live.add(rval(a))
+    if not across:
+        return
+    slots = {}
+    allocs = []
+    for t in sorted(across):
+        s = newtmp('qs', Kl, fn)
+        slots[t] = s
+        allocs.append(Ins(Oalloc + 2, Kl, s, getcon(16, fn), R))
+    for b in fn.rpo[:fn.nblk]:
+        new = []
+        p = b.phi
+        while p:
+            if rval(p.to) in slots:
+                new.append(Ins(D.Oqstore, D.Kq, R, p.to, slots[rval(p.to)]))
+            for n in range(p.narg):
+                a = p.arg[n]
+                if rtype(a) == RTmp and rval(a) in slots:
+                    q = p.blk[n]
+                    r = newtmp('qr', D.Kq, fn)
+                    q.ins = q.ins[:q.nins] + [Ins(D.Oqload, D.Kq, r, slots[rval(a)], R)]
+                    q.nins = len(q.ins)
+                    p.arg[n] = r
+            p = p.link
+        b.ins = new + b.ins[:b.nins]
+        b.nins = len(b.ins)
+    for b in fn.rpo[:fn.nblk]:
+        new = []
+        for x in b.ins[:b.nins]:
+            isslotop = x.op == D.Oqload and x.arg[0] in slots.values() or x.op == D.Oqstore and x.arg[1] in slots.values()
+            if not isslotop:
+                for n in (0, 1):
+                    a = x.arg[n]
+                    if rtype(a) == RTmp and rval(a) in slots:
+                        r = newtmp('qr', D.Kq, fn)
+                        new.append(Ins(D.Oqload, D.Kq, r, slots[rval(a)], R))
+                        x.arg[n] = r
+            new.append(x)
+            if not isslotop and rtype(x.to) == RTmp and rval(x.to) in slots:
+                new.append(Ins(D.Oqstore, D.Kq, R, x.to, slots[rval(x.to)]))
+        b.ins = new
+        b.nins = len(new)
+        a = b.jmp.arg
+        if rtype(a) == RTmp and rval(a) in slots:
+            die("a 128-bit value in a jump")
+    s0 = fn.start
+    s0.ins = [x for x in s0.ins[:s0.nins] if D.ispar(x.op)] + allocs + [x for x in s0.ins[:s0.nins] if not D.ispar(x.op)]
+    s0.nins = len(s0.ins)
+def _philist(b):
+    p = b.phi
+    while p:
+        yield p
+        p = p.link
+def _elems(bs):
+    from ..util import bselems
+    return bselems(bs, Tmp0)
 def arm64_isel(fn):
     global nfcon, selblk, selpos
     b = fn.start
@@ -8724,7 +8970,7 @@ SIZE = {'w': 4, 'x': 8, 's': 4, 'd': 8}
 def kind(i):
     op = i.op
     if op == Oload:
-        return 'l', _LOADK[i.cls]
+        return ('l', _LOADK[i.cls]) if i.cls in _LOADK else None
     if op == Oloaduw or (op == Oloadsw and i.cls == Kw):
         return 'l', 'w'
     k = _STOREK.get(op)
@@ -8872,6 +9118,7 @@ def _common(**kw):
         ngpr=NGPR,
         fpr0=V0,
         nfpr=NFPR,
+        rqavoid=sum(BIT(V0 + n) for n in range(8, 16)),
         rglob=RGLOB,
         nrglob=4,
         rsave=arm64_rsave,
@@ -10236,12 +10483,13 @@ def rsval(r):
 (Cfeq, Cfge, Cfgt, Cfle, Cflt, Cfne, Cfo, Cfuo, NCmpF) = range(9)
 NCmp = NCmpI + NCmpF
 Kx, Kw, Kl, Ks, Kd = -1, 0, 1, 2, 3
+Kq = 5
 Ke = -2
 Km = Kl
 def KWIDE(k):
     return k & 1
 def KBASE(k):
-    return k >> 1
+    return k >> 1 if k != Kq else 1
 _OPS = [
     ('add', ((Kw, Kl, Ks, Kd), (Kw, Kl, Ks, Kd)), 1, 1, 0, 1, 1, 0, 0, 0, 0, 0),
     ('sub', ((Kw, Kl, Ks, Kd), (Kw, Kl, Ks, Kd)), 1, 1, 0, 0, 0, 0, 0, 0, 0, 0),
@@ -10449,11 +10697,34 @@ class Op:
                  'idemp', 'cmpeqwl', 'cmplgtewl', 'eqval', 'pinned')
     def __init__(self, name, argcls, *flags):
         self.name = name
-        self.argcls = argcls
+        self.argcls = tuple(a if len(a) == 6 else (a + (Ke, Kq if name in ('copy', 'swap') else Ke)) for a in argcls)
         (self.canfold, self.hasid, self.idval, self.commutes, self.assoc, self.idemp,
          self.cmpeqwl, self.cmplgtewl, self.eqval, self.pinned) = flags
+_QQ = lambda: ((Ke, Ke, Ke, Ke, Ke, Kq), (Ke, Ke, Ke, Ke, Ke, Kq))
+_Q1 = lambda: ((Ke, Ke, Ke, Ke, Ke, Kq), (Kx,) * 6)
+_QS = lambda: ((Ke, Ke, Ke, Ke, Ke, Kq), (Ke, Ke, Ke, Ke, Ke, Kw))
+_QOPS = [(n + x, _QQ()) for n, lanes in (('qadd', 'bhwlsd'), ('qsub', 'bhwlsd'), ('qmul', 'bhwsd'), ('qdiv', 'sd'),
+                                         ('qmin', 'bhwsd'), ('qmax', 'bhwsd'), ('qumin', 'bhw'), ('qumax', 'bhw'),
+                                         ('qceq', 'bhwlsd'), ('qcgt', 'bhwlsd'), ('qcge', 'bhwlsd'),
+                                         ('qcugt', 'bhwl'), ('qcuge', 'bhwl')) for x in lanes]
+_QOPS += [(n + x, _Q1()) for n, lanes in (('qneg', 'bhwlsd'), ('qabs', 'sd'), ('qsqrt', 'sd')) for x in lanes]
+_QOPS += [(n + x, _QS()) for n in ('qshl', 'qshr', 'qsar') for x in 'bhwl']
+_QOPS += [('qand', _QQ()), ('qor', _QQ()), ('qxor', _QQ()), ('qnot', _Q1()), ('qsel1', _QQ()),
+          ('qdupb', ((Ke, Ke, Ke, Ke, Ke, Kw), (Kx,) * 6)), ('qduph', ((Ke, Ke, Ke, Ke, Ke, Kw), (Kx,) * 6)),
+          ('qdupw', ((Ke, Ke, Ke, Ke, Ke, Kw), (Kx,) * 6)), ('qdupl', ((Ke, Ke, Ke, Ke, Ke, Kl), (Kx,) * 6)),
+          ('qdups', ((Ke, Ke, Ke, Ke, Ke, Ks), (Kx,) * 6)), ('qdupd', ((Ke, Ke, Ke, Ke, Ke, Kd), (Kx,) * 6))]
+_QOPS += [('qget' + x, ((Kq if k == Kw else Ke, Kq if k == Kl else Ke, Kq if k == Ks else Ke, Kq if k == Kd else Ke, Ke, Ke),
+                        (Kw, Kw, Kw, Kw, Ke, Ke)))
+          for x, k in (('b', Kw), ('h', Kw), ('w', Kw), ('l', Kl), ('s', Ks), ('d', Kd))]
+_OPS += [(n, a, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) for n, a in _QOPS]
+_OPS += [('qsel0', ((Ke, Ke, Ke, Ke, Ke, Kq), (Kx,) * 6), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1),
+         ('qfma0', ((Ke, Ke, Ke, Ke, Ke, Kq), (Kx,) * 6), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1),
+         ('qfma1s', _QQ(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1), ('qfma1d', _QQ(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1),
+         ('qload', ((Ke, Ke, Ke, Ke, Ke, Km), (Kx,) * 6), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1),
+         ('qstore', ((Kq,) * 6, (Km,) * 6), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)]
+del _QQ, _Q1, _QS
 Oxxx = 0
-optab = [Op(None, ((Ke,) * 4, (Ke,) * 4), *([0] * 10))]
+optab = [Op(None, ((Ke,) * 6, (Ke,) * 6), *([0] * 10))]
 for _o in _OPS:
     globals()['O' + _o[0]] = len(optab)
     optab.append(Op(*_o))
@@ -10489,8 +10760,9 @@ def INRANGE(x, l, u):
     return l <= x <= u
 def isstore(o): return Ostoreb <= o <= Ostored
 def isload(o): return Oloadsb <= o <= Oload
-def isvload(o): return Ovloadsb <= o <= Ovload
-def isvstore(o): return Ovstoreb <= o <= Ovstored
+def isvload(o): return Ovloadsb <= o <= Ovload or o == Oqload
+def isvstore(o): return Ovstoreb <= o <= Ovstored or o == Oqstore
+def isqop(o): return Oqaddb <= o <= Oqstore
 def unvolatile(fn, sink=None):
     b = fn.start
     while b:
@@ -10532,8 +10804,9 @@ def isxsel(o): return Oxsel <= o <= Oxsel1
 class Target:
     __slots__ = ('name', 'apple', 'windows', 'gpr0', 'ngpr', 'fpr0', 'nfpr', 'rglob',
                  'nrglob', 'rsave', 'nrsave', 'retregs', 'argregs', 'memargs', 'abi0',
-                 'abi1', 'isel', 'emitfn', 'emitfin', 'asloc', 'assym', 'cansel')
+                 'abi1', 'isel', 'emitfn', 'emitfin', 'asloc', 'assym', 'cansel', 'rqavoid')
     def __init__(self, **kw):
+        self.rqavoid = 0
         self.name = ''
         self.apple = 0
         self.windows = 0
@@ -11024,12 +11297,13 @@ volatile = False
 vla = False
 cse = False
 nowrap = False
+vector = False
 isel = False
 bigcopy = None
 inline = 0
 stkchk = None
 disjoint = None
-ALL = {'fma': True, 'ldp': True, 'layout': True, 'math': True, 'trap': True, 'volatile': True, 'vla': True, 'cse': True, 'isel': True, 'nowrap': True}
+ALL = {'fma': True, 'ldp': True, 'layout': True, 'math': True, 'trap': True, 'volatile': True, 'vla': True, 'cse': True, 'isel': True, 'nowrap': True, 'vector': True}
 _NAMES = tuple(ALL) + ('stkchk', 'bigcopy', 'inline')
 def configure(**kw):
     g = globals()
@@ -13585,6 +13859,11 @@ class _Driver:
         ssa.filluse(fn)
         D.unvolatile(fn, D.TMP(_IP1) if T.name.startswith('arm64') else
                      'use' if T.name.startswith('amd64') else None)
+        if ext.vector and T.name.startswith('arm64'):
+            from .arm64.isel import qacrosscalls
+            qacrosscalls(fn)
+            cfg.fillcfg(fn)
+            ssa.filluse(fn)
         T.isel(fn)
         cfg.fillcfg(fn)
         live.filllive(fn)
@@ -14674,6 +14953,10 @@ _VOLOPS = {optab[o].name: o for o in range(D.Ovloadsb, D.Ovstored + 1)}
 _VOLOPS.update(vloadw=D.Ovloadsw, vloadl=D.Ovload, vloads=D.Ovload, vloadd=D.Ovload)
 Tsp = Ntok + 3
 Tbits = Ntok + 4
+Tqc = Ntok + 7
+_KQTEXT = 99
+Tq = Ntok + 6
+_QNAMES = {optab[o].name: o for o in range(D.Oqaddb, D.Oqstore + 1) if optab[o].name not in ('qsel0', 'qfma0')}
 Tnsw = Ntok + 5
 _NSWOPS = {'addnsw': D.Oadd, 'subnsw': D.Osub, 'mulnsw': D.Omul}
 _BITOPS = ('bclz', 'bctz', 'bpopcnt', 'bswap', 'bswap16')
@@ -14845,6 +15128,11 @@ def lex():
         if _ext.volatile and S.tokval_str in _VOLOPS:
             S.mathop = _VOLOPS[S.tokval_str]
             return Tvol
+        if _ext.vector and S.tokval_str == 'q':
+            return Tqc
+        if _ext.vector and S.tokval_str in _QNAMES:
+            S.mathop = _QNAMES[S.tokval_str]
+            return Tq
         if _ext.nowrap and S.tokval_str in _NSWOPS:
             S.mathop = _NSWOPS[S.tokval_str]
             return Tnsw
@@ -14939,6 +15227,8 @@ def parsecls():
     m = {Tsb: Ksb, Tub: Kub, Tsh: Ksh, Tuh: Kuh, Tw: Kw, Tl: Kl, Ts: Ks, Td: Kd}
     if t in m:
         return m[t], None
+    if t == Tqc:
+        return _KQTEXT, None
     err("invalid class specifier")
 def _put(i):
     D.insb[D.curi] = i
@@ -15118,6 +15408,10 @@ def parseline(ps):
         r = R
         k = Kl
         op = Tsp
+    elif t == Tq and S.mathop == D.Oqstore:
+        r = R
+        k = _KQTEXT
+        op = Tq
     else:
         err("label, instruction or jump expected")
     if op == Tcall:
@@ -15140,7 +15434,9 @@ def parseline(ps):
         op = D.Oalloc
     if op == D.Ovastart and not curf.vararg:
         err("cannot use vastart in non-variadic function")
-    if k >= Ksb:
+    if k == _KQTEXT:
+        k = D.Kq
+    elif k >= Ksb:
         err("size class must be w, l, s, or d")
     i = 0
     if peek() != Tnl:
@@ -15182,6 +15478,17 @@ def parseline(ps):
         _put(Ins(D.Ofma1, k, r, arg[0], arg[1]))
         return PIns
     elif op == Tvol:
+        return _ins(S.mathop, k, r, arg)
+    elif op == Tq:
+        if S.mathop in (D.Oqfma1s, D.Oqfma1d, D.Oqsel1):
+            if i != 3:
+                err("%s needs three arguments", optab[S.mathop].name)
+            if D.curi + 2 > NIns:
+                err("too many instructions")
+            first = D.Oqsel0 if S.mathop == D.Oqsel1 else D.Oqfma0
+            _put(Ins(first, k, R, arg[2], R))
+            _put(Ins(S.mathop, k, r, arg[0], arg[1]))
+            return PIns
         return _ins(S.mathop, k, r, arg)
     elif op == Tnsw:
         if i != 2 or KBASE(k) != 0:
@@ -15674,7 +15981,7 @@ def printref(r, fn, f):
         f.write("%d" % rsval(r))
     elif rt == -1:
         f.write("R")
-_ktoc = "wlsd"
+_ktoc = "wlsdxq"
 _clsops = None
 def printfn(fn, f):
     global _clsops
@@ -15858,6 +16165,8 @@ def ralloctry(m, t, try_):
             return R
         regs = tmp[phicls(t, tmp)].hint_m
         regs |= m.b.t & M64
+        if tmp[t].cls == D.Kq:
+            regs |= T.rqavoid
         at = curdefs.get(t, -1)
         for p, last in curphis:
             if last > at and KBASE(tmp[t].cls) == 1:
@@ -17407,7 +17716,12 @@ def slot(t):
     assert t >= Tmp0, "cannot spill register"
     s = tmp[t].slot
     if s == -1:
-        if KWIDE(tmp[t].cls):
+        if tmp[t].cls == D.Kq:
+            s = slot8
+            if slot4 == slot8:
+                slot4 += 4
+            slot8 += 4
+        elif KWIDE(tmp[t].cls):
             s = slot8
             if slot4 == slot8:
                 slot4 += 2
@@ -17460,7 +17774,8 @@ def reloads(u, v):
             emit(Oload, tmp[t].cls, TMP(t), slot(t), R)
 def store(r, s):
     if s != -1:
-        emit(Ostorew + tmp[rval(r)].cls, 0, R, r, SLOT(s))
+        k = tmp[rval(r)].cls
+        emit(D.Oqstore if k == D.Kq else Ostorew + k, D.Kq if k == D.Kq else 0, R, r, SLOT(s))
 def regcpy(i):
     return i.op == Ocopy and isreg(i.arg[0])
 def dopm(b, i, v):
@@ -18495,9 +18810,9 @@ def igroup(b, i):
         return i, i + 2
     if op == Oblit1:
         return i - 1, i + 1
-    if op == D.Ofma0:
+    if op in (D.Ofma0, D.Oqfma0, D.Oqsel0):
         return i, i + 2
-    if op == D.Ofma1:
+    if op in (D.Ofma1, D.Oqfma1s, D.Oqfma1d, D.Oqsel1):
         return i - 1, i + 1
     if ispar(op):
         while i > ib and ispar(ins[i - 1].op):
@@ -20894,7 +21209,7 @@ INLINE = int(os.environ.get('CIMO_INLINE', '40'))
 def _backend_ext(target=None):
     arm = not _is_amd64(target)
     return dict(fma=arm, ldp=arm, layout=arm, math=True, trap=True, volatile=True, vla=True,
-                cse=True, isel=arm, nowrap=True)
+                cse=True, isel=arm, nowrap=True, vector=arm)
 def _qbe(ssa, params=None, middle=None, stkchk=None, target=None):
     from .backend import defs as D
     from .backend.main import _Driver, _targets
@@ -33102,12 +33417,12 @@ def transform(fn, lp):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "6ac6a76b253a567d6655",
-"runtime-amd64_sysv": "a6083747f6d5cf302059",
-"runtime-amd64_windows": "49d40fbfb54699863cbd",
-"runtime-arm64": "b9432b787a1c4f07af9d",
-"runtime-arm64_apple": "6a3154e8257161fae75f",
-"runtime-arm64_win": "93f67b90ae12af952aa9"
+"compiler": "e77d21d790e5c88b9785",
+"runtime-amd64_sysv": "43662a3d8a1c0c480dc2",
+"runtime-amd64_windows": "223bf3a404e7d7bb26ea",
+"runtime-arm64": "83c3f7d46b81b5e52bf8",
+"runtime-arm64_apple": "396543835e316ffb449f",
+"runtime-arm64_win": "ae32b3776c6427e98ee0"
 }
 ''',
 'onefile.py': '''\

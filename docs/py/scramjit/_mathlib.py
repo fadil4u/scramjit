@@ -206,6 +206,132 @@ static int sj_float_pow(sj_f2 f, double v, double w, double *out) {
     return 0;
 }
 """),
+    # numpy's reductions, written from what numpy returns: tests/test_numpy_reductions.py compares the bits
+    'np_sum': ((), """
+/* numpy's float sum: pairwise, with blocks of 128 summed in 8 parallel accumulators. Rounding depends on this order. */
+static double sj_np_pairwise(const double *a, int64_t n, int64_t st) {
+    if (n < 8) {
+        double r = 0.0;
+        for (int64_t i = 0; i < n; i++) r += a[i * st];
+        return r;
+    }
+    if (n <= 128) {
+        double r0 = a[0], r1 = a[st], r2 = a[2 * st], r3 = a[3 * st], r4 = a[4 * st], r5 = a[5 * st], r6 = a[6 * st], r7 = a[7 * st];
+        int64_t i = 8, m = n - n % 8;
+        for (; i < m; i += 8) {
+            r0 += a[i * st]; r1 += a[(i + 1) * st]; r2 += a[(i + 2) * st]; r3 += a[(i + 3) * st];
+            r4 += a[(i + 4) * st]; r5 += a[(i + 5) * st]; r6 += a[(i + 6) * st]; r7 += a[(i + 7) * st];
+        }
+        double r = ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7));
+        for (; i < n; i++) r += a[i * st];
+        return r;
+    }
+    int64_t half = n / 2;
+    half -= half % 8;
+    return sj_np_pairwise(a, half, st) + sj_np_pairwise(a + half * st, n - half, st);
+}
+/* chunk: 0 for one pass over everything, else numpy sums this many at a time (it depends on the build) */
+static double sj_np_sum(const double *a, int64_t n, int64_t st, int64_t chunk) {
+    if (!chunk || n <= chunk) return sj_np_pairwise(a, n, st);
+    double r = 0.0;
+    for (int64_t i = 0; i < n; i += chunk) r += sj_np_pairwise(a + i * st, n - i < chunk ? n - i : chunk, st);
+    return r;
+}
+"""),
+    'np_folds': ((), """
+static int64_t sj_np_sum_i(const int64_t *a, int64_t n, int64_t st) {
+    uint64_t r = 0;
+    for (int64_t i = 0; i < n; i++) r += (uint64_t)a[i * st];
+    return (int64_t)r;
+}
+static int64_t sj_np_prod_i(const int64_t *a, int64_t n, int64_t st) {
+    uint64_t r = 1;
+    for (int64_t i = 0; i < n; i++) r *= (uint64_t)a[i * st];
+    return (int64_t)r;
+}
+static double sj_np_prod_f(const double *a, int64_t n, int64_t st) {
+    double r = 1.0;
+    if (n > 0) r = a[0];
+    for (int64_t i = 1; i < n; i++) r *= a[i * st];
+    return r;
+}
+/* A NaN wins. Of 0.0 and -0.0: rule 0 keeps the first seen, 1 prefers the sign this numpy's maximum or minimum does */
+static double sj_np_max_f(const double *a, int64_t n, int64_t st, int rule) {
+    double r = a[0];
+    for (int64_t i = 0; i < n && r == r; i++) {
+        double e = a[i * st];
+        if (e != e || e > r) r = e;
+        else if (rule && e == 0.0 && r == 0.0 && signbit(r)) r = e;
+    }
+    return r;
+}
+static double sj_np_min_f(const double *a, int64_t n, int64_t st, int rule) {
+    double r = a[0];
+    for (int64_t i = 0; i < n && r == r; i++) {
+        double e = a[i * st];
+        if (e != e || e < r) r = e;
+        else if (rule && e == 0.0 && r == 0.0 && signbit(e)) r = e;
+    }
+    return r;
+}
+static int64_t sj_np_max_i(const int64_t *a, int64_t n, int64_t st) {
+    int64_t r = a[0];
+    for (int64_t i = 1; i < n; i++) if (a[i * st] > r) r = a[i * st];
+    return r;
+}
+static int64_t sj_np_min_i(const int64_t *a, int64_t n, int64_t st) {
+    int64_t r = a[0];
+    for (int64_t i = 1; i < n; i++) if (a[i * st] < r) r = a[i * st];
+    return r;
+}
+/* The first of the largest, or the first NaN */
+static int64_t sj_np_argmax_f(const double *a, int64_t n, int64_t st) {
+    int64_t at = 0;
+    double r = a[0];
+    for (int64_t i = 0; i < n; i++) {
+        double e = a[i * st];
+        if (e != e) return i;
+        if (e > r) { r = e; at = i; }
+    }
+    return at;
+}
+static int64_t sj_np_argmin_f(const double *a, int64_t n, int64_t st) {
+    int64_t at = 0;
+    double r = a[0];
+    for (int64_t i = 0; i < n; i++) {
+        double e = a[i * st];
+        if (e != e) return i;
+        if (e < r) { r = e; at = i; }
+    }
+    return at;
+}
+static int64_t sj_np_argmax_i(const int64_t *a, int64_t n, int64_t st) {
+    int64_t at = 0, r = a[0];
+    for (int64_t i = 1; i < n; i++) if (a[i * st] > r) { r = a[i * st]; at = i; }
+    return at;
+}
+static int64_t sj_np_argmin_i(const int64_t *a, int64_t n, int64_t st) {
+    int64_t at = 0, r = a[0];
+    for (int64_t i = 1; i < n; i++) if (a[i * st] < r) { r = a[i * st]; at = i; }
+    return at;
+}
+static int sj_np_any_f(const double *a, int64_t n, int64_t st) {
+    for (int64_t i = 0; i < n; i++) if (a[i * st] != 0.0) return 1;
+    return 0;
+}
+static int sj_np_all_f(const double *a, int64_t n, int64_t st) {
+    for (int64_t i = 0; i < n; i++) if (a[i * st] == 0.0) return 0;
+    return 1;
+}
+static int sj_np_any_i(const int64_t *a, int64_t n, int64_t st) {
+    for (int64_t i = 0; i < n; i++) if (a[i * st] != 0) return 1;
+    return 0;
+}
+static int sj_np_all_i(const int64_t *a, int64_t n, int64_t st) {
+    for (int64_t i = 0; i < n; i++) if (a[i * st] == 0) return 0;
+    return 1;
+}
+"""),
     'ipow': ((), """
 /* int ** a nonnegative int, wrapping at 64 bits */
 static int64_t sj_ipow(int64_t a, int64_t b) {

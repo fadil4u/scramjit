@@ -104,12 +104,13 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 |:---|:---|
 | `for`, `while`, `break`, `continue`, `if`, conditional expressions | Assigning to a slice: `a[1:] = 0` |
 | Views: `m[i]`, `x[a:b]`, `x[::-1]`, `m[:, j]`, `for row in m` | Returning a view |
-| `range`, `enumerate`, `zip`, `map`, `filter`, comprehensions | numpy array expressions: `a * 2`, `a.sum()` |
+| `range`, `enumerate`, `zip`, `map`, `filter`, comprehensions | numpy array expressions: `a * 2` |
 | `sum(gen, 0.0)`, `min`, `max`, `abs`, `**`, tuple unpacking | Calls to other Python functions |
 | Numbers and n-D numpy arrays, including dtypes like `uint8` | Strings, objects |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | Lists that grow with `append` |
 | Dicts passed in, reading and writing keys it names | Dicts that gain keys, or built in the function |
-| numpy functions on single numbers: `np.sqrt(x[i])`, `np.sin`, `np.minimum` | numpy functions on whole arrays: `np.sum(x)` |
+| numpy functions on single numbers: `np.sqrt(x[i])`, `np.sin`, `np.minimum` | numpy calls that make arrays: `np.sqrt(x)`, `x.sum(axis=0)` |
+| numpy reductions to one number: `x.sum()`, `np.max(m[i])`, `x.mean()`, `x.argmax()` | `np.dot`, `np.linalg` |
 
 `**` compiles. Where Python's result would change type, it raises `ValueError`: a negative `k` in
 `n ** k` (Python gives a float) and a negative float `x` in `x ** 0.5` (Python gives a complex).

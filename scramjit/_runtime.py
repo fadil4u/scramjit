@@ -49,6 +49,10 @@ VALUE_ERROR_MESSAGES = [
     'x ** y with a negative x and a fractional y: Python gives a complex here, which compiled code can\'t '
     '(see "Gotchas" in the docs)',
     'slice step cannot be zero',                                # numpy
+    'zero-size array to reduction operation maximum which has no identity',    # numpy
+    'zero-size array to reduction operation minimum which has no identity',
+    'attempt to get argmax of an empty sequence',
+    'attempt to get argmin of an empty sequence',
 ]
 OVERFLOW_ERROR_MESSAGES = [
     'cannot convert float infinity to integer',

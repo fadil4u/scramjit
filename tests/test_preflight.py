@@ -636,3 +636,38 @@ def test_static_understands_views(tmp_path):
     d = json.loads(_cli('preflight', f, '--json', '--no-suggest').stdout)
     states = {x['name']: x['state'] for x in d['files'][0]['functions']}
     assert states == {'by_row': 'compiled', 'by_iteration': 'compiled', 'chained': 'compiled', 'sliced': 'compiled', 'gives_back_a_view': 'python'}
+
+
+REDUCES = '''
+import numpy as np
+from scramjit import scram
+
+@scram
+def total(x):
+    return x.sum()
+
+@scram
+def biggest(x):
+    return np.max(x)
+
+@scram
+def by_row(m):
+    s = 0.0
+    for i in range(len(m)):
+        row = m[i]
+        s += row.sum()
+    return s
+
+@scram
+def by_axis(m):
+    return m.sum(axis=0)
+'''
+
+
+def test_static_understands_reductions(tmp_path):
+    f = tmp_path / 'r.py'
+    f.write_text(REDUCES)
+    d = json.loads(_cli('preflight', f, '--json', '--no-suggest').stdout)
+    states = {x['name']: x['state'] for x in d['files'][0]['functions']}
+    assert states['total'] == states['biggest'] == 'compiled'
+    assert states['by_row'] == 'compiled'

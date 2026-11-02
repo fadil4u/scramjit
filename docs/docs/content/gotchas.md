@@ -114,6 +114,14 @@ Check for `inf` and `nan` yourself if you rely on these.
 
 In a function that doesn't compile whole, each lifted loop is a call, which costs more than a few iterations do in Python. scramjit times a loop whose calls are all tiny both ways and keeps the faster, so this is bounded: a 3-iteration loop in a Python loop ran at 0.7x plain Python, a 40-iteration one at about the same speed, and longer ones far faster. Making the outer loop compile too removes the call.
 
+### A few whole-array calls are slower outside a loop
+
+numpy runs `max`, `min`, `argmax`, `argmin`, `any` and `all` with SIMD, which compiled code doesn't have yet. On 1,000,000 elements `x.max()` took 1.6 ms against numpy's 0.18, and `x.all()` 0.5 against 0.2. `x.sum()` and `x.mean()` are within about 15%, since numpy's sum isn't SIMD either. Inside a loop, where a numpy call costs about a microsecond each time, compiled code is far faster unless the arrays are huge. Preflight notes the calls this can affect that aren't in a loop.
+
+### min and max of two different NaNs
+
+`x.max()` with NaNs in the array gives NaN, as numpy does. If those NaNs have different signs, which one you get can differ, since numpy's depends on how its loops are laid out.
+
 ### numpy's exact results were checked on arm64 and in WebAssembly
 
 The numpy functions that compile matched numpy bit for bit there on 160,024 inputs. On x86-64, numpy can use its own SIMD routines for functions such as `np.exp` and `np.sin`, which may differ in the last bits from the C library's that compiled code calls. Results agree to rounding, but that hasn't been checked bit for bit.

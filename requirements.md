@@ -172,7 +172,12 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   ns). Until these, arrays were parameters with fixed extents, and range facts, aliases, versioning and forwarding relied on it. Now an array assigned
   anywhere (`rebound`) gives no facts: its loops are versioned instead, tested at entry, unless it's assigned inside that loop. Removing any of these guards
   fails `tests/test_views.py`.
-- **numpy calls (decided 2026-11-02; see `TODO.md`):** reductions next. Array-creating
+- **numpy reductions (built 2026-11-02).** `np.sum` runs one pairwise pass over everything, blocks of 128 in 8 accumulators, not seeded with the first element;
+  a plain loop differs from about 100 elements. Pyodide's numpy sums 8192 at a time, so the compiler asks the numpy present with a fixed array. Signed zeros in
+  `max` and `min` follow the scalar function's rule on both platforms; which of two NaNs of different signs comes back depends on numpy's loop layout, and isn't matched.
+  Only forms giving one number compile; `axis` on n-D and `keepdims=True` return arrays. On 1,000,000 elements `sum` is within 15% of numpy (not SIMD there
+  either), `max` 9x slower, `argmax` 4x, `all` 2.4x; preflight notes these only outside loops, since in a loop `m[i].sum()` wins up to 150x over a numpy call.
+- **numpy calls (decided 2026-11-02; see `TODO.md`):** array-creating calls stay in Python. Array-creating
   operations stay in Python, and MKL and BLAS stay out: not pure Python, and their results vary by library, CPU and thread count. A
   plain loop doesn't reproduce `np.sum` (pairwise), and is 6 to 12x slower than numpy on 1,000,000 elements until cimo has SIMD.
 - **Later:** growable lists, dicts, sets and strings as typed C containers: each needs allocation and a runtime.

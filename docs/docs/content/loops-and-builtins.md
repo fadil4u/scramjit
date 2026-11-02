@@ -78,4 +78,32 @@ Arguments can be Python ints and floats, `np.int64` and `np.float64`. A few comb
 - `np.abs`, `np.sign`, `np.square`, `np.minimum` and `np.maximum` of Python ints: `np.abs(4)` is `int64` on most platforms and `int32` in Pyodide
 - `np.floor`, `np.ceil` and `np.trunc` of any int: numpy 2.1 changed what these return
 
-Bools and narrow types such as `np.float32` or `np.uint8` run as Python too. So do `np.tanh`, which is numpy's own and doesn't match the C library's in the last bits, and `np.power`, which has shortcuts for some exponents; use `**`. Calls on whole arrays, such as `np.sum(x)` or `np.sqrt(x)`, run as Python for now.
+Bools and narrow types such as `np.float32` or `np.uint8` run as Python too. So do `np.tanh`, which is numpy's own and doesn't match the C library's in the last bits, and `np.power`, which has shortcuts for some exponents; use `**`. Other calls on whole arrays, such as `np.sqrt(x)`, run as Python for now.
+
+## numpy reductions
+
+`sum`, `prod`, `mean`, `max`, `min`, `any`, `all`, `argmax` and `argmin` compile as methods and as functions (`x.sum()`, `np.sum(x)`, and `np.amax` and `np.amin`), on arrays and on views. They give numpy's exact result, down to rounding, since `np.sum` adds in a particular order, and numpy's type:
+
+```python
+@scram
+def spread(m):
+    total = 0.0
+    for i in range(len(m)):
+        total += m[i].max() - m[i].min()
+    return total / m.size
+```
+
+Inside a compiled loop there's no call to pay for, so short rows gain the most: `m[i].sum()` took 8 ns on rows of 8, against 1.2 µs in Python. They work on `float64` and `int64` arrays, of any shape if the elements are contiguous, and on one-dimensional views with gaps. Integer `mean` runs as Python.
+
+Only forms that give one number compile. Everything else runs as Python, with numpy's result:
+
+| Call | |
+| --- | --- |
+| `x.sum()`, `x.sum(axis=None)`, `x.sum(keepdims=False)` | compiles, any number of dimensions |
+| `x.sum(axis=0)`, `x.sum(axis=-1)`, `x.sum(0)` on one dimension | compiles |
+| `x.sum(axis=0)` on more than one dimension | Python: it returns an array |
+| `x.sum(axis=(0, 1))`, an axis held in a variable | Python |
+| `x.sum(keepdims=True)` | Python: it returns an array |
+| `dtype=`, `out=`, `where=`, `initial=` | Python |
+
+`x.sum(axis=1)` on a loop's hot path is worth writing as a loop over `m[i].sum()`, which compiles.

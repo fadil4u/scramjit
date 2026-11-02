@@ -240,7 +240,11 @@ NP_MINMAX = {'minimum', 'maximum', 'fmin', 'fmax'}
 NP_TESTS = {'isnan', 'isinf', 'isfinite', 'signbit'}
 NP_CONVERT = {'float64', 'int64'}
 NP_CONSTANTS = {'pi': math.pi, 'e': math.e, 'inf': math.inf, 'nan': math.nan}
-NP_FUNCS = set(NP_LIBM1) | set(NP_DIRECT1) | NP_ROUND | NP_KEEPS_INT | set(NP_LIBM2) | {'copysign'} | NP_MINMAX | NP_TESTS | NP_CONVERT
+NP_REDUCE = {'sum': 'sum', 'prod': 'prod', 'mean': 'mean', 'max': 'max', 'min': 'min', 'any': 'any', 'all': 'all', 'argmax': 'argmax',
+             'argmin': 'argmin', 'amax': 'max', 'amin': 'min'}
+ARRAY_METHODS = {'sum', 'prod', 'mean', 'max', 'min', 'any', 'all', 'argmax', 'argmin'}
+NP_FUNCS = set(NP_LIBM1) | set(NP_DIRECT1) | NP_ROUND | NP_KEEPS_INT | set(NP_LIBM2) | {'copysign'} | NP_MINMAX | NP_TESTS | NP_CONVERT \
+    | set(NP_REDUCE)
 
 
 class StaticNumpy:
@@ -263,6 +267,47 @@ def zero_rule(name):
     one = math.copysign(1.0, float(getattr(np, name)(0.0, -0.0))) < 0
     two = math.copysign(1.0, float(getattr(np, name)(-0.0, 0.0))) < 0
     return {(True, True): 'negative', (False, False): 'positive', (False, True): 'first', (True, False): 'second'}[one, two]
+
+
+_SUM_CHUNK = []
+
+
+def sum_chunk():
+    """How many elements numpy sums in one pairwise pass: some builds do 8192 at a time, which shows in the last bits. Asked
+    once, of the numpy present, with a fixed array on which the two differ. None if it does neither."""
+    np = sys.modules.get('numpy')
+    if np is None:
+        return 0
+    if not _SUM_CHUNK:
+        x = [((i * 2654435761) % 1000003) / 1000003.0 for i in range(20000)]
+
+        def pairwise(i, n):
+            if n < 8:
+                return sum(x[i:i + n], 0.0)
+            if n <= 128:
+                r = x[i:i + 8]
+                k, m = 8, n - n % 8
+                while k < m:
+                    for j in range(8):
+                        r[j] += x[i + k + j]
+                    k += 8
+                t = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]))
+                while k < n:
+                    t += x[i + k]
+                    k += 1
+                return t
+            half = n // 2
+            half -= half % 8
+            return pairwise(i, half) + pairwise(i + half, n - half)
+
+        def chunks(size):
+            total = 0.0
+            for i in range(0, len(x), size):
+                total += pairwise(i, min(size, len(x) - i))
+            return total
+        got = float(np.sum(np.array(x)))
+        _SUM_CHUNK.append(0 if got == pairwise(0, len(x)) else 8192 if got == chunks(8192) else None)
+    return _SUM_CHUNK[0]
 
 
 def abs_flips_nan():
@@ -1041,7 +1086,55 @@ class Compiler:
                         return n
         return None
 
+    def reduction_of(self, e):
+        """For np.sum(x) or x.sum(): (the operation, the array expression, the arguments after it), or None."""
+        nf = self.numpy_func(e.func)
+        if nf in NP_REDUCE:
+            if not e.args:
+                self.fail(e, f'np.{nf}() with no array')
+            return NP_REDUCE[nf], e.args[0], e.args[1:]
+        f = e.func
+        if isinstance(f, ast.Attribute) and f.attr in ARRAY_METHODS and (
+                (isinstance(f.value, ast.Name) and self.env.get(f.value.id) is not None and self.env[f.value.id].kind == 'array')
+                or isinstance(f.value, ast.Subscript)):
+            return f.attr, f.value, e.args
+        return None
+
+    def reduction_array_type(self, e, op, a, rest):
+        """The array being reduced, if this call gives one number that can be matched exactly. Any argument not understood here,
+        such as axis= on more than one dimension, keepdims=True, dtype=, out=, where= or initial=, stays Python."""
+        t = self.typeof(a)
+        if t.kind != 'array':
+            self.fail(e, f'np.{op}() of {t.name}: only arrays compile')
+        if t.elem not in (T.NP_FLOAT64, T.NP_INT64):
+            self.fail(e, f'{op}() of {t.elem.name[3:]} elements')
+        if op == 'mean' and t.elem is T.NP_INT64:
+            self.fail(e, 'mean() of integers (they are converted in chunks, which shows in rounding)')
+        if t.strided and t.ndim > 1:
+            self.fail(e, f'{op}() of a multi-dimensional view with gaps')
+        if len(rest) > 1 or any(isinstance(x, ast.Starred) for x in rest):
+            self.fail(e, f'{op}() with more than an axis')
+        axes = list(rest) + [k.value for k in e.keywords if k.arg == 'axis']
+        for k in e.keywords:
+            if k.arg is None or k.arg not in ('axis', 'keepdims'):
+                self.fail(e, f'{op}() with {k.arg}=')
+            if k.arg == 'keepdims' and not (isinstance(k.value, ast.Constant) and k.value.value is False):
+                self.fail(e, f'{op}() with keepdims= (it returns an array)')
+        if len(axes) > 1:
+            self.fail(e, f'{op}() with two axes')
+        for x in axes:
+            if isinstance(x, ast.Constant) and x.value is None:
+                continue
+            literal = x.operand if isinstance(x, ast.UnaryOp) and isinstance(x.op, ast.USub) else x
+            value = literal.value if isinstance(literal, ast.Constant) else None
+            if type(value) is not int or t.ndim != 1 or (-value if literal is not x else value) not in (0, -1):
+                self.fail(e, f'{op}() with an axis (on more than one dimension it returns an array)')
+        return t
+
     def numpy_type(self, e, name):
+        if name in NP_REDUCE:
+            op, a, rest = self.reduction_of(e)
+            return self.np_reduction_type(e, op, a, rest)
         if e.keywords or any(isinstance(a, ast.Starred) for a in e.args):
             self.fail(e, f'np.{name}() with keyword arguments')
         ts = [self.typeof(a) for a in e.args]
@@ -1070,7 +1163,60 @@ class Compiler:
             return T.NP_INT64
         return T.NP_FLOAT64
 
+    def np_reduction_type(self, e, op, a, rest):
+        t = self.reduction_array_type(e, op, a, rest)
+        if op in ('any', 'all'):
+            return T.NP_BOOL
+        if op in ('argmax', 'argmin'):
+            np = sys.modules.get('numpy')
+            if np is not None and np.intp is not np.int64:
+                self.fail(e, f'{op}() (it gives {np.intp.__name__} on this platform)')
+            return T.NP_INT64
+        if op == 'mean':
+            return T.NP_FLOAT64
+        if op == 'sum' and t.elem is T.NP_FLOAT64 and sum_chunk() is None:
+            self.fail(e, 'sum() on a numpy whose rounding isn\'t known')
+        return t.elem
+
+    def np_reduction_call(self, e, op, a):
+        """An element count and a stride describe any array this takes: a contiguous one is one long run, whatever its shape."""
+        name = self.materialize(a)
+        t = self.env[name]
+        self.helpers.add('np_folds')
+        n = self.hold(' * '.join(['1LL'] + [self.extent(name, k) for k in range(t.ndim)]), T.INT)
+        st = self.hold(self.stride(name, t.ndim - 1), T.INT)
+        p = f'v_{name}'
+        floats = t.elem is T.NP_FLOAT64
+        line = self.line(e)
+        if op in ('max', 'min', 'argmax', 'argmin', 'any', 'all') and not self.loops:
+            self.gotchas[line] = f'{op}() is slower here than numpy on big arrays, for now: numpy uses SIMD (see "Gotchas")'
+        if op == 'sum' and floats:
+            self.helpers.add('np_sum')
+            return self.hold(f'sj_np_sum({p}, {n}, {st}, {sum_chunk() or 0})', T.FLOAT), '1'
+        if op == 'sum':
+            return self.hold(f'sj_np_sum_i({p}, {n}, {st})', T.INT), '1'
+        if op == 'prod':
+            return self.hold(f'sj_np_prod_{"f" if floats else "i"}({p}, {n}, {st})', t.elem), '1'
+        if op == 'mean':
+            self.helpers.add('np_sum')
+            return self.hold(f'sj_np_sum({p}, {n}, {st}, {sum_chunk() or 0}) / (double){n}', T.FLOAT), '1'
+        suffix = 'f' if floats else 'i'
+        if op in ('any', 'all'):
+            return self.hold(f'sj_np_{op}_{suffix}({p}, {n}, {st})', T.BOOL), '1'
+        if op in ('max', 'min', 'argmax', 'argmin'):
+            words = {'max': 'zero-size array to reduction operation maximum which has no identity',
+                     'min': 'zero-size array to reduction operation minimum which has no identity',
+                     'argmax': 'attempt to get argmax of an empty sequence', 'argmin': 'attempt to get argmin of an empty sequence'}
+            self.emit(f'if ({n} == 0) SJ_FAIL({VALUE_ERROR}, {line}, {VALUE_ERROR_MESSAGES.index(words[op])}, 0);')
+        if op in ('max', 'min') and floats:
+            rule = zero_rule('maximum' if op == 'max' else 'minimum')
+            return self.hold(f'sj_np_{op}_f({p}, {n}, {st}, {0 if rule == "first" else 1})', T.FLOAT), '1'
+        return self.hold(f'sj_np_{op}_{suffix}({p}, {n}, {st})', T.INT if op != 'max' and op != 'min' or not floats else T.FLOAT), '1'
+
     def numpy_call(self, e, name):
+        if name in NP_REDUCE:
+            op, a, _ = self.reduction_of(e)
+            return self.np_reduction_call(e, op, a)
         ts = [self.typeof(a) for a in e.args]
         vals = [self.expr(a) for a in e.args]          # arguments first, in order
         vals = [self.hold(c, t) for (c, _), t in zip(vals, ts)]
@@ -1130,6 +1276,9 @@ class Compiler:
         nf = self.numpy_func(e.func)
         if nf:
             return self.numpy_type(e, nf)
+        reduced = self.reduction_of(e)
+        if reduced:
+            return self.np_reduction_type(e, *reduced)
         mf = self.math_func(e.func)
         if mf:
             return self.math_type(e, mf)
@@ -2634,6 +2783,9 @@ class Compiler:
         nf = self.numpy_func(e.func)
         if nf:
             return self.numpy_call(e, nf)
+        reduced = self.reduction_of(e)
+        if reduced:
+            return self.np_reduction_call(e, reduced[0], reduced[1])
         mf = self.math_func(e.func)
         if mf:
             return self.math_call(e, mf)

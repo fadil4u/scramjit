@@ -24,11 +24,15 @@ let worker, editor, viewer, watchdog, original = '', lastGood = '', previousGood
 let ready = false, running = false, asking = false, compiling = false, booted = false, restarting = false;
 let compiled = false, runningPlain = true, nudged = false, startedAt = 0, stage = 'python', info = {}, lastCompile = 5000, barTimer = null;
 let tokens = 0, recent = [], version = 0, span = null, pyRate = 0;
-let compiler = null, compilerUp = false, compilerDog, background = null, want = null, editTimer = null;
+let compiler = null, compilerUp = false, compilerDog, background = null, want = null, editTimer = null, typing = false, carryIntro = false, barOn = false;
 const known = new Set(), infos = new Map();
 // A second Python uses memory; a machine that can't spare it compiles in the writing worker, pausing the story.
 const roomy = () => (navigator.deviceMemory || 8) >= 4 && (navigator.hardwareConcurrency || 4) >= 4 && !/Mobi/.test(navigator.userAgent);
-const say = m => { $('status').textContent = m; };
+let firstToken = false;
+const say = m => { $('status').textContent = m; if (!firstToken) $('waittext').textContent = m; };
+const waitStops = () => { $('wait').classList.add('stopped'); };
+// plain Python can take seconds per token, so something on screen has to say it's still working
+const showWorking = () => { $('story').classList.toggle('slow', firstToken && running && runningPlain); };
 const hidden = () => document.hidden;
 const state = o => { window.demoState = { ...window.demoState, ...o }; };
 
@@ -41,18 +45,28 @@ function controls(on) {
 }
 function note(t, busy) { $('note').textContent = t; $('note').classList.toggle('busy', !!busy); }
 // a progress bar while scramjit compiles, paced by the last compile's time
-function progress(on) {
+function progress(on, ms) {
   const bar = $('progress'), fill = bar.firstElementChild;
   clearTimeout(barTimer);
+  barOn = on;
   if (on) {
     bar.classList.add('on');
     fill.style.transition = 'none'; fill.style.width = '0%'; void fill.offsetWidth;
-    fill.style.transition = `width ${lastCompile * 1.1}ms cubic-bezier(.15,.6,.3,1)`;
+    fill.style.transition = `width ${(ms ?? lastCompile) * 1.1}ms cubic-bezier(.15,.6,.3,1)`;
     fill.style.width = '92%';
   } else {
     fill.style.transition = 'width .18s ease-out'; fill.style.width = '100%';
     barTimer = setTimeout(() => bar.classList.remove('on'), 260);
   }
+}
+// stops at once, without filling up as if the compile had finished
+function cancelBar() {
+  const bar = $('progress'), fill = bar.firstElementChild;
+  clearTimeout(barTimer);
+  barOn = false;
+  bar.classList.remove('on');
+  fill.style.transition = 'none'; fill.style.width = '0%';
+  state({ barCancels: (window.demoState?.barCancels || 0) + 1 });
 }
 
 // ---- the workers
@@ -63,7 +77,7 @@ function hung() {
   asking = compiling = running = ready = false;
   want = background = null; dropCompiler(); clearTimeout(editTimer);
   controls(false); progress(false); note('');
-  if (!booted) return say('Stopped');
+  if (!booted) { say('Stopped'); return waitStops(); }
   say('Restarting');
   restarting = lastGood || original; known.clear();
   start();
@@ -82,14 +96,14 @@ function onCompiler({ data: m }) {
   if (m.type === 'failed') {                           // no second worker: compile in the writing one
     const b = background;
     dropCompiler(); background = null;
-    if (b && !want) want = { code: b.code, name: b.name, intro: b.intro, compiled: b.compiled };
+    if (b && !want && !b.stale) want = { code: b.code, name: b.name, intro: b.intro, compiled: b.compiled };
     pump();
   }
   if (m.type === 'precompiled' && background && m.id === background.id) {
     clearTimeout(compilerDog);
     const b = background;
     background = null;
-    if (want) { state({ dropped: (window.demoState?.dropped || 0) + 1 }); return pump(); }   // newer code is waiting
+    if (want || b.stale) { state({ dropped: (window.demoState?.dropped || 0) + 1 }); return pump(); }   // overtaken by newer code
     if (m.error) return rejected(m.error, b.intro);
     worker.postMessage({ type: 'adopt', files: m.files }, m.files.map(f => f.data.buffer));
     swapIn(b.code, b.name, b.intro, m.seconds, b.compiled);
@@ -98,7 +112,7 @@ function onCompiler({ data: m }) {
 function rejected(error, intro) {
   compiling = false;
   state({ compiles: (window.demoState?.compiles || 0) + 1, compile: null, error });
-  if (want) return pump();                             // already out of date: say nothing about it
+  if (want || typing) return pump();                   // already out of date: say nothing about it
   progress(false); note('');
   showError(error);
   if (intro) setSwitch(false);
@@ -110,7 +124,7 @@ function compilerHung() {
   dropCompiler(); background = null;
   state({ hung: (window.demoState?.hung || 0) + 1, compiles: (window.demoState?.compiles || 0) + 1, compile: null });
   startCompiler();
-  if (want) return pump();
+  if (want || typing) return pump();
   progress(false); note('');
   if (intro) setSwitch(false);
   showError(`That code didn't finish compiling in ${COMPILE_MS / 1000} s, so it was stopped. The story is still running the last code that worked.`);
@@ -119,7 +133,7 @@ function compilerHung() {
 function onMessage({ data: m }) {
   if (m.type === 'status') say(m.msg);
   if (m.type === 'alive') arm(BOOT_MS);
-  if (m.type === 'failed') { calm(); showError(m.error); progress(false); note(''); say(booted ? 'Stopped: see the error beside the editor.' : 'Could not start: ' + m.error); asking = compiling = false; state({ failed: m.error }); }
+  if (m.type === 'failed') { calm(); showError(m.error); progress(false); note(''); say(booted ? 'Stopped: see the error beside the editor.' : 'Could not start: ' + m.error); if (!firstToken) waitStops(); asking = compiling = false; state({ failed: m.error }); }
   if (m.type === 'ready') {
     calm(); booted = true; robot = m.robot;
     state({ python: m.python, boot: m.seconds });
@@ -143,10 +157,16 @@ function onMessage({ data: m }) {
 // worker can be killed and restarted while the story keeps writing.
 function request(code, name, intro) {
   clearTimeout(editTimer);
+  typing = false;
   if (!ready) return;
   showError('');
-  if (compiled && (want?.intro || background?.intro)) intro = true;
+  if (compiled && (want?.intro || background?.intro || carryIntro)) intro = true;
+  carryIntro = false;
   want = { code, name, intro, compiled };
+  if (compiled && !known.has(code) && !(code === lastGood && !runningPlain)) {
+    note('compiling…', true);
+    progress(true, lastCompile + (background ? Math.max(0, background.at + lastCompile - performance.now()) : 0));   // the old compile has to end first
+  }
   if (background) {
     clearTimeout(request.limit);
     const running = background;
@@ -164,11 +184,12 @@ function pump() {
   if (!ready || !want || background || compiling) return;
   const w = want, first = !known.has(w.code);
   if (w.code === lastGood && w.compiled === !runningPlain) {   // back where it already is
-    want = null; progress(false);
-    if (w.compiled) note($('compile').textContent === 'cached' ? '' : $('compile').textContent);
+    want = null; if (barOn) cancelBar();
+    note(w.compiled && $('compile').textContent !== 'cached' ? $('compile').textContent : '');
+    say('Same story, same code.');
     return;
   }
-  if (w.compiled && first) { note('compiling…', true); progress(true); }
+  if (w.compiled && first) { note('compiling…', true); if (!barOn) progress(true); }
   if (w.compiled && first && compiler && !compilerUp) return;  // the second worker is on its way: compilerReady calls here
   want = null;
   if (!w.compiled) return swapIn(w.code, w.name, false, undefined, false);
@@ -194,7 +215,7 @@ function swapped(m) {
   compiling = false;
   const p = swapIn.pending, took = p.seconds ?? m.seconds;
   controls(true);
-  if (!want) progress(false);
+  if (!want && !typing) progress(false);
   state({ compile: p.compiled ? took : null, pause: m.seconds, compiles: (window.demoState?.compiles || 0) + 1, error: m.error || null, writtenDuring: tokens - (window.demoState?.tokensAtCompile ?? tokens), mode: p.compiled ? 'compiled' : 'python' });
   if (m.error) return rejected(m.error, p.intro);
   previousGood = lastGood; lastGood = p.code;
@@ -207,13 +228,14 @@ function swapped(m) {
     if (m.c) infos.set(p.code, { code: p.code, c: m.c, tree: m.tree });
     info = infos.get(p.code) || info;
     $('compile').textContent = fresh ? took.toFixed(1) + ' s' : 'cached';
-    note(fresh ? took.toFixed(1) + ' s' : '');
-  } else { note(''); $('rate').textContent = '–'; }
+    if (!typing) note(fresh ? took.toFixed(1) + ' s' : '');
+  } else { if (!typing) note(''); $('rate').textContent = '–'; }
   root.classList.toggle('fast', p.compiled);
   if (!ready) {
     ready = true; running = true; startedAt = performance.now();
     $('mode').hidden = false;
     if (restarting) { restarting = false; say('Restarted on the last code that worked'); } else say(p.compiled ? 'Writing' : 'Writing, as plain Python');
+    if (!firstToken) $('waittext').textContent = p.compiled ? 'Writing the first token' : 'Writing the first token as plain Python. It stays this slow until you turn on scramjit.';
     worker.postMessage({ type: 'start', prompt: $('prompt').value });
     state({ firstAt: performance.now() });
     setTimeout(startCompiler, 1500);
@@ -223,7 +245,9 @@ function swapped(m) {
     say(!p.compiled ? 'Swapped in as plain Python. Same story, new code.' : !fresh ? 'Swapped in. Same story, new code.' : p.seconds !== undefined ? `Compiled in ${when} while the story kept writing; the swap paused it ${m.seconds.toFixed(1)} s.` : `Compiled and swapped in, ${when}. Same story, new code.`);
     newSpan(p.compiled ? `${pendingLabel || 'your edit'} · ${when}` : pendingLabel || 'your edit');
   }
-  if (want && p.intro && want.compiled) want.intro = true;
+  showWorking();
+  if (typing && p.intro) carryIntro = true;
+  else if (want && p.intro && want.compiled) want.intro = true;
   else if (p.compiled && p.intro) sweep();
   else if (p.compiled) { if (stage !== 'python') showStage(stage); } else if (stage !== 'python') showStage('python');
   ask();
@@ -321,7 +345,11 @@ function newSpan(markText) {
 function gotText(m) {
   if (!compiling) calm();
   asking = false;
-  if (m.text.length) write(m.text);
+  if (m.text.length) {
+    if (!firstToken) { firstToken = true; $('wait').hidden = true; state({ firstToken: true }); }
+    write(m.text);
+  }
+  showWorking();
   tokens += m.tokens;
   recent.push([m.tokens, m.seconds]);
   if (recent.length > 24) recent.shift();
@@ -451,10 +479,11 @@ function setRunning(on) {
   running = on;
   const b = $('pause'), name = on ? 'Pause' : 'Resume';
   b.innerHTML = on ? ICON.pause : ICON.play; b.title = name; b.setAttribute('aria-label', name);
+  showWorking();
 }
 $('pause').onclick = () => { setRunning(!running); say(running ? 'Writing' : 'Paused'); ask(); };
 $('clear').onclick = () => { $('story').textContent = ''; span = null; state({ tail: '' }); };
-$('load').onclick = () => { $('load').hidden = true; start(); };
+$('load').onclick = () => { $('load').hidden = true; $('wait').hidden = false; start(); };
 document.querySelectorAll('.lab-tab').forEach(c => c.addEventListener('click', () => showStage(c.dataset.s)));
 $('tree').addEventListener('click', e => {
   const row = e.target.closest('.lab-row.x');
@@ -472,7 +501,16 @@ editor.on('change', (cm, c) => {
   changedLines.t = setTimeout(() => { changedLines(); showChips(); }, 120);
   if (c.origin === 'setValue' || c.origin === '+edit') return;
   clearTimeout(editTimer);
-  if (ready) editTimer = setTimeout(() => request(editor.getValue(), ''), TYPING_MS);
+  if (!ready) return;
+  // typing cancels what's under way: the code it was for is already out of date
+  typing = true;
+  carryIntro = carryIntro || !!(want?.intro || background?.intro);
+  want = null;
+  if (background) background.stale = true;
+  if (barOn) cancelBar();
+  note('');
+  say(compiled ? 'Compiles when you pause typing' : 'Runs when you pause typing');
+  editTimer = setTimeout(() => request(editor.getValue(), ''), TYPING_MS);
 });
 window.demoApi = { editor, viewer, EDITS, setMode, showStage, get lastGood() { return lastGood; }, get stage() { return stage; } };
 
@@ -482,5 +520,5 @@ async function kept() { try { const c = await caches.open('scramjit-llm-1'); ret
   editor.setValue(original);
   const net = navigator.connection || {};
   const careful = net.saveData || net.type === 'cellular' || /(^|-)2g$/.test(net.effectiveType || '');
-  if (careful && !(await kept())) { $('load').hidden = false; say('Ready when you are: 60 MB to download.'); } else start();
+  if (careful && !(await kept())) { $('load').hidden = false; $('wait').hidden = true; say('Ready when you are: 60 MB to download.'); } else start();
 })();

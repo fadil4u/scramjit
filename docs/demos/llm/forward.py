@@ -1,4 +1,5 @@
-# One forward pass of Llama 2, as plain loops. The page samples the next token from logits.
+# One forward pass of Llama 2, as plain loops.
+# The page samples the next token from logits.
 # Ported from llama2.c by Andrej Karpathy (MIT).
 import math
 

@@ -184,13 +184,18 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
 - **numpy compatibility (2026-11-02).** Slice assignment copies only if the two share memory, as numpy acts. A returned view is a real array over the argument's memory, wrapped through
   `__array_interface__` since a view's root may itself have gaps; a variable tracks which argument it's of, in functions that return arrays only, so others keep their C. A view can
   come in as an argument, unless its address or stride isn't a whole number of elements. Integer `mean` sums in 8192-element chunks on every build, since numpy converts through a buffer; `var` is numpy's steps exactly. `np.clip` of a
-  value equal to a bound depends on the platform, as `max` does, so it's probed. Making arrays inside a function is the largest gap left.
+  value equal to a bound depends on the platform, as `max` does, so it's probed.
 - **x86-64 (first run 2026-11-02, Windows, emulated, AVX2, Python 3.12).** The whole suite runs. `platform.machine()` says ARM64 there, and cimo handles it. All numpy functions on single
   numbers match; AVX-512 unchecked. `max` and `min` keep the last of two zeros, a third rule next to "by sign" (arm64) and "the first" (wasm). Python 3.12 words `1.0 % 0.0` differently from 3.13,
   so zero-division messages now come from the running Python. NaN signs differ as on Windows arm64.
-- **numpy calls (decided 2026-11-02; see `TODO.md`):** array-creating calls stay in Python. Array-creating
-  operations stay in Python, and MKL and BLAS stay out: not pure Python, and their results vary by library, CPU and thread count. A
+- **numpy calls (decided 2026-11-02; see `TODO.md`):** whole-array arithmetic stays in Python, and MKL and BLAS stay out: not pure Python, and their results vary by library, CPU and thread count. A
   plain loop doesn't reproduce `np.sum` (pairwise), and is 6 to 12x slower than numpy on 1,000,000 elements until cimo has SIMD.
+- **Arrays made in a function (built 2026-11-02).** Each is a `malloc`ed block behind a header, and a view remembers its block in a variable. No reference counts, so loops keep their C: at statements
+  that make arrays and at the top of loops that do, if 1 MB or the live size has been allocated since the last time, blocks no variable names are freed. A stale variable only keeps memory longer. A result is copied
+  into a numpy array, as numpy can't own a kernel's block and `resize` has to work; 3.1 µs returning 10 elements against 0.14 for `np.zeros`, 107 µs for 800 KB against 4.8, since numpy's pages stay untouched. Inside a loop 24 ns against 256 (8
+  elements), 213 against 434 (8 KB), 10.9 µs against 6.8 (800 KB, every one mapped and faulted in). A block is `sj_release`d by the kernel's module: `module.free` exists only natively. The size limit is `sys.maxsize` bytes as in numpy,
+  and also what keeps a request from reaching cimo's wasm heap, which truncates past 4 GiB (cimo `TODO.md`). `np.full(2, 300, dtype=np.uint8)` raises in newer numpy and wraps in 2.0.2 (Pyodide's), so the compiler asks the numpy present and wrapping stays Python.
+  Generated C for functions that make no arrays is unchanged, byte for byte, on 10 examples.
 - **Module-level constants (built 2026-11-02).** Hidden parameters, read at each call, not embedded literals: a new value needs no recompile, and arrays and dicts get them for free. Passing one costs about what an
   argument does, 0.2 µs, more than the 21-25 ns measured for only checking one. A literal gains only on `%`: `x[i % K]` 1.25 against 1.06 ns; `x[i] * R` and `range(K)` nothing measurable.
 - **Later:** growable lists, dicts, sets and strings as typed C containers: each needs allocation and a runtime.

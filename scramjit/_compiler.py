@@ -26,7 +26,7 @@ from ._errors import Unsupported
 import sys
 
 from ._mathlib import snippets
-from ._runtime import (BROADCAST_ERROR, INDEX_ERROR, INTERRUPTED, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
+from ._runtime import (ARANGE_ERROR, BROADCAST_ERROR, INDEX_ERROR, INTERRUPTED, LINSPACE_ERROR, MAKE_DTYPES, MAKE_ERROR, NO_AXIS, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
                        OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION)
 
 BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'round', 'sum', 'any', 'all')
@@ -242,9 +242,13 @@ NP_CONVERT = {'float64', 'int64'}
 NP_CONSTANTS = {'pi': math.pi, 'e': math.e, 'inf': math.inf, 'nan': math.nan}
 NP_REDUCE = {'sum': 'sum', 'prod': 'prod', 'mean': 'mean', 'max': 'max', 'min': 'min', 'any': 'any', 'all': 'all', 'argmax': 'argmax',
              'argmin': 'argmin', 'amax': 'max', 'amin': 'min', 'std': 'std', 'var': 'var'}
+NP_MAKE_SHAPED = {'zeros', 'ones', 'empty', 'full'}
+NP_MAKE_LIKE = {'zeros_like', 'ones_like', 'empty_like', 'full_like'}
+NP_MAKE = NP_MAKE_SHAPED | NP_MAKE_LIKE | {'copy', 'array', 'asarray', 'arange', 'linspace'}
+MAX_MADE_DIMS = 4      # sj_block has room for this many
 ARRAY_METHODS = {'sum', 'prod', 'mean', 'max', 'min', 'any', 'all', 'argmax', 'argmin', 'std', 'var'}
 NP_FLOAT_ONLY = {'round': 1, 'around': 1, 'clip': 3, 'degrees': 1, 'rad2deg': 1, 'radians': 1, 'deg2rad': 1}
-NP_FUNCS = set(NP_LIBM1) | set(NP_DIRECT1) | NP_ROUND | NP_KEEPS_INT | set(NP_LIBM2) | {'copysign'} | NP_MINMAX | NP_TESTS | NP_CONVERT \
+NP_FUNCS = NP_MAKE | set(NP_LIBM1) | set(NP_DIRECT1) | NP_ROUND | NP_KEEPS_INT | set(NP_LIBM2) | {'copysign'} | NP_MINMAX | NP_TESTS | NP_CONVERT \
     | set(NP_REDUCE) | set(NP_FLOAT_ONLY)
 
 
@@ -350,7 +354,22 @@ def exact_int_literal(node):
 
 def ret_pairs(ret):
     """How many pairs of sj_io slots a return value uses beyond the first five."""
-    return len(ret.elem) if ret.kind == 'tuple' else ret.ndim if ret.kind == 'array' else 0
+    return len(ret.elem) if ret.kind == 'tuple' else 0
+
+
+def ret_arrays(ret):
+    """The arrays a return value holds, in order."""
+    return [ret] if ret.kind == 'array' else [t for t in ret.elem if t.kind == 'array'] if ret.kind == 'tuple' else []
+
+
+def array_record_slots(t):
+    """Slots describing a returned array: its address, which argument's memory (index, is it that very array), the
+    block it was made in (address, data, ndim, shape), then extent and stride for each axis."""
+    return 10 + 2 * t.ndim
+
+
+class Safepoint(ast.Constant):
+    """Stands for a place where no array is held anywhere but in variables, so unused ones can be freed."""
 
 
 def flatten_dicts(fdef, arg_types):
@@ -414,6 +433,7 @@ class Compiler:
         self.not_literal = set()   # variables assigned an int that isn't a literal
         self.uses_rerun = False    # the kernel can ask for the call to run as Python, before doing anything
         self.tracks = False        # the function returns an array, so views remember which argument they're of
+        self.makes = False         # the function makes arrays, so views remember the block they're in
         self.array_args = []       # for those: (argument index, dict key or None) of each array parameter
         local = {p.arg for p in fdef.args.posonlyargs + fdef.args.args}
         local |= {n.id for n in ast.walk(fdef) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
@@ -478,7 +498,7 @@ class Compiler:
         dict at every exit, since Python would have stored them by then, whatever happens next."""
         stored = {n.id for n in ast.walk(self.f) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
         self.outs = [(flat, i, key) for flat, (i, key, _) in self.dict_slots.items() if flat in stored]
-        self.tracks = self.ret.kind == 'array'
+        self.tracks = bool(ret_arrays(self.ret))
         self.array_args = [(self.dict_slots[p][:2] if p in self.dict_slots else (self.plain_arg(p), None))
                            for p in self.params if self.came_as(p).kind == 'array'] if self.tracks else []
         for flat, _, _ in self.outs:
@@ -488,6 +508,10 @@ class Compiler:
     def out_slot(self, k):
         """The sj_io slot of the k-th written key, past anything a return uses."""
         return 5 + 2 * ret_pairs(self.ret) + 2 * k
+
+    def record_slot(self, k):
+        """The sj_io slot where the k-th returned array's record starts, past everything else."""
+        return self.out_slot(len(self.outs)) + sum(array_record_slots(t) for t in ret_arrays(self.ret)[:k])
 
     def save_outs(self):
         for k, (flat, _, _) in enumerate(self.outs):
@@ -513,16 +537,20 @@ class Compiler:
                 break
         ret = None
         for node, t in self.returns:
-            if ret is not None and ret.kind == 'array' and t.kind == 'array' and ret.elem is t.elem and ret.ndim == t.ndim:
-                ret = T.array(t.elem, ret.writable and t.writable, t.ndim, ret.strided or t.strided)
-                continue
-            j = t if ret is None else T.join(ret, t)
+            j = t if ret is None else T.join_returns(ret, t)
             if j is None:
                 self.fail(node, f'returns {ret.name} in one place and {t.name} in another')
             ret = j
         self.ret = ret or T.NONE
         if self.ret is not T.NONE and not ends_with_return(self.f.body):
             self.fail(self.f, 'can fall off the end (returning None) and also return a value')
+
+    def return_type(self, v):
+        if v is None:
+            return T.NONE
+        if isinstance(v, ast.Tuple) and self.has_views(v):        # only a return can hold arrays in a tuple
+            return T.tuple_of([self.typeof(x) for x in v.elts])
+        return self.typeof(v)
 
     def is_list_ctor(self, v):
         return isinstance(v, (ast.List, ast.ListComp)) or (
@@ -646,7 +674,7 @@ class Compiler:
                     self.fail(n, f'rebinds {n.id} inside a loop over it (Python keeps iterating the old list)')
             self.infer_block(s.body)
         elif isinstance(s, ast.Return):
-            self.returns.append((s, self.typeof(s.value) if s.value is not None else T.NONE))
+            self.returns.append((s, self.return_type(s.value)))
         elif isinstance(s, (ast.Break, ast.Continue, ast.Pass)):
             pass
         elif isinstance(s, ast.Expr) and docstring_ok and isinstance(s.value, ast.Constant) \
@@ -793,7 +821,7 @@ class Compiler:
         """Could this expression be a view: something indexed, or .T of an array?"""
         return isinstance(e, ast.Subscript) or (isinstance(e, ast.Attribute) and e.attr == 'T' and (
             self.is_view(e.value) or (isinstance(e.value, ast.Name) and self.env.get(e.value.id) is not None
-                                      and self.env[e.value.id].kind == 'array')))
+                                      and self.env[e.value.id].kind == 'array'))) or self.make_of(e) is not None
 
     def transpose_type(self, e):
         t = self.typeof(e.value)
@@ -1026,7 +1054,8 @@ class Compiler:
                 self.fail(e, 'tuples of non-numbers (nested tuples, arrays)')
             return T.tuple_of(ts)
         if isinstance(e, ast.Call):
-            return self.call_type(e)
+            made = self.make_of(e)
+            return self.make_type(e, made) if made else self.call_type(e)
         if isinstance(e, (ast.GeneratorExp, ast.ListComp)):
             self.fail(e, 'a generator or list comprehension outside sum(), min(), max(), any() or all()')
         self.fail(e, UNSUPPORTED_EXPRESSIONS.get(type(e).__name__, f'the {type(e).__name__} expression'))
@@ -1150,6 +1179,444 @@ class Compiler:
         if not all(t.kind == 'int' and t.ctype == 'int64_t' for t in els):
             self.fail(e, 'math.sumprod() of floats returns the int 0 when empty, so its type depends on the data')
         return T.INT if not any(t.np for t in els) else T.INT_DYN
+
+    # ---- arrays made in the function: np.zeros(n), x.copy()
+    def make_of(self, e):
+        """For a call making an array: (what it is, its arguments, its keywords), else None."""
+        if not isinstance(e, ast.Call):
+            return None
+        f = e.func
+        if isinstance(f, ast.Attribute) and f.attr in ('copy', 'flatten', 'astype') and (
+                (isinstance(f.value, ast.Name) and self.env.get(f.value.id) is not None and self.env[f.value.id].kind == 'array')
+                or (not isinstance(f.value, ast.Name) and self.is_view(f.value))):
+            return 'method_' + f.attr, [f.value] + e.args, e.keywords
+        name = self.numpy_func(f)
+        if name in NP_MAKE:
+            return name, e.args, e.keywords
+        return None
+
+    def default_int(self):
+        """What numpy makes of a Python int here: int32 on wasm32."""
+        np = sys.modules.get('numpy')
+        return T.NP_INT64 if np is None or np.dtype(int).name == 'int64' else T.NARROW[np.dtype(int).name]
+
+    def dtype_elem(self, node, e):
+        """The element type a dtype= argument names, as far as it can be known from the source."""
+        np = sys.modules.get('numpy')
+        if isinstance(node, ast.Name) and node.id not in self.env and node.id not in self.globals and node.id in ('float', 'int'):
+            return T.NP_FLOAT64 if node.id == 'float' else self.default_int()
+        if isinstance(node, ast.Attribute) and node.attr == 'dtype' and self.is_array_expr(node.value):
+            return self.typeof(node.value).elem
+        name = None
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id not in self.env \
+                and is_numpy(self.globals.get(node.value.id)) and node.attr in MAKE_DTYPES:
+            name = node.attr
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and np is not None:
+            try:
+                d = np.dtype(node.value)
+            except TypeError:
+                self.fail(e, f'dtype {node.value!r}')
+            name = d.name if d.isnative else None
+        if name == 'float64':
+            return T.NP_FLOAT64
+        if name == 'int64':
+            return T.NP_INT64
+        if name in T.NARROW:
+            return T.NARROW[name]
+        self.fail(e, 'an array made with this dtype')
+
+    def is_array_expr(self, e):
+        return (isinstance(e, ast.Name) and self.env.get(e.id) is not None and self.env[e.id].kind == 'array') \
+            or (not isinstance(e, ast.Name) and self.is_view(e) and self.typeof(e).kind == 'array')
+
+    def shape_axes(self, node, e):
+        """How many axes a shape argument gives. Numpy takes any integer: a bool too, but that's rare enough to leave."""
+        if isinstance(node, (ast.Tuple, ast.List)):
+            ts = [self.typeof(x) for x in node.elts]
+        else:
+            t = self.typeof(node)
+            ts = t.elem if t.kind == 'tuple' else [t]
+        if not all(t.kind == 'int' for t in ts):
+            self.fail(e, 'an array shape that is not integers')
+        if not 1 <= len(ts) <= MAX_MADE_DIMS:
+            self.fail(e, f'an array made with {len(ts)} dimensions')
+        return len(ts)
+
+    def make_args(self, e, made, names):
+        """The arguments by name, in the order numpy takes them. Anything else stays Python."""
+        kind, args, kws = made
+        if len(args) > len(names) or any(isinstance(a, ast.Starred) for a in args):
+            self.fail(e, f'np.{kind}() with these arguments')
+        out = dict(zip(names, args))
+        for k in kws:
+            if k.arg not in names or k.arg in out:
+                self.fail(e, f'np.{kind}() with these arguments')
+            out[k.arg] = k.value
+        return out
+
+    def check_full_bounds(self, e, value, elem):
+        """np.full(2, 300, dtype=np.uint8) raises in newer numpy, and wraps in older. Whichever is here decides; wrapping stays Python."""
+        if not T.is_narrow(elem) or elem.kind != 'int' or self.typeof(value).kind != 'int' or self.typeof(value).np is True:
+            return
+        np = sys.modules.get('numpy')
+        try:
+            np.full(1, 1 << 40, dtype=np.int8)
+        except OverflowError:
+            return
+        self.fail(e, 'np.full() of a Python int into a narrower dtype, which wraps in this numpy')
+
+    def fill_elem(self, e, value, dtype):
+        """The element type of np.full(..., value): the value decides, unless dtype= does."""
+        t = self.typeof(value)
+        if not t.is_number or t.kind == 'bool':
+            self.fail(e, f'np.full() of {t.name}')
+        if dtype is not None:
+            if dtype.kind == 'int' and t.kind == 'float':
+                self.fail(e, 'np.full() of a float into an integer dtype')
+            self.check_full_bounds(e, value, dtype)
+            return dtype
+        if T.is_narrow(t):
+            return t
+        if t.kind == 'float':
+            return T.NP_FLOAT64
+        if t.np is True:
+            return T.NP_INT64
+        if self.default_int() is not T.NP_INT64 and not (isinstance(value, ast.Constant) and abs(value.value) < 1 << 31):
+            self.fail(e, 'np.full() of an integer, whose dtype depends on its size here')
+        return self.default_int()
+
+    def like_type(self, e, source, order_matters=True):
+        """The array a *_like or a copy follows. Numpy keeps a layout that isn't C order, unlike what a kernel makes."""
+        if not self.is_array_expr(source):
+            self.fail(e, 'an array made from something other than an array')
+        t = self.typeof(source)
+        if order_matters and t.strided and t.ndim > 1:
+            self.fail(e, 'a copy of a view with two dimensions or more: numpy keeps its memory layout')
+        if t.ndim > MAX_MADE_DIMS:
+            self.fail(e, f'an array made with {t.ndim} dimensions')
+        return t
+
+    def make_type(self, e, made):
+        kind = made[0]
+        if kind == 'asarray':
+            args = self.make_args(e, made, ['a'])
+            if 'a' not in args or not self.is_array_expr(args['a']):
+                self.fail(e, 'np.asarray() of something other than an array')
+            return self.typeof(args['a'])
+        self.makes = True
+        if kind in ('method_copy', 'method_flatten'):
+            if made[2] or len(made[1]) > 1:
+                self.fail(e, f'.{kind[7:]}() with these arguments')
+            t = self.like_type(e, made[1][0], order_matters=False)
+            ndim, elem = t.ndim if kind == 'method_copy' else 1, t.elem
+        elif kind == 'method_astype':
+            args = self.make_args(e, (kind, made[1][1:], made[2]), ['dtype'])
+            if 'dtype' not in args:
+                self.fail(e, '.astype() with these arguments')
+            t = self.like_type(e, made[1][0])
+            ndim, elem = t.ndim, self.dtype_elem(args['dtype'], e)
+            if elem.kind == 'int' and t.elem.kind == 'float':
+                self.fail(e, '.astype() from float to an integer dtype')
+        elif kind == 'arange':
+            ndim, elem = 1, self.arange_elem(e, made)
+        elif kind == 'linspace':
+            ndim, elem = 1, self.linspace_elem(e, made)
+        elif kind == 'array' and self.is_list_source(made[1][0] if made[1] else None):
+            ndim, elem = self.array_of_list(e, made)
+        elif kind in NP_MAKE_SHAPED or kind in NP_MAKE_LIKE:
+            like = kind in NP_MAKE_LIKE
+            full = kind.startswith('full')
+            args = self.make_args(e, made, ['a' if like else 'shape'] + (['fill_value'] if full else []) + ['dtype'])
+            if ('a' if like else 'shape') not in args or (full and 'fill_value' not in args):
+                self.fail(e, f'np.{kind}() with these arguments')
+            dtype = self.dtype_elem(args['dtype'], e) if 'dtype' in args else None
+            if like:
+                t = self.like_type(e, args['a'])
+                ndim, elem = t.ndim, dtype or t.elem
+                if full:
+                    if not self.typeof(args['fill_value']).is_number or self.typeof(args['fill_value']).kind == 'bool' \
+                            or (elem.kind == 'int' and self.typeof(args['fill_value']).kind == 'float'):
+                        self.fail(e, 'np.full_like() of this value')
+                    self.check_full_bounds(e, args['fill_value'], elem)
+            else:
+                ndim = self.shape_axes(args['shape'], e)
+                elem = self.fill_elem(e, args['fill_value'], dtype) if full else dtype or T.NP_FLOAT64
+        elif kind in ('copy', 'array'):
+            args = self.make_args(e, made, ['a'] + (['dtype'] if kind == 'array' else []))
+            if 'a' not in args:
+                self.fail(e, f'np.{kind}() with these arguments')
+            t = self.like_type(e, args['a'])
+            ndim, elem = t.ndim, t.elem
+            if 'dtype' in args:
+                elem = self.dtype_elem(args['dtype'], e)
+                if elem.kind == 'int' and t.elem.kind == 'float':
+                    self.fail(e, 'np.array() of floats into an integer dtype')
+        else:
+            self.fail(e, f'np.{kind}() with these arguments')
+        v = T.array(elem, True, ndim, False)
+        self.env[self.view_name(e)] = v
+        return v
+
+    def arange_args(self, e, made):
+        args = self.make_args(e, made, ['start', 'stop', 'step', 'dtype'])
+        if 'stop' not in args and 'start' in args:
+            args['start'], args['stop'] = None, args['start']   # np.arange(n)
+        if 'stop' not in args or (args.get('start') is None and 'step' in args):
+            self.fail(e, 'np.arange() with these arguments')
+        return [args.get('start'), args['stop'], args.get('step')], args.get('dtype')
+
+    def arange_elem(self, e, made):
+        nums, dtype = self.arange_args(e, made)
+        ts = [self.typeof(a) for a in nums if a is not None]
+        if any(not t.is_number or t.kind == 'bool' or T.is_narrow(t) for t in ts):
+            self.fail(e, 'np.arange() of these values')
+        if any(t.kind == 'float' for t in ts):
+            elem = T.NP_FLOAT64
+        elif self.default_int() is T.NP_INT64:
+            elem = T.NP_INT64
+        elif len(ts) > 1 or ts[0].np:                 # on wasm32 the dtype depends on how big the numbers are
+            self.fail(e, 'np.arange() of these integers, whose dtype depends on their size here')
+        else:
+            elem = self.default_int()
+        if dtype is not None and self.dtype_elem(dtype, e) is not elem:
+            self.fail(e, 'np.arange() with a dtype it would not have chosen')
+        return elem
+
+    def linspace_elem(self, e, made):
+        args = self.make_args(e, made, ['start', 'stop', 'num', 'endpoint'])
+        if 'start' not in args or 'stop' not in args:
+            self.fail(e, 'np.linspace() with these arguments')
+        for x in (args['start'], args['stop']):
+            t = self.typeof(x)
+            if not t.is_number or t.kind == 'bool' or T.is_narrow(t):
+                self.fail(e, f'np.linspace() of {t.name}')
+        if 'num' in args and self.typeof(args['num']).kind != 'int':
+            self.fail(e, 'np.linspace() with a number of samples that is not an integer')
+        if 'endpoint' in args and not (isinstance(args['endpoint'], ast.Constant) and type(args['endpoint'].value) is bool):
+            self.fail(e, 'np.linspace() with endpoint that is not True or False')
+        return T.NP_FLOAT64
+
+    def is_list_source(self, a):
+        return isinstance(a, ast.List) or (isinstance(a, ast.Name) and self.env.get(a.id) is not None and self.env[a.id].kind == 'list')
+
+    def list_shape(self, e, a):
+        """The shape of a list literal (a ragged one is numpy's error to raise), and its numbers in order."""
+        if not isinstance(a, ast.List):
+            return [], [a]
+        parts = [self.list_shape(e, x) for x in a.elts]
+        if any(p[0] != parts[0][0] for p in parts) or (parts and len(parts[0][0]) >= MAX_MADE_DIMS):
+            self.fail(e, 'np.array() of lists of different lengths')
+        return [len(parts)] + (parts[0][0] if parts else []), [x for p in parts for x in p[1]]
+
+    def array_of_list(self, e, made):
+        args = self.make_args(e, made, ['a', 'dtype'])
+        a = args['a']
+        dtype = self.dtype_elem(args['dtype'], e) if 'dtype' in args else None
+        if isinstance(a, ast.Name):
+            ts = [self.env[a.id].elem]
+            ndim = 1
+            if ts[0].kind == 'int' and dtype is None:     # np.array of no elements is float64, of any list
+                self.fail(e, 'np.array() of a list of ints: an empty one gives floats. Pass dtype=')
+        else:
+            shape, nums = self.list_shape(e, a)
+            ndim = len(shape)
+            if 0 in shape[:-1]:
+                self.fail(e, 'np.array() of empty lists')
+            ts = [self.typeof(x) for x in nums]
+        if any(not t.is_number or t.kind == 'bool' or T.is_narrow(t) for t in ts):
+            self.fail(e, 'np.array() of these values')
+        if dtype is not None:
+            if dtype.kind == 'int' and any(t.kind == 'float' for t in ts):
+                self.fail(e, 'np.array() of floats into an integer dtype')
+            return ndim, dtype
+        if any(t.kind == 'float' for t in ts) or not ts:
+            return ndim, T.NP_FLOAT64
+        if self.default_int() is T.NP_INT64:
+            return ndim, T.NP_INT64
+        self.fail(e, 'np.array() of integers, whose dtype depends on their size here')
+
+    def make_arange(self, e, name, t):
+        nums, _ = self.arange_args(e, self.make_of(e))
+        line = self.line(e)
+        vals, how = [], 0
+        for k, a in enumerate(nums):
+            if a is None:
+                vals.append('0LL' if k == 0 else '1LL')
+                continue
+            at = self.typeof(a)
+            vals.append(self.hold(self.expr(a)[0], at))
+            how |= (int(at.kind == 'float') | int(at.np is True) << 1) << (2 * k)
+        floats = any(self.typeof(a).kind == 'float' for a in nums if a is not None)
+        a, b, c = vals
+        ctype = t.elem.ctype
+        bits = []
+        for k, (v, x) in enumerate(zip(vals, nums)):
+            if x is not None and self.typeof(x).kind == 'float':
+                tmp = self.temp()
+                self.emit(f'double {tmp}_d = {v}; int64_t {tmp} = 0; memcpy(&{tmp}, &{tmp}_d, 8);')
+                bits.append(tmp)
+            else:
+                bits.append(f'(int64_t){v}')
+        length = self.temp()
+        self.emit(f'double {length}_x = ceil(((double){b} - (double){a}) / (double){c});')
+        if not floats:
+            self.emit(f'if ({c} != 0 && (uint64_t)((uint64_t){b} - (uint64_t){a}) + 9007199254740992ULL <= 18014398509481984ULL) '
+                      f'{length}_x = ceil((double)({b} - {a}) / (double){c});')
+        bad = f'{c} == 0 || !({length}_x > -9.2e18 && {length}_x < 9.2e18)'
+        fail = f'sj_io[0] = {bits[0]}; sj_io[4] = {how}; SJ_FAIL({ARANGE_ERROR}, {line}, {bits[1]}, {bits[2]});'
+        self.emit(f'if ({bad}) {{ {fail} }}')
+        self.emit(f'int64_t {length} = {length}_x > 0 ? (int64_t){length}_x : 0;')
+        if floats:                              # numpy: a range that isn't empty, but too small a part of the step to see
+            self.emit(f'{{ double r_ = ((double){b} - (double){a}) / (double){c}; if (r_ == 0.0 && (double){b} != (double){a} && 1.0 / r_ > 0.0) {length} = 1; }}')
+        self.new_block(name, t, [length], 0, line, fail)
+        i = self.temp()
+        if floats:
+            self.emit(f'double {i}_f = (double){a}, {i}_d = ((double){a} + (double){c}) - (double){a};')
+            self.emit(f'if ({length} > 0) v_{name}[0] = {i}_f;')    # as numpy: the first two, then those give the rest
+            self.emit(f'if ({length} > 1) v_{name}[1] = (double){a} + (double){c};')
+            self.open(f'for (int64_t {i} = 2; {i} < {length}; {i}++)')
+            self.emit(f'v_{name}[{i}] = {i}_f + (double){i} * {i}_d;')
+        else:
+            self.open(f'for (int64_t {i} = 0; {i} < {length}; {i}++)')
+            self.emit(f'v_{name}[{i}] = ({ctype})((uint64_t){a} + (uint64_t){i} * (uint64_t){c});')
+        self.close()
+
+    def make_linspace(self, e, name, t):
+        args = self.make_args(e, self.make_of(e), ['start', 'stop', 'num', 'endpoint'])
+        line = self.line(e)
+        a = self.hold(self.coerce(self.expr(args['start'])[0], self.typeof(args['start']), T.FLOAT), T.FLOAT)
+        b = self.hold(self.coerce(self.expr(args['stop'])[0], self.typeof(args['stop']), T.FLOAT), T.FLOAT)
+        n = self.hold(self.coerce(self.expr(args['num'])[0], self.typeof(args['num']), T.INT), T.INT) if 'num' in args else '50LL'
+        endpoint = 'endpoint' not in args or args['endpoint'].value
+        self.emit(f'if ({n} < 0) SJ_FAIL({LINSPACE_ERROR}, {line}, {n}, 0);')
+        self.new_block(name, t, [n], 0, line, f'SJ_FAIL({LINSPACE_ERROR}, {line}, {n}, 0);')
+        div, delta, step, i = self.temp(), self.temp(), self.temp(), self.temp()
+        self.emit(f'int64_t {div} = {n}{" - 1" if endpoint else ""}; double {delta} = {b} - {a}, {step} = {div} > 0 ? {delta} / (double){div} : 0.0;')
+        self.open(f'for (int64_t {i} = 0; {i} < {n}; {i}++)')
+        self.emit(f'double y_ = (double){i};')
+        self.emit(f'if ({div} > 0) {{ if ({step} == 0.0) y_ = y_ / (double){div} * {delta}; else y_ = y_ * {step}; }} else y_ = y_ * {delta};')
+        self.emit(f'v_{name}[{i}] = y_ + {a};')
+        self.close()
+        if endpoint:
+            self.emit(f'if ({n} > 1) v_{name}[{n} - 1] = {b};')
+
+    def make_from_list(self, e, name, t):
+        args = self.make_args(e, self.make_of(e), ['a', 'dtype'])
+        a = args['a']
+        line = self.line(e)
+        if isinstance(a, ast.Name):
+            n = self.hold(f'v_{a.id}__n', T.INT)
+            self.new_block(name, t, [n], 0, line)
+            et = self.env[a.id].elem
+            i = self.temp()
+            self.open(f'for (int64_t {i} = 0; {i} < {n}; {i}++)')
+            self.emit(f'v_{name}[{i}] = {self.coerce(f"v_{a.id}[{i}]", et, t.elem)};')
+            self.close()
+            return
+        shape, nums = self.list_shape(e, a)
+        held = []
+        for x in nums:                                  # computed in full, as Python builds the list
+            xt = self.typeof(x)
+            v = self.expr(x)
+            held.append(((self.hold(v[0], xt), v[1]), xt, x))
+        self.new_block(name, t, [f'{k}LL' for k in shape], 0, line)
+        for i, (v, xt, x) in enumerate(held):
+            self.check_fits(x, t.elem, v, xt)
+            self.emit(f'v_{name}[{i}] = {self.coerce(v[0], xt, t.elem)};')
+
+    def new_block(self, name, t, shape, zero, line, fail=None):
+        """Allocate a variable's array. shape: C integers already evaluated. fail: C for what to raise, if not numpy's for an empty array of this shape."""
+        dims, b = self.temp(), self.temp()
+        self.emit(f'int64_t {dims}[] = {{{", ".join(shape)}}};')
+        self.emit(f'sj_block *{b} = sj_make(&sj_h, {len(shape)}, {dims}, sizeof({t.elem.ctype}), {zero});')
+        at = [(shape[k] if k < len(shape) else f'(-{-NO_AXIS - 1}LL - 1)') for k in range(MAX_MADE_DIMS)]
+        code = MAKE_ERROR + MAKE_DTYPES.index(t.elem.name[3:])
+        self.emit(f'if (!{b}) {{ {fail or f"sj_io[0] = {at[0]}; sj_io[4] = {at[3]}; SJ_FAIL({code}, {line}, {at[1]}, {at[2]});"} }}')
+        self.emit(f'v_{name} = ({t.ctype.strip()})({b} + 1); v_{name}__h = {b};')
+        if self.tracks:
+            self.emit(f'v_{name}__b = -1; v_{name}__o = 1;')
+        for k, n in enumerate(shape):
+            self.emit(f'{self.extent(name, k)} = {n};')
+
+    def fill_block(self, name, t, val):
+        total = ' * '.join(self.extent(name, k) for k in range(t.ndim))
+        i = self.temp()
+        self.open(f'for (int64_t {i} = 0, n_ = {total}; {i} < n_; {i}++)')
+        self.emit(f'v_{name}[{i}] = {val};')
+        self.close()
+
+    def copy_into(self, name, t, src):
+        """Elements in C order, whatever the source's strides."""
+        st = self.env[src]
+        if not st.strided and st.elem is t.elem:
+            total = ' * '.join(self.extent(src, k) for k in range(st.ndim))
+            self.emit(f'memcpy(v_{name}, v_{src}, sizeof({t.elem.ctype}) * (size_t)({total}));')
+            return
+        shape, strides = self.view_axes(src)
+        at = self.temp()
+        self.emit(f'int64_t {at} = 0;')
+
+        def body(idx):
+            read = ' + '.join(f'{i} * {s}' for i, s in zip(idx, strides))
+            self.emit(f'v_{name}[{at}++] = {self.coerce(f"v_{src}[{read}]", st.elem, t.elem)};')
+        self.each_element(shape, strides, body)
+
+    def shape_values(self, node):
+        """Evaluate a shape argument, in order."""
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return [self.hold(self.coerce(self.expr(x)[0], self.typeof(x), T.INT), T.INT) for x in node.elts]
+        t = self.typeof(node)
+        if t.kind == 'tuple':
+            return [self.hold(self.coerce(c, et, T.INT), T.INT) for (c, _), et in zip(self.texpr(node), t.elem)]
+        return [self.hold(self.coerce(self.expr(node)[0], t, T.INT), T.INT)]
+
+    def make(self, e):
+        made = self.make_of(e)
+        kind = made[0]
+        if kind == 'asarray':
+            return self.materialize(self.make_args(e, made, ['a'])['a'])
+        name = self.view_name(e)
+        t = self.env[name]
+        line = self.line(e)
+        if kind == 'arange':
+            self.make_arange(e, name, t)
+            return name
+        if kind == 'linspace':
+            self.make_linspace(e, name, t)
+            return name
+        if kind == 'array' and self.is_list_source(made[1][0] if made[1] else None):
+            self.make_from_list(e, name, t)
+            return name
+        if kind.startswith('method_') or kind in ('copy', 'array'):
+            source = made[1][0] if kind.startswith('method_') else self.make_args(e, made, ['a', 'dtype'])['a']
+            src = self.materialize(source)
+            if kind == 'method_flatten':
+                shape = [self.hold(' * '.join(self.extent(src, k) for k in range(self.env[src].ndim)), T.INT)]
+            else:
+                shape = [self.hold(self.extent(src, k), T.INT) for k in range(t.ndim)]
+            self.new_block(name, t, shape, 0, line)
+            self.copy_into(name, t, src)
+            return name
+        like = kind in NP_MAKE_LIKE
+        full = kind.startswith('full')
+        args = self.make_args(e, made, ['a' if like else 'shape'] + (['fill_value'] if full else []) + ['dtype'])
+        if like:
+            src = self.materialize(args['a'])
+            shape = [self.hold(self.extent(src, k), T.INT) for k in range(t.ndim)]
+        else:
+            shape = self.shape_values(args['shape'])
+        val = None
+        if full:                                       # as numpy does: the array, then the value goes in
+            vt = self.typeof(args['fill_value'])
+            v = self.expr(args['fill_value'])
+            val = self.hold(self.coerce(v[0], vt, t.elem), t.elem)
+        self.new_block(name, t, shape, 1 if kind.startswith('zeros') else 0, line)
+        if full:
+            self.check_fits(e, t.elem, v, vt)
+            self.fill_block(name, t, val)
+        elif kind.startswith('ones'):
+            self.fill_block(name, t, self.coerce('1', T.INT, t.elem))
+        return name
 
     def numpy_func(self, func):
         """The name of the numpy function this calls, if it's one that compiles on single numbers."""
@@ -1559,11 +2026,44 @@ class Compiler:
             self.infer()
         self.check_tagged()
         self.find_outs()
-        self.rebound = {n.id for n in ast.walk(self.f) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
-                        and self.env.get(n.id) is not None and self.env[n.id].kind == 'array'}
+        self.rebound = self.arrays_rebound()
+
+    def arrays_rebound(self):
+        """The arrays whose extents can change while something that read them still holds. Not a local assigned once
+        outside any loop: nothing can read it before that, or see it change after."""
+        stores = [n.id for n in ast.walk(self.f) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                  and self.env.get(n.id) is not None and self.env[n.id].kind == 'array']
+        looped = {n.id for loop in ast.walk(self.f) if isinstance(loop, (ast.For, ast.While)) for n in ast.walk(loop)
+                  if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        return {n for n in stores if n in self.params or n in looped or stores.count(n) > 1}
+
+    def add_safepoints(self, stmts):
+        """After each statement that makes an array, and at the top of a loop in which one is made."""
+        def makes(node):
+            return any(isinstance(n, ast.Call) and self.make_of(n) is not None for n in ast.walk(node))
+
+        def point(near):
+            return ast.copy_location(ast.Expr(ast.copy_location(Safepoint(None), near)), near)
+        out = []
+        for s in stmts:
+            nested = [f for f in ('body', 'orelse') if getattr(s, f, None)]
+            for f in nested:
+                setattr(s, f, self.add_safepoints(getattr(s, f)))
+            if isinstance(s, (ast.For, ast.While)) and makes(s):
+                s.body.insert(0, point(s))
+            out.append(s)
+            if not nested and not isinstance(s, ast.Return) and makes(s):
+                out.append(point(s))
+        return out
 
     def generate(self):
         self.infer_with_webs()
+        if self.makes:
+            for n in ast.walk(self.f):
+                if isinstance(n, (ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)) \
+                        and any(isinstance(c, ast.Call) and self.make_of(c) is not None for c in ast.walk(n)):
+                    self.fail(n, 'an array made inside a comprehension')
+            self.f.body = self.add_safepoints(self.f.body)
         da_block(self, self.f.body, set(self.params))
         self.find_aliases()
         self.facts.update(self.mod_assigned())
@@ -1582,6 +2082,9 @@ class Compiler:
                 params.append(f'{t.ctype} v_{p}')
         self.mark(self.f)
         head = len(self.lines)
+        if self.makes:
+            self.helpers.add('np_make')
+            self.emit(f'sj_heap sj_h = {{0, 0, 1048576, {sys.maxsize}ULL}};')
         for p in self.params:
             if p in self.tagged and self.came_as(p) is T.INT:
                 self.uses_rerun = True       # nothing has happened yet, so Python can still take this call
@@ -1607,6 +2110,8 @@ class Compiler:
                     self.emit(f'int v_{name}__b = {self.root_of(name)}, v_{name}__o = 1;')
                 else:
                     self.emit(f'int v_{name}__b = 0, v_{name}__o = 0;')
+            if t.kind == 'array' and self.makes:
+                self.emit(f'sj_block *v_{name}__h = 0;')
             if t.kind == 'array':
                 if name not in self.params:           # a view: filled in where it's made
                     self.emit(f'{t.ctype}v_{name} = 0; int64_t ' + ', '.join(f'{self.extent(name, k)} = 0' for k in range(t.ndim)) + ';')
@@ -1625,6 +2130,8 @@ class Compiler:
             self.plan_counts(self.f.body)
         for s in self.f.body:
             self.stmt(s)
+        marks = ' '.join(f'if (v_{n}__h) v_{n}__h->mark = 1;' for n, t in self.env.items() if t.kind == 'array' and not n.startswith('sjh__'))
+        self.lines = [ln.replace('/*sj_marks*/', marks) for ln in self.lines]
         frees = [f'free(v_{n});' for n, t in self.env.items() if t.kind == 'list'] + \
                 [f'free(v_{n}__np);' for n, t in self.env.items() if t.kind == 'list' and t.elem.np == 'dyn'] + \
                 [f'free({o});' for o, _ in self.owned]
@@ -1633,11 +2140,15 @@ class Compiler:
         self.save_outs()
         if frees:
             self.emit(' '.join(frees))
+        if self.makes:
+            self.emit('sj_free_blocks(&sj_h, 1);')
         self.emit('return 0;')
         self.lines.append('sj_fail:')
         self.save_outs()
         if frees:
             self.emit(' '.join(frees))
+        if self.makes:
+            self.emit('sj_free_blocks(&sj_h, 0);')
         self.emit('sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;')
         self.emit('return sj_st;')
         if self.uses_libm:
@@ -1759,7 +2270,9 @@ class Compiler:
             self.emit(f'v_{name}__int = {1 if vt.kind == "int" else 0};')
 
     def stmt(self, s):
-        if isinstance(s, ast.Expr):           # a docstring
+        if isinstance(s, ast.Expr):           # a docstring, or a place to free arrays
+            if isinstance(s.value, Safepoint):
+                self.emit('if (sj_h.since > sj_h.limit) { /*sj_marks*/ sj_sweep(&sj_h); }')
             return
         self.mark(s)
         if self.counts:
@@ -1848,23 +2361,23 @@ class Compiler:
                     self.stmt(b)
                 self.close()
         elif isinstance(s, ast.Return) and self.ret.kind == 'array':
-            src = self.materialize(s.value)
-            t = self.env[src]
-            self.emit(f'sj_io[0] = (int64_t)(uintptr_t)v_{src}; sj_io[2] = v_{src}__b; sj_io[3] = v_{src}__o;')
-            for k in range(t.ndim):
-                self.emit(f'sj_io[{5 + 2 * k}] = {self.extent(src, k)}; sj_io[{6 + 2 * k}] = {self.stride(src, k)};')
+            self.return_array(s.value, 0)
+            self.emit('goto sj_done;')
+        elif isinstance(s, ast.Return) and ret_arrays(self.ret):
+            k = 0
+            for i, (x, et, rt) in enumerate(zip(s.value.elts, self.typeof_return(s.value), self.ret.elem)):
+                if rt.kind == 'array':
+                    self.return_array(x, k)
+                    k += 1
+                    continue
+                c, f = self.expr(x)
+                self.return_number(i, c, f, et, rt, x)
             self.emit('goto sj_done;')
         elif isinstance(s, ast.Return):
             if s.value is not None and self.ret.kind == 'tuple':
                 vals = self.texpr(s.value)
                 for i, ((c, f), et, rt) in enumerate(zip(vals, self.typeof(s.value).elem, self.ret.elem)):
-                    val = self.coerce(c, et, rt)
-                    if rt.kind == 'float':
-                        t = self.temp()
-                        self.emit(f'{{ double {t} = {val}; memcpy(&sj_io[{4 + 2 * i}], &{t}, 8); }}')
-                    else:
-                        self.emit(f'sj_io[{4 + 2 * i}] = (int64_t)({val});')
-                    self.emit(f'sj_io[{5 + 2 * i}] = {self.ret_flag(s.value.elts[i] if isinstance(s.value, ast.Tuple) else None, f)};')
+                    self.return_number(i, c, f, et, rt, s.value.elts[i] if isinstance(s.value, ast.Tuple) else None)
                 self.emit('goto sj_done;')
             elif s.value is not None:
                 v = self.expr(s.value)
@@ -1888,6 +2401,34 @@ class Compiler:
                 self.emit(f'goto {loop[0]};')
         elif isinstance(s, ast.Continue):
             self.emit('continue;')
+
+    def typeof_return(self, v):
+        return [self.typeof(x) for x in v.elts]
+
+    def return_number(self, i, c, f, et, rt, node):
+        val = self.coerce(c, et, rt)
+        if rt.kind == 'float':
+            t = self.temp()
+            self.emit(f'{{ double {t} = {val}; memcpy(&sj_io[{4 + 2 * i}], &{t}, 8); }}')
+        else:
+            self.emit(f'sj_io[{4 + 2 * i}] = (int64_t)({val});')
+        self.emit(f'sj_io[{5 + 2 * i}] = {self.ret_flag(node, f)};')
+
+    def return_array(self, value, k):
+        src = self.materialize(value)
+        t = self.env[src]
+        at = self.record_slot(k)
+        self.emit(f'sj_io[{at}] = (int64_t)(uintptr_t)v_{src}; sj_io[{at + 1}] = v_{src}__b; sj_io[{at + 2}] = v_{src}__o;')
+        self.emit(f'sj_io[{at + 3}] = 0;')
+        if self.makes:
+            self.open(f'if (v_{src}__h)')
+            self.emit(f'sj_block *b_ = v_{src}__h; b_->mark = 2;')
+            self.emit(f'sj_io[{at + 3}] = (int64_t)(uintptr_t)b_; sj_io[{at + 4}] = (int64_t)(uintptr_t)(b_ + 1); sj_io[{at + 5}] = b_->ndim;')
+            for d in range(MAX_MADE_DIMS):
+                self.emit(f'sj_io[{at + 6 + d}] = b_->shape[{d}];')
+            self.close()
+        for d in range(t.ndim):
+            self.emit(f'sj_io[{at + 10 + 2 * d}] = {self.extent(src, d)}; sj_io[{at + 11 + 2 * d}] = {self.stride(src, d)};')
 
     def while_loop(self, s):
         self.open('for (;;)')
@@ -2494,6 +3035,8 @@ class Compiler:
         first, in order, as Python builds the index before numpy looks at it."""
         if isinstance(e, ast.Name):
             return e.id
+        if isinstance(e, ast.Call):
+            return self.make(e)
         if isinstance(e, ast.Attribute):           # .T: the axes in reverse
             base = self.materialize(e.value)
             name = self.view_name(e)
@@ -2554,6 +3097,8 @@ class Compiler:
     def same_root(self, name, base, same):
         if self.tracks:
             self.emit(f'v_{name}__b = v_{base}__b; v_{name}__o = {f"v_{base}__o" if same else 0};')
+        if self.makes:
+            self.emit(f'v_{name}__h = v_{base}__h;')
 
     def assign_view(self, target, value):
         """row = m[i]: a view is its pointer, extents and strides, so this copies those."""
@@ -2704,6 +3249,8 @@ class Compiler:
             self.emit(f'{t.ctype}v_{name} = v_{src}; int64_t ' + ', '.join(f'{self.extent(name, k)} = {self.extent(src, k)}' for k in range(t.ndim)) + ';')
             if self.tracks:
                 self.emit(f'int v_{name}__b = v_{src}__b, v_{name}__o = v_{src}__o;')
+            if self.makes:
+                self.emit(f'sj_block *v_{name}__h = v_{src}__h;')
             if t.strided:
                 self.emit('int64_t ' + ', '.join(f'v_{name}__s{k} = v_{src}__s{k}' for k in range(t.ndim)) + ';')
             held.append(name)

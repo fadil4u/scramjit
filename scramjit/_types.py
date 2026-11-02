@@ -93,6 +93,17 @@ def join(a, b):
     return None
 
 
+def join_returns(a, b):
+    """The type a function returning a and b in different places returns. An array needn't keep one type, as a
+    variable must: each comes back as what it is."""
+    if a.kind == 'array' and b.kind == 'array' and a.elem is b.elem and a.ndim == b.ndim:
+        return array(a.elem, a.writable and b.writable, a.ndim, a.strided or b.strided)
+    if a.kind == 'tuple' and b.kind == 'tuple' and len(a.elem) == len(b.elem):
+        elems = [join_returns(x, y) for x, y in zip(a.elem, b.elem)]
+        return None if None in elems else tuple_of(elems)
+    return join(a, b)
+
+
 _DICTS = {}
 
 

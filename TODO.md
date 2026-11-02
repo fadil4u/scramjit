@@ -48,17 +48,17 @@ Spills per line, once cimo can report them.
 4. **Loop lifting, what's left:** a loop stays in Python if a variable read afterwards may be unbound
    (`for i ...` then reading `i`, with nothing assigned first), inside `try` or `with`, or containing `return`.
    "Partly compiled" is per function, not per signature. Tracebacks show one extra frame for a loop that raises.
-5. **numpy calls in compiled functions:** `x * 2` and other calls that make arrays still run as Python.
+5. **numpy calls in compiled functions:** `x * 2` and other whole-array arithmetic still run as Python.
    No cimo work is required for any step; its SIMD only adds speed. In this order:
    - **numpy functions on single numbers: built.** See `loops-and-builtins.md`. Left in Python: `np.tanh` and `np.power`, which aren't libm's, and
      combinations whose result depends on the platform or numpy version. Bit for bit checked on arm64, wasm and x86-64 with AVX2 (Windows, emulated). Check AVX-512, where numpy
      may use its own `exp` and `sin`. Not yet: `np.mod`, `np.floor_divide`, `np.degrees`, `np.radians`.
-   - **Views: built,** as arguments and results too, with `.T`, slice assignment and tuples of views. Not yet: a view inside a returned tuple, `a, b = m` (unpacking rows), `x[1:] += y`,
+   - **Views: built,** as arguments and results too, with `.T`, slice assignment and tuples of views. Not yet: `a, b = m` (unpacking rows), `x[1:] += y`,
      a two-dimensional-or-more array assigned into three dimensions or more.
    - **Reductions: built,** with `std`, `var`, integer `mean` and `argmax` on wasm32, for one number from `float64` or `int64`. `axis=` that returns an array, `keepdims=True`, `dtype=`, `out=`, `where=`, `initial=` stay Python.
      Not yet: views with gaps in more than one dimension (numpy's order depends on strides), other dtypes.
-   - **Next, arrays made inside a function:** `y = np.zeros(n)`, `x.copy()`. The largest gap left: such a function has to take `y` as an argument today. They need allocation inside a kernel, and a result that
-     becomes a real numpy array. Worth doing before whole-array arithmetic.
+   - **Arrays made inside a function: built.** See "Making arrays" in `containers.md`. Not yet: `x.reshape()`, `np.eye`, `.size` or `.shape` directly on a call (`np.ones(n).size`), a conditional expression of arrays (`y = a if c else b`),
+     five dimensions or more, `uint64` and `bool` dtypes, an array made in a comprehension. Returning one costs a copy (3.1 µs for 10 elements): worth removing if a Gymnasium-style `reset` or `step` shows it.
    - **Not now, whole-array arithmetic:** `x * 2`, `a + b` need broadcasting and dtype rules on top, which is rewriting numpy.
      They stay in Python, with the loops around them lifted.
    - **Not `np.dot`, and no MKL or BLAS:** they would break "standard library plus cimo", and their results depend on the library, CPU and thread count.

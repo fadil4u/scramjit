@@ -100,8 +100,9 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | Compiled | Runs as Python |
 |:---|:---|
 | `for`, `while`, `break`, `continue`, `if`, conditional expressions | Masks and index arrays: `x[x > 0]` |
-| Views: `m[i]`, `x[a:b]`, `x[::-1]`, `m[:, j]`, `.T`, `for row in m`, as arguments and results | Making arrays: `np.zeros(n)`, `x.copy()` |
-| Assigning to a slice: `x[1:3] = 0.0`, `m[i] = row`, overlap included | `x[1:] += y` |
+| Views: `m[i]`, `x[a:b]`, `x[::-1]`, `m[:, j]`, `.T`, `for row in m`, as arguments and results | `x.reshape(...)`, `np.eye(n)` |
+| Making arrays: `np.zeros(n)`, `x.copy()`, `np.arange`, `np.linspace`, as locals and results | `x[1:] += y` |
+| Assigning to a slice: `x[1:3] = 0.0`, `m[i] = row`, overlap included | `np.sqrt(x)` on a whole array |
 | Numbers, tuples, arrays and dicts at module level | Assigning to a global, other global objects |
 | `range`, `enumerate`, `zip`, `map`, `filter`, comprehensions | numpy array expressions: `a * 2` |
 | `sum(gen, 0.0)`, `min`, `max`, `abs`, `**`, tuple unpacking | Calls to other Python functions |

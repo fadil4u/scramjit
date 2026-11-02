@@ -28,7 +28,7 @@ HINTS = [
     (r'slice|view', 'read and write through views, or loop over the indices you want: for i in range(lo, hi): a[i] = 0.0'),
     (r'^calls [\w.]*\.\w+\(\)', 'write it as a loop; methods and numpy calls on whole arrays aren\'t compiled'),
     (r'^calls \w+\(\)', 'put its body here, or decorate and call it from Python; a compiled function can\'t call Python functions'),
-    (r'empty list|a list assigned', 'allocate a numpy array of the final size and pass it in'),
+    (r'empty list|a list assigned', 'make a numpy array of the final size: np.zeros(n)'),
     (r'must keep one type', 'use a new name for the new type'),
     (r'global or undefined name', 'pass it in as an argument'),
     (r'keeps? one type|would be None', 'make it the same type on every path'),
@@ -158,6 +158,7 @@ def assumed_signature(fdef):
                 and n.value.attr == 'shape' and isinstance(n.value.value, ast.Name):
             ndim[n.value.value.id] = max(ndim.get(n.value.value.id, 1), len(n.targets[0].elts))
     keys = _assumed_dicts(fdef)
+    ints = _assumed_ints(fdef)
     sig = []
     a = fdef.args
     for p in a.posonlyargs + a.args:
@@ -168,9 +169,27 @@ def assumed_signature(fdef):
             sig.append(ann[name])
         elif p.arg in ndim:
             sig.append(T.array(T.NP_FLOAT64, True, ndim[p.arg]))
+        elif p.arg in ints:
+            sig.append(T.INT)
         else:
             sig.append(T.FLOAT)
     return sig
+
+
+def _assumed_ints(fdef):
+    """Names that must be ints: range(n), np.zeros(n), np.zeros((h, w))."""
+    found = set()
+    for n in ast.walk(fdef):
+        if not isinstance(n, ast.Call):
+            continue
+        args = []
+        if isinstance(n.func, ast.Name) and n.func.id == 'range':
+            args = n.args
+        elif isinstance(n.func, ast.Attribute) and n.func.attr in ('zeros', 'ones', 'empty', 'full') and isinstance(n.func.value, ast.Name):
+            shape = n.args[0] if n.args else next((k.value for k in n.keywords if k.arg == 'shape'), None)
+            args = shape.elts if isinstance(shape, (ast.Tuple, ast.List)) else [shape]
+        found |= {x.id for x in args if isinstance(x, ast.Name)}
+    return found
 
 
 def _assumed_dicts(fdef):

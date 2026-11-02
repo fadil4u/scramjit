@@ -48,12 +48,40 @@ A shape that doesn't broadcast raises numpy's `ValueError`. An array can go into
 | Assigning | an element; a number or an array into a slice | `x[1:] += y`, a list into a slice |
 | Functions on one number | [these](loops-and-builtins.md#numpy-functions-on-single-numbers) | `np.tanh`, `np.power` |
 | Reductions to one number | [`sum`, `mean`, `std`, `var`, `max`, `argmax` and the rest](loops-and-builtins.md#numpy-reductions) | `axis=` on more than one dimension, `keepdims=True` |
-| Making arrays | | `x * 2`, `a + b`, `np.zeros(n)`, `x.copy()`, `np.sqrt(x)` |
+| Making arrays | [`np.zeros`, `x.copy()`, `np.arange` and the rest](#making-arrays) | `x * 2`, `a + b`, `np.sqrt(x)`, `x.reshape(...)`, `np.eye(n)` |
 | Element types | `float64`, `int64`, and reading and storing smaller ones | arithmetic on `float32`, `int32`, `uint8` and friends |
-| Other | `len()`, `.shape`, `.size`, `.ndim`, returning a view alone | `np.dot`, `np.linalg`, `np.sort`, `np.cumsum`, a view inside a returned tuple |
+| Other | `len()`, `.shape`, `.size`, `.ndim`, returning arrays and views, alone or in a tuple | `np.dot`, `np.linalg`, `np.sort`, `np.cumsum` |
 
-Anything in the right column runs as Python with numpy's own result, and the loops around it still compile if they fit. The biggest gap is making arrays: a function that starts with `y = np.zeros(n)` has to take `y` as an argument for now.
+Anything in the right column runs as Python with numpy's own result, and the loops around it still compile if they fit.
 
+### Making arrays
+
+A function can make its own arrays, and what it returns is an ordinary numpy array, with the dtype and shape numpy would have given it:
+
+```python
+@scram
+def smooth(x, passes):
+    cur = x.copy()
+    for _ in range(passes):
+        nxt = np.zeros_like(cur)
+        for i in range(1, len(cur) - 1):
+            nxt[i] = (cur[i - 1] + cur[i] + cur[i + 1]) / 3
+        cur = nxt
+    return cur
+```
+
+These compile, up to four dimensions:
+
+- `np.zeros`, `np.ones`, `np.empty`, `np.full`, and the same with `_like`
+- `x.copy()`, `np.copy(x)`, `np.array(x)`, `x.flatten()`, `x.astype(...)` to the same kind of number or from integer to float, and `np.asarray(x)`, which is `x` itself
+- `np.arange`, `np.linspace`
+- `np.array([a, b])` and `np.array([[a, b], [c, d]])` of numbers, and of a local list with `dtype=` if it holds ints, since an empty list would give floats
+
+They take `dtype=` with `float64`, `int64` and the narrower types. `order=` and `like=` stay in Python, as do a `_like` of an array in another memory layout, and `np.array` of mixed lists. Errors are numpy's own, on the line that asked.
+
+Arrays no variable holds any more are freed while the function runs, so a loop making a new array each time doesn't build up memory. A small array made inside a loop costs about 24 ns, against 256 for numpy from Python. A very large one is a little slower than numpy's, at about 11 µs against 7 for 800 KB.
+
+A returned array is copied once, into memory numpy owns, so that `resize` and everything else behave as they do on any array. Both copies exist for a moment, and a function returning a small array costs about 3 µs, against 0.15 for `np.zeros` itself: below a few hundred loop iterations, or for arrays near your memory limit, take the array as an argument instead.
 ## Tuples
 
 Tuples become C structs. Returning several values works as in Python:

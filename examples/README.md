@@ -14,6 +14,7 @@ Python and through scramjit, and asserts the results are identical. They need nu
 | [`reductions.py`](reductions.py) | Spikes in a signal, with `x[a:b].mean()`, `.max()` and `.min()` on a sliding window | Each sample's window, and a stored list of what's found | 1.47 s | 62 ms | 24x |
 | [`views.py`](views.py) | Gaussian elimination with rows and columns as views | Each step changes what the next sees; the pivot depends on the data | 1.65 s | 5.7 ms | 291x |
 | [`numpy_functions.py`](numpy_functions.py) | A greedy route over a sphere, with `np.sin`, `np.arcsin`, `np.sqrt` | Each stop depends on the one before | 0.175 s | 2.4 ms | 74x |
+| [`life.py`](life.py) | Game of Life, making a new board each generation and returning the last | A cell depends on its neighbours and on a test of them | 0.40 s | 3.1 ms | 131x |
 | [`slices.py`](slices.py) | Heat flow, written with slice assignment and views, returning a view | Each step reads the last | 0.314 s | 0.41 ms | 776x |
 | [`constants.py`](constants.py) | A filter with its settings at module level: a number, a tuple, an array, a dict | Clips each sample; each pass repeats over its own output | 0.52 s | 1.5 ms | 338x |
 | [`config_dict.py`](config_dict.py) | An epidemic model with its settings and results in dicts | Each day depends on the one before | 0.081 s | 4.4 ms | 18x |

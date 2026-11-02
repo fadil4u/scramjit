@@ -16,7 +16,7 @@ import warnings
 import weakref
 
 from . import _types as T
-from ._compiler import Compiler, ret_pairs
+from ._compiler import Compiler, array_record_slots, ret_arrays, ret_pairs
 from ._errors import CompileError, FallbackWarning, Unsupported
 from . import _interrupt
 from . import _lift
@@ -166,10 +166,11 @@ class _Interface:
 
     __slots__ = ('base', '__array_interface__')
 
-    def __init__(self, base, address, shape, strides):
+    def __init__(self, base, address, shape, strides, typestr=None):
         self.base = base
-        self.__array_interface__ = {'data': (address, not base.flags.writeable), 'shape': tuple(shape), 'strides': tuple(strides),
-                                    'typestr': base.dtype.str, 'version': 3}
+        self.__array_interface__ = {'data': (address, base is not None and not base.flags.writeable), 'shape': tuple(shape),
+                                    'strides': None if strides is None else tuple(strides),
+                                    'typestr': typestr or base.dtype.str, 'version': 3}
 
 
 _MISSING = object()               # a global that isn't there: nothing compiled can read it, so that call runs as Python
@@ -184,7 +185,7 @@ PYTHON = _Python()
 
 class Compiled:
     __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun', 'outs',
-                 'counts', 'count_lines', 'count_heads', 'count_rest', 'array_args')
+                 'counts', 'count_lines', 'count_heads', 'count_rest', 'array_args', 'records', 'io_size', 'free')
 
     def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None, stop=False, rerun=False):
         self.rerun = rerun
@@ -267,7 +268,7 @@ def _make_plan(f, entry, args):
         env.update(G=f._fn.__globals__, MISSING=_MISSING)
     cargs = []
     for i, (x, t, n) in enumerate(zip(args, entry.types, names)):
-        if (t.kind == 'array' and t.strided) or entry.ret.kind == 'array':
+        if t.kind == 'array' and t.strided:
             return f._slow_call
         if t.kind == 'array':
             env[f'd{i}'] = x.dtype
@@ -313,9 +314,12 @@ def _make_plan(f, entry, args):
     addresses = ''.join(f'        p{i} = addressof(from_buffer({names[i]}))\n' for i in arrays if args[i].flags.writeable)
     take = (f'    try:\n{addresses}    except (ValueError, TypeError, BufferError):      # empty: no buffer to take the address of\n'
             f'        return slow({again})\n') if addresses else ''
-    size = 40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0) + 16 * len(entry.outs)
+    size = entry.io_size
     r = entry.ret
-    if r is T.NONE:
+    if entry.records:
+        env.update(arrays=f._array_result, compiled=entry)
+        result = f"arrays(compiled, io, ({''.join(n + ', ' for n in names)}))"
+    elif r is T.NONE:
         result = 'None'
     elif r is T.INT:
         result = 'q[0]'
@@ -621,7 +625,8 @@ class Function:
         source = c.generate()
         cimo = _get_cimo()
         try:
-            kernel = cimo.compile(PRELUDE + source, cache=self._use_disk, fma=not self._parity).sj_kernel   # Python never contracts
+            module = cimo.compile(PRELUDE + source, cache=self._use_disk, fma=not self._parity)   # Python never contracts
+            kernel = module.sj_kernel
         except cimo.CompileError as e:
             raise Unsupported(None, f'internal error: cimo rejected the generated C ({e}); please report it')
         if c.uses_stop:
@@ -633,6 +638,13 @@ class Function:
                          c.shown_types(), c.checks, c.hoisted_lines, c.gotchas, c.uses_stop, c.uses_rerun)
         entry.outs = [(i, k, 8 * c.out_slot(n), c.env[flat]) for n, (flat, i, k) in enumerate(c.outs)]
         entry.array_args = c.array_args
+        entry.records = [(8 * c.record_slot(k), struct.Struct(f'<{array_record_slots(t)}q'), t.elem.name[3:]) for k, t in enumerate(ret_arrays(c.ret))]
+        if entry.records:
+            import numpy
+            self._np = numpy
+            entry.records = [(at, layout, numpy.dtype(name).str) for at, layout, name in entry.records]
+        entry.io_size = 8 * c.record_slot(len(entry.records))
+        entry.free = module.sj_release if c.makes else None
         if counts:
             entry.counts = bytearray(8 * max(len(c.count_lines), 1))
             entry.count_lines, entry.count_heads, entry.count_rest = c.count_lines, c.count_heads, c.count_rest
@@ -674,7 +686,7 @@ class Function:
             cargs.append(_interrupt.address())
         if entry.counts is not None:
             cargs.append(entry.counts)
-        io = bytearray(40 + 16 * ret_pairs(entry.ret) + 16 * len(entry.outs))
+        io = bytearray(entry.io_size)
         status = entry.kernel(*cargs, io)
         if status == RERUN and entry.rerun:
             return self._py(*self._real(args))
@@ -686,23 +698,53 @@ class Function:
         r = entry.ret
         if r is T.NONE:
             return None
-        if r.kind == 'array':
-            return self._view(entry, io, args)
+        if entry.records:
+            return self._array_result(entry, io, args)
         if r.kind == 'tuple':
             return tuple(self._box(io, 32 + 16 * i, 40 + 16 * i, et) for i, et in enumerate(r.elem))
         return self._box(io, 0, 16, r)
 
-    @staticmethod
-    def _view(entry, io, args):
-        """A returned array: the argument itself if it is one, else a real numpy view of the argument's memory."""
-        value = struct.unpack_from(f'<{5 + 2 * entry.ret.ndim}q', io)
-        i, key = entry.array_args[value[2]]
-        root = args[i] if key is None else args[i][key]
-        if value[3]:
-            return root
-        import numpy
-        size = root.itemsize
-        return numpy.asarray(_Interface(root, value[0], value[5::2], [s * size for s in value[6::2]]))
+    def _array_result(self, entry, io, args):
+        arrays = self._arrays(entry, io, args)
+        r = entry.ret
+        if r.kind == 'array':
+            return arrays[0]
+        arrays = iter(arrays)
+        return tuple([next(arrays) if et.kind == 'array' else self._box(io, 32 + 16 * i, 40 + 16 * i, et) for i, et in enumerate(r.elem)])
+
+    def _arrays(self, entry, io, args):
+        """Returned arrays. One made in the kernel is copied into a numpy array of its own, once however many results
+        are in it, and its block freed; so it's what numpy would have made. The argument itself, or the array made, if
+        it's that; else a real numpy view of its memory."""
+        out, made = [], None
+        numpy = self._np
+        try:
+            for at, layout, typestr in entry.records:
+                value = layout.unpack_from(io, at)
+                address, which, same, block, data, ndim = value[:6]
+                if block:
+                    if made is None:
+                        made = {}
+                    root = made.get(block)
+                    if root is None:
+                        root = made[block] = numpy.array(_Interface(None, data, value[6:6 + ndim], None, typestr))
+                    if not same:
+                        address += root.__array_interface__['data'][0] - data
+                else:
+                    i, key = entry.array_args[which]
+                    root = args[i] if key is None else args[i][key]
+                if same:
+                    out.append(root)
+                else:
+                    size = root.itemsize
+                    out.append(numpy.asarray(_Interface(root, address, value[10::2], [s * size for s in value[11::2]])))
+        finally:
+            if entry.free is not None:
+                blocks = {layout.unpack_from(io, at)[3] for at, layout, _ in entry.records}
+                for block in blocks:
+                    if block:
+                        entry.free(block)
+        return out
 
     def _box(self, io, at, flag_at, r):
         if r.np == 'dyn' and r.kind == 'float' and io[flag_at] == RETURNS_INT:

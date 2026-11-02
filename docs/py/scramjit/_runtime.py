@@ -8,12 +8,18 @@ Tuples return through slots 4 onward.
 
 import errno
 import os
+import struct
 
 INDEX_ERROR, ZERO_DIVISION, VALUE_ERROR, OVERFLOW_ERROR, LIST_INDEX_ERROR, MEMORY_ERROR, INT_BOUNDS_ERROR = \
     1, 2, 3, 4, 5, 6, 7
 INTERRUPTED = 8      # the kernel saw Ctrl-C (see _interrupt.py)
 RERUN = 9            # the kernel did nothing and this call should run as Python
 BROADCAST_ERROR = 10  # assigning an array to a slice: io[2] and io[3] hold the shapes, two dimensions packed in each
+MAKE_ERROR = 64      # allocating an array failed: 64 + index in MAKE_DTYPES, with the shape in io[0], io[2], io[3], io[4] (NO_AXIS: no such axis)
+NO_AXIS = -(1 << 63)
+ARANGE_ERROR = 11    # np.arange can't compute a length: its numbers in io[0], io[2], io[3], how to read each in io[4]
+LINSPACE_ERROR = 12  # np.linspace of a number of samples, in io[2], that is negative or too many
+MAKE_DTYPES = ['float64', 'int64', 'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
 RETURNS_INT = 2      # a returned float's flag, when the value is really a Python int
 NARROW_INT_DTYPES = ['int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
 
@@ -79,6 +85,15 @@ for _i, _f in enumerate((lambda: 1 / 0, lambda: 1.0 / 0.0, lambda: 1 // 0, lambd
         ZERO_DIVISION_MESSAGES[_i] = str(_e)
 
 
+def _numpys_error(make, args):
+    """The exception numpy raises when asked for this, or a plain MemoryError if it happens to succeed."""
+    try:
+        make(*args)
+    except Exception as e:  # noqa: BLE001
+        return e.with_traceback(None)
+    return MemoryError()
+
+
 def exception(status, io):
     """The Python exception for a nonzero status and the sj_io slots."""
     if status == INTERRUPTED:           # Python's handler has a signal pending: it raises at a loop back edge
@@ -104,6 +119,19 @@ def exception(status, io):
             dims = (packed >> 32, packed & 0xffffffff)[2 - nd:]
             return '(' + ','.join(map(str, dims)) + (',)' if nd == 1 else ')')
         return ValueError(f'could not broadcast input array from shape {shape(io[2], io[4] >> 8)} into shape {shape(io[3], io[4] & 255)}')
+    if MAKE_ERROR <= status < MAKE_ERROR + len(MAKE_DTYPES):     # numpy's own error, for what it was asked
+        import numpy
+        return _numpys_error(numpy.empty, (tuple(n for n in (io[0], io[2], io[3], io[4]) if n != NO_AXIS), MAKE_DTYPES[status - MAKE_ERROR]))
+    if status == ARANGE_ERROR:          # numpy's own error, for what it was asked
+        import numpy
+
+        def number(bits, how):
+            v = struct.unpack('<d', struct.pack('<q', bits))[0] if how & 1 else bits
+            return numpy.float64(v) if how & 2 and how & 1 else numpy.int64(v) if how & 2 else v
+        return _numpys_error(numpy.arange, [number(b, io[4] >> (2 * k)) for k, b in enumerate((io[0], io[2], io[3]))])
+    if status == LINSPACE_ERROR:        # numpy's own error, for what it was asked
+        import numpy
+        return _numpys_error(numpy.linspace, (0.0, 1.0, io[2]))
     if status == INT_BOUNDS_ERROR:      # numpy (NEP 50): a Python int stored into a narrower dtype
         return OverflowError(f'Python integer {io[2]} out of bounds for {NARROW_INT_DTYPES[io[3]]}')
     return SystemError(f'scramjit: unknown status {status}')

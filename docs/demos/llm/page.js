@@ -512,6 +512,7 @@ editor.on('change', (cm, c) => {
   say(compiled ? 'Compiles when you pause typing' : 'Runs when you pause typing');
   editTimer = setTimeout(() => request(editor.getValue(), ''), TYPING_MS);
 });
+new ResizeObserver(() => { editor.refresh(); viewer.refresh(); }).observe($('pane'));   // the code panel is as tall as the story's
 window.demoApi = { editor, viewer, EDITS, setMode, showStage, get lastGood() { return lastGood; }, get stage() { return stage; } };
 
 async function kept() { try { const c = await caches.open('scramjit-llm-1'); return !!(await c.match('https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin')); } catch { return false; } }

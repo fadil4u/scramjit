@@ -29,7 +29,7 @@ a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(-
 h1{font-size:clamp(25px,3vw,33px);font-weight:800;letter-spacing:-.03em;line-height:1.15;color:var(--ink)}
 .lede{max-width:74ch;margin-top:8px}
 #status{font:500 13px var(--mono);color:var(--hotD);min-height:20px;margin-top:8px}
-.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin-top:14px;align-items:start}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin-top:14px;align-items:stretch}
 .card{background:var(--white);border:1px solid var(--line);border-radius:12px}
 .stage{padding:16px;display:flex;flex-direction:column;gap:12px}
 .ask{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
@@ -79,7 +79,7 @@ h1{font-size:clamp(25px,3vw,33px);font-weight:800;letter-spacing:-.03em;line-hei
 .lab.nudge .lab-sj{animation:labpulse 1.4s ease-in-out infinite}
 @keyframes labpulse{50%{box-shadow:0 0 0 4px rgba(249,115,22,.35),0 0 22px rgba(249,115,22,.6);color:#fff}}
 /* the code: the editor; with scramjit on, tabs for the syntax tree, the C and the WebAssembly */
-.codecard{background:var(--code);border-color:var(--codeline);overflow:hidden;display:flex;flex-direction:column;height:max(480px,calc(100vh - 290px))}
+.codecard{background:var(--code);border-color:var(--codeline);overflow:hidden;display:flex;flex-direction:column;min-height:0}
 #reset{position:absolute;top:8px;right:12px;z-index:6;width:32px;height:32px;background:#141a28;color:#c9d1e2;border-color:#2a3042}#reset:not(:disabled):hover{color:#fff;border-color:#f9731688}#reset .ic{width:15px;height:15px}
 #err{display:none;flex:none;background:#2a1014;color:#ffb4b4;font:12.5px/1.45 var(--mono);padding:10px 14px;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto}
 .lab-tabs{flex:none;display:flex;align-items:flex-end;gap:0;padding:6px 8px 0;background:var(--code2);border-bottom:1px solid #232838;overflow-x:auto;overflow-y:hidden}

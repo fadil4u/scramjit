@@ -1,7 +1,7 @@
 // Python, numpy, the compiler and the world all run here, so compiling never blocks the page.
 'use strict';
 const PYODIDE = 'https://cdn.jsdelivr.net/pyodide/v0.27.7/full/';
-const SJ = ['__init__.py', '_compiler.py', '_dispatch.py', '_errors.py', '_interrupt.py', '_mathlib.py', '_preflight.py', '_runtime.py', '_types.py'];
+const SJ = ['__init__.py', '_compiler.py', '_dispatch.py', '_errors.py', '_interrupt.py', '_lift.py', '_mathlib.py', '_preflight.py', '_runtime.py', '_types.py'];
 let py, demo;
 const text = async p => { const r = await fetch(p); if (!r.ok) throw new Error(p + ': ' + r.status); return r.text(); };
 const say = msg => postMessage({ type: 'status', msg });

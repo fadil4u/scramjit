@@ -7,7 +7,7 @@ Docs (raw Markdown): https://www.scramjit.dev/llms.txt
 On the first call per argument-type signature, `@scram` generates C for the function and compiles it in-process with cimo, a pure-Python C compiler. No LLVM, C toolchain or binary wheels. Arrays aren't copied. The GIL is released, so threads run in parallel. Source stays plain Python. MIT licensed.
 
 ## Install
-pip install numpy "cimo @ git+https://github.com/farizrahman4u/cimo#subdirectory=python" "scramjit @ git+https://github.com/farizrahman4u/scramjit"
+pip install scramjit numpy
 CPython 3.9+ on Linux, macOS and Windows, or Pyodide. numpy is only needed for arrays.
 
 ## When

@@ -39,11 +39,8 @@ binary wheels. Arrays are passed without copying, and compiled code releases the
 
 ## Install
 
-The packages on PyPI are placeholders for now. Install both from GitHub:
-
 ```
-pip install numpy "cimo @ git+https://github.com/farizrahman4u/cimo#subdirectory=python" \
-                  "scramjit @ git+https://github.com/farizrahman4u/scramjit"
+pip install scramjit numpy
 ```
 
 Requires CPython 3.9 or newer. numpy is only needed for your arrays.

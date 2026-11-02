@@ -1,8 +1,7 @@
 # scramjit: requirements
 
 **Python at native speed.** A JIT written in pure Python, for the loops the interpreter is slowest at. Built on
-[cimo](https://github.com/farizrahman4u/cimo). PyPI name `scramjit` is reserved (placeholder
-0.0.1, published 2026-11-01).
+[cimo](https://github.com/farizrahman4u/cimo). Published on PyPI as `scramjit`.
 
 This is the living spec: what to build, why, what has been measured, and in what order.
 

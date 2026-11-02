@@ -63,7 +63,7 @@ def _libm_table():
 def _arg_type(x):
     """The compiled type of an argument, or None if it isn't compiled."""
     t = type(x)
-    if t is Function:
+    if t is Function or T.is_c_module(x) or T.is_c_function(x):
         return T.function_of(x)
     if t is int:
         return T.INT if -(1 << 63) <= x < (1 << 63) else None
@@ -511,7 +511,7 @@ class Function:
         g = self._fn.__globals__
         self._hidden = sorted(n for n in loads - local - called if n in g and (_arg_type(g[n]) is not None or type(g[n]) is dict))
         callees = sorted(n for n in called - local if type(g.get(n)) is Function)
-        self._hidden += callees
+        self._hidden += callees + sorted(n for n in called - local if T.is_c_function(g.get(n)))
         self._hidden_from = [(g, n) for n in self._hidden]
         for n in callees:                # what they read is read at each call too, and may be in another module
             f = g[n]
@@ -689,9 +689,14 @@ class Function:
         source = c.generate()
         cimo = _get_cimo()
         try:
-            module = cimo.compile(PRELUDE + source, cache=self._use_disk, fma=not self._parity)   # Python never contracts
+            if c.unit.modules:           # as those modules were compiled, or their results would change
+                module = cimo.compile(PRELUDE + source, cache=self._use_disk, fma=c.unit.fma, wrapv=c.unit.wrapv)
+            else:
+                module = cimo.compile(PRELUDE + source, cache=self._use_disk, fma=not self._parity)   # Python never contracts
             kernel = module.sj_kernel
         except cimo.CompileError as e:
+            if c.unit.modules:
+                raise Unsupported(None, f'the C it calls doesn\'t compile in one file with the C generated here: {e}')
             raise Unsupported(None, f'internal error: cimo rejected the generated C ({e}); please report it')
         if c.uses_stop:
             _interrupt.ensure()

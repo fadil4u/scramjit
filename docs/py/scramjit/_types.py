@@ -104,11 +104,19 @@ def join_returns(a, b):
     return join(a, b)
 
 
+def is_c_module(x):
+    return type(x).__name__ in ('Module', 'WasmModule') and type(x).__module__.startswith('cimo.')
+
+
+def is_c_function(x):
+    return type(x).__name__ in ('Kernel', 'WasmKernel') and type(x).__module__.startswith('cimo.')
+
+
 def function_of(fn):
     """A @scram function, as what a global name holds. Each has a type of its own, so a new one is a new signature. No C."""
     t = getattr(fn, '_type', None)
     if t is None:
-        t = fn._type = Type(f'function {fn.__name__}', None, 'function', elem=fn)
+        t = fn._type = Type(f'function {getattr(fn, "__name__", "C module")}', None, 'function', elem=fn)
     return t
 
 

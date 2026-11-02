@@ -91,6 +91,18 @@ class StaticCallee:
         return Callee(self, tree, self.globals, '', 0, opts['boundscheck'], opts['parity'], hidden, None, self.fdef.name)
 
 
+def _c_module(e):
+    """cimo.compile('...') of a literal, as that's the only way to know what its functions take. Nothing runs but the compiler."""
+    if not (isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == 'compile' and isinstance(e.func.value, ast.Name)
+            and e.func.value.id == 'cimo' and len(e.args) == 1 and not e.keywords and isinstance(e.args[0], ast.Constant) and isinstance(e.args[0].value, str)):
+        return None
+    import cimo
+    try:
+        return cimo.compile(e.args[0].value)
+    except cimo.CompileError:
+        return None
+
+
 def module_globals(tree):
     """What compiling needs from a module, without running it: math, and which names are taken."""
     out = {}
@@ -110,7 +122,7 @@ def module_globals(tree):
             for t in s.targets:
                 if isinstance(t, ast.Name):
                     try:
-                        out[t.id] = ast.literal_eval(s.value)
+                        out[t.id] = _c_module(s.value) or ast.literal_eval(s.value)
                     except ValueError:
                         out[t.id] = _OTHER
     return out
@@ -139,6 +151,13 @@ def assumed_signature(fdef, globals_=None, seen=()):
     passed_ints = set()
     for n in ast.walk(fdef):
         f = (globals_ or {}).get(n.func.id) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) else None
+        c = (globals_ or {}).get(n.func.value.id) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) else None
+        if T.is_c_module(c) and n.func.attr in dir(c) and hasattr(c, 'signature'):
+            for a, p in zip(n.args, c.signature(n.func.attr)[1]):
+                if isinstance(a, ast.Name) and p.endswith('*'):
+                    ndim.setdefault(a.id, 1)
+                elif isinstance(a, ast.Name) and p.endswith('_t'):
+                    passed_ints.add(a.id)
         if isinstance(f, StaticCallee) and f.fdef not in seen:
             for a, t in zip(n.args, assumed_signature(f.fdef, globals_, seen + (fdef,))):
                 if isinstance(a, ast.Name) and t.kind == 'array':

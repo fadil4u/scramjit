@@ -119,6 +119,7 @@ Spills per line, once cimo can report them.
     them constantly, and a model writing code reaches for them first. Python's ints don't wrap on `<<`, so decide
     how that fits the 64-bit rule in Gotchas.
 16. **Calls between compiled functions, what's left:** recursion, default parameter values, dicts and lists as arguments, a function passed as an argument, `module.f()`, and a line profile of what's called.
+    **Calling C, what's left:** modules with state, which need calling across modules (cimo: a call by address crashes once the callee uses `malloc`), `include_dirs=` and `link=`, returning a pointer or `uint64_t`, a C function's module compiled with `fma=` on alongside exact math in one file (needs `FP_CONTRACT` in cimo).
 17. **Compile time jumps on large functions.** In a generated 200-line training loop, adding a 4-line nested
     copy (`rec[t, y, x] = grid[y, x]` under one `if`) took the compile from about 3 s to 11 to 15 s on a loaded
     machine. The cause is bounds-check versioning: a planner over the same world is 4,410 lines of C and 205 loops

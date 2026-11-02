@@ -21034,6 +21034,7 @@ import struct
 import sys
 import threading
 import warnings
+from .introspect import Introspection
 import zlib
 from . import assembler as _asm
 from . import execution as _exe
@@ -21443,6 +21444,13 @@ def _address(x, keep):
         keep.append(buf)
         return ctypes.addressof(buf)
     return ctypes.addressof(ctypes.c_char.from_buffer(mv))
+def describe(src, filename, options):
+    target = ('arm64',) if _PYODIDE else ()
+    pp = _preprocess(src, filename, tuple(options.get('include_dirs', ())), options.get('host_headers', False),
+                     tuple(options.get('defines', ())), *target)
+    with _compile_lock:
+        _, params = _ir(pp, filename, options.get('host_headers', False))
+    return params.get('#signatures', {}), params.get('#mutable', [])
 class Kernel:
     def __init__(self, image, name, ret, params, state, out=None):
         self._image = image
@@ -21483,7 +21491,7 @@ class Kernel:
                 self._out.flush(ctx)
     def __repr__(self) -> str:
         return '<cimo kernel %s>' % self.__name__
-class Module:
+class Module(Introspection):
     def __init__(self, text, sigs, link=(), snapshot=False):
         names = [l.split(' ')[0] for l in sigs.splitlines() if l and not l.startswith('#')]
         libsyms = {}
@@ -21563,7 +21571,12 @@ def _module(src, filename, include_dirs, link, host_headers, defines, cache=True
     ftoken = _fma.set(None if fma is None else bool(fma))
     vtoken = _wrapv.set(None if wrapv is None else bool(wrapv))
     try:
-        return _module1(src, filename, include_dirs, link, host_headers, defines)
+        m = _module1(src, filename, include_dirs, link, host_headers, defines)
+        options = {k: v for k, v in (('include_dirs', tuple(include_dirs)), ('link', (link,) if isinstance(link, str) else tuple(link)),
+                                     ('host_headers', host_headers or ()), ('defines', tuple(defines.items() if hasattr(defines, 'items') else defines)),
+                                     ('fma', () if fma is None else fma), ('wrapv', () if wrapv is None else wrapv)) if v != ()}
+        m._record(src, filename, options)
+        return m
     finally:
         _wrapv.reset(vtoken)
         _fma.reset(ftoken)
@@ -23902,7 +23915,7 @@ def stringdecl(expr):
     if d is None:
         d = mkdecl("string", DECLOBJECT, expr.type, QUALNONE, LINKNONE)
         d.value = Q.mkglobal(d)
-        Q.emitdata(d, IN.mkinit(0, expr.type.size, BITS0, expr))
+        Q.emitdata(d, IN.mkinit(0, expr.type.size, BITS0, expr), literal=True)
         strings[key] = d
     return d
 def emittentativedefns():
@@ -28077,6 +28090,27 @@ def emitjump(b):
     else:
         assert 0
 paraminfo = None
+def _ctypename(t):
+    from .cc import QUALCONST, TYPEARRAY, TYPEBOOL, TYPEDOUBLE, TYPEFLOAT, TYPELDOUBLE, TYPEPOINTER, TYPEUNION, TYPESTRUCT, TYPEVOID
+    if t.kind == TYPEPOINTER:
+        const, base = t.qual & QUALCONST, t.base
+        while base.kind == TYPEARRAY:
+            const |= base.qual & QUALCONST
+            base = base.base
+        return ('const ' if const else '') + _ctypename(base) + ' *'
+    names = {TYPEVOID: 'void', TYPEBOOL: '_Bool', TYPEFLOAT: 'float', TYPEDOUBLE: 'double', TYPELDOUBLE: 'long double', TYPESTRUCT: 'struct', TYPEUNION: 'union'}
+    if t.kind in names:
+        return names[t.kind]
+    if t.prop & PROPINT:
+        return '%sint%d_t' % ('' if t.issigned else 'u', 8 * t.size)
+    return 'function'
+def _isconst(d):
+    from .cc import QUALCONST, TYPEARRAY
+    t, const = d.type, d.qual & QUALCONST
+    while t.kind == TYPEARRAY:
+        const |= t.qual & QUALCONST
+        t = t.base
+    return const
 def _recordparams(f):
     from .cc import QUALRESTRICT
     out = []
@@ -28089,6 +28123,13 @@ def _recordparams(f):
         p = p.next
         vi += 1
     paraminfo[f.decl.value.name] = out
+    p, params = f.type.params, []
+    while p:
+        params.append(_ctypename(p.type))
+        p = p.next
+    if f.type.isvararg:
+        params.append('...')
+    paraminfo.setdefault('#signatures', {})[f.decl.value.name] = (_ctypename(f.type.base), tuple(params))
     r = f.type.base
     if r.prop & PROPINT and not r.issigned and r.size >= 4:
         paraminfo.setdefault('#unsigned', set()).add(f.decl.value.name)
@@ -28211,7 +28252,9 @@ def dataitem(expr, size):
             w(", z %d" % (size - i * ew))
     else:
         error(tok.loc, "initializer is not a constant expression")
-def emitdata(d, init):
+def emitdata(d, init, literal=False):
+    if paraminfo is not None and not literal and not _isconst(d) and d.value.name:
+        paraminfo.setdefault('#mutable', []).append(d.value.name)
     offset = 0
     bits = 0
     align = d.align
@@ -30209,6 +30252,28 @@ size_t strnlen(const char *s, size_t maxlen);
 char *strdup(const char *s);
 char *strndup(const char *s, size_t n);
 #endif
+''',
+'introspect.py': '''\
+class Introspection:
+    source = None
+    options = None
+    _found = None
+    def _record(self, source, filename, options):
+        self.source = source
+        self.options = options
+        self._filename = filename
+        for k in self._kernels.values():
+            k.module = self
+    def _find(self):
+        if self._found is None:
+            from .driver import describe
+            self._found = describe(self.source, self._filename, self.options)
+        return self._found
+    def signature(self, name):
+        return self._find()[0][name]
+    @property
+    def mutable_data(self):
+        return list(self._find()[1])
 ''',
 'linker.py': '''\
 import codecs
@@ -33803,12 +33868,12 @@ def closeloop(fast, em, MB, FP, state):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "4f817e374e387f94c1bf",
-"runtime-amd64_sysv": "d34ac46e2face522ecbb",
-"runtime-amd64_windows": "b15f3463c2383cda2311",
-"runtime-arm64": "3c0eb8187c8ba68159ad",
-"runtime-arm64_apple": "e5f6ebcb827c4843b59f",
-"runtime-arm64_win": "cd2912e10df4ad98acdc"
+"compiler": "9029d530336326721cf5",
+"runtime-amd64_sysv": "3928d8e22639f1b57d40",
+"runtime-amd64_windows": "5535cfa8e2134bc791cf",
+"runtime-arm64": "eddd83af051d0108c61e",
+"runtime-arm64_apple": "b7f26c9a03421feae4a1",
+"runtime-arm64_win": "3c6e9ea14a01a7d3e171"
 }
 ''',
 'onefile.py': '''\
@@ -46805,6 +46870,7 @@ import sys
 import js
 import pyodide_js
 from pyodide.ffi import create_proxy, to_js
+from ..introspect import Introspection
 from ..execution import (KernelError, E_ABORT, E_ASSERT, E_TRAP, E_EXIT)
 _ids = itertools.count()
 _PY = {'w': int, 'l': int, 's': float, 'd': float, 'W': int, 'L': int}
@@ -46837,7 +46903,7 @@ def _address(x, keep):
     return ctypes.addressof(ctypes.c_char.from_buffer(mv))
 def _cstr(p):
     return ctypes.string_at(p).decode('utf-8', 'replace') if p else None
-class WasmModule:
+class WasmModule(Introspection):
     def __init__(self, mod, sigs):
         self._err = None
         self._decoder = codecs.getincrementaldecoder('utf-8')('replace')
@@ -46934,6 +47000,10 @@ class WasmKernel:
         for a, k in zip(args, self._params):
             if k == 'l':
                 conv.append(a if isinstance(a, int) else _address(a, keep))
+            elif k == 'w':
+                conv.append(((int(a) + 0x80000000) & 0xffffffff) - 0x80000000)
+            elif k == 'W':
+                conv.append(int(a) & 0xffffffff)
             else:
                 conv.append(_PY[k](a))
         m = self._m
@@ -46952,6 +47022,8 @@ class WasmKernel:
             return int(r) & 0xffffffff
         if self._ret == 'L':
             return int(r) & 0xffffffffffffffff
+        if self._ret in ('d', 's'):
+            return float(r)
         return r
     def __repr__(self):
         return '<cimo kernel %s (wasm)>' % self.__name__

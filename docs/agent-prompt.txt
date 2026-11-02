@@ -37,7 +37,7 @@ A function compiles whole, or all of it runs as Python with a FallbackWarning. R
 Arguments: int, float, bool; contiguous n-D numpy arrays of int8-int64, uint8-uint32, float32, float64. Anything else falls back; convert first with np.asarray(list), np.frombuffer(bytes, np.uint8), np.ascontiguousarray(a).
 Compiles: for, while, if, break, continue, ternary; a[i, j], negative indices, a.shape, a.ndim; views a[1:], a[i], a.T; a.sum(), a.max(), np.sqrt(a[i]); np.zeros, np.ones, np.full, np.arange, np.linspace, a.copy(), returned as numpy arrays; tuples; lists of fixed size; comprehensions; range, enumerate, zip, reversed, map, filter, len, abs, min, max, any, all, int, float, round; sum of ints or sum(gen, 0.0); math.*.
 Falls back, with the fix:
-- calling a function without @scram, recursing, default parameter values: decorate it, write a loop, pass every argument. Calling another @scram function at module level compiles, so split a program into functions as usual
+- calling a function without @scram, recursing, default parameter values: decorate it, write a loop, pass every argument. Calling another @scram function at module level compiles, so split a program into functions as usual. So does k.f(x) with k = cimo.compile('...') at module level, for shifts and bit tricks, if its data is const
 - global variables: pass as arguments
 - a * 2, a + b, a[a > 0], np.sqrt(a), a.reshape(...): write the loop over a[i, j]
 - arithmetic on elements narrower than 64 bits: int(a[i]) or float(a[i]); comparing and storing them is fine

@@ -16,6 +16,7 @@ Python and through scramjit, and asserts the results are identical. They need nu
 | [`numpy_functions.py`](numpy_functions.py) | A greedy route over a sphere, with `np.sin`, `np.arcsin`, `np.sqrt` | Each stop depends on the one before | 0.175 s | 2.4 ms | 74x |
 | [`life.py`](life.py) | Game of Life, making a new board each generation and returning the last | A cell depends on its neighbours and on a test of them | 0.40 s | 3.1 ms | 131x |
 | [`calls.py`](calls.py) | A cart and pole as `reset`, `step` and `policy`, run by a function calling them | Each step depends on the last, and an episode ends when the pole falls | 1.95 s | 31.1 ms | 63x |
+| [`inline_c.py`](inline_c.py) | Counting different values with a hash table, its hash in C from `cimo.compile` | How far each probe goes depends on the data | 0.222 s | 1.42 ms | 157x |
 | [`slices.py`](slices.py) | Heat flow, written with slice assignment and views, returning a view | Each step reads the last | 0.314 s | 0.41 ms | 776x |
 | [`constants.py`](constants.py) | A filter with its settings at module level: a number, a tuple, an array, a dict | Clips each sample; each pass repeats over its own output | 0.52 s | 1.5 ms | 338x |
 | [`config_dict.py`](config_dict.py) | An epidemic model with its settings and results in dicts | Each day depends on the one before | 0.081 s | 4.4 ms | 18x |

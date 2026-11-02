@@ -242,6 +242,7 @@ NP_CONVERT = {'float64', 'int64'}
 NP_CONSTANTS = {'pi': math.pi, 'e': math.e, 'inf': math.inf, 'nan': math.nan}
 NP_REDUCE = {'sum': 'sum', 'prod': 'prod', 'mean': 'mean', 'max': 'max', 'min': 'min', 'any': 'any', 'all': 'all', 'argmax': 'argmax',
              'argmin': 'argmin', 'amax': 'max', 'amin': 'min', 'std': 'std', 'var': 'var'}
+CONTRACTING = {'lanczos', 'gamma', 'lgamma', 'remainder', 'np_stats'}     # helpers with a * b + c in one C expression
 NP_MAKE_SHAPED = {'zeros', 'ones', 'empty', 'full'}
 NP_MAKE_LIKE = {'zeros_like', 'ones_like', 'empty_like', 'full_like'}
 NP_MAKE = NP_MAKE_SHAPED | NP_MAKE_LIKE | {'copy', 'array', 'asarray', 'arange', 'linspace'}
@@ -436,6 +437,26 @@ class Unit:
         self.code = []           # the callees' C, each after those it calls
         self.helpers = set()
         self.frames = []         # (file, function name) a failed call's trace refers to
+        self.modules = []        # cimo modules whose functions are called: their C goes in this file
+        self.fma = self.wrapv = None
+
+    def add_module(self, m):
+        if any(m is x for x in self.modules):
+            return
+        o = m.options or {}
+        for name in ('fma', 'wrapv'):
+            if self.modules and getattr(self, name) != o.get(name):
+                raise Unsupported(None, f'C modules compiled with different {name}=')
+        self.fma, self.wrapv = o.get('fma'), o.get('wrapv')
+        self.modules.append(m)
+
+    def c_source(self):
+        """The C of the modules called, with their defines."""
+        out = []
+        for m in self.modules:
+            defines = (m.options or {}).get('defines', ())
+            out += [f'#define {k} {"1" if v is None else v}' for k, v in defines] + [m.source] + [f'#undef {k}' for k, _ in defines]
+        return '\n'.join(out) + '\n' if out else ''
 
     def callee(self, spec, types):
         key = (spec.identity, tuple(types))
@@ -731,7 +752,7 @@ class Compiler:
         elif isinstance(s, ast.Expr) and docstring_ok and isinstance(s.value, ast.Constant) \
                 and isinstance(s.value.value, str):
             pass
-        elif isinstance(s, ast.Expr) and self.callee_of(s.value) is not None:
+        elif isinstance(s, ast.Expr) and self.calls_out(s.value):
             self.typeof(s.value)
         elif isinstance(s, ast.Expr):
             self.fail(s, 'an expression statement (calls with side effects are not compiled yet)')
@@ -1239,10 +1260,114 @@ class Compiler:
         if not isinstance(e, ast.Call) or not isinstance(e.func, ast.Name) or e.func.id in self.cnames:
             return None
         t = self.env.get(e.func.id)
+        f = (t.elem if t.kind == 'function' else None) if t is not None else self.globals.get(e.func.id)
+        return f if hasattr(type(f), '_callee') or (f is not None and type(f).__name__ == 'StaticCallee') else None
+
+    def calls_out(self, e):
+        """Does this call run code that can write arrays it was given?"""
+        return self.callee_of(e) is not None or self.c_function_of(e) is not None
+
+    # ---- calls to C: k = cimo.compile('...'), then k.f(x). Its source goes in this file, so it can be inlined.
+    def global_object(self, name):
+        t = self.env.get(name)
         if t is not None:
             return t.elem if t.kind == 'function' else None
-        f = self.globals.get(e.func.id)
-        return f if hasattr(f, '_callee') else None
+        return self.globals.get(name)
+
+    def c_function_of(self, e):
+        """For a call to a C function: (its module, its name)."""
+        if not isinstance(e, ast.Call):
+            return None
+        f = e.func
+        if isinstance(f, ast.Name) and f.id not in self.cnames:
+            x = self.global_object(f.id)
+            if T.is_c_function(x):
+                return (x.module, x.__name__) if hasattr(x, 'module') else (None, x.__name__)
+        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id not in self.cnames:
+            x = self.global_object(f.value.id)
+            if T.is_c_module(x):
+                return x, f.attr
+        return None
+
+    def c_signature(self, e):
+        """(return type, parameter types), checked: only what comes out as it does when Python makes this call."""
+        m, name = self.c_function_of(e)
+        label = f'{name}() in C'
+        if m is None or not hasattr(m, 'signature'):
+            self.fail(e, f'{label}: this cimo is too old to say what its functions take')
+        bad = [k for k in (m.options or {}) if k in ('include_dirs', 'link', 'host_headers')]
+        if bad:
+            self.fail(e, f'{label}: a module compiled with {bad[0]}=')
+        if m.mutable_data:
+            self.fail(e, f'{label}: its module has data that isn\'t const ({", ".join(m.mutable_data[:3])}), and a compiled copy wouldn\'t share it')
+        try:
+            self.unit.add_module(m)
+            ret, params = m.signature(name)
+        except KeyError:
+            self.fail(e, f'{label}: no such function')
+        except Unsupported as u:
+            self.fail(e, f'{label}: {u.reason}')
+        if e.keywords or len(e.args) != len(params) or '...' in params or any(isinstance(a, ast.Starred) for a in e.args):
+            self.fail(e, f'{label} with these arguments')
+        for a, p in zip(e.args, params):
+            self.check_c_arg(e, a, p, label)
+        if ret == 'void':
+            return T.NONE, params
+        if ret in ('double', 'float'):
+            return T.FLOAT, params
+        if ret in ('_Bool', 'int8_t', 'uint8_t', 'int16_t', 'uint16_t', 'int32_t', 'uint32_t', 'int64_t'):
+            return T.INT, params
+        self.fail(e, f'{label}, which returns {ret}')
+
+    def check_c_arg(self, e, a, p, label):
+        t = self.typeof(a)
+        if p.endswith('*'):
+            base = p[:-1].strip()
+            const = base.startswith('const ')
+            base = base[6:] if const else base
+            if t.kind != 'array':
+                self.fail(e, f'{label}: passes {t.name} as {p}')
+            if t.strided:
+                self.fail(e, f'{label}: passes a view with gaps, and C sees only where it starts')
+            if base not in ('void', t.elem.ctype):
+                self.fail(e, f'{label}: passes {t.name} as {p}')
+            if not const and not t.writable:
+                self.fail(e, f'{label}: passes a read-only array as {p}')
+            return
+        if not t.is_number:
+            self.fail(e, f'{label}: passes {t.name} as {p}')
+        if p in ('double', 'float'):
+            return
+        if p == '_Bool':                   # Python's call doesn't make it 0 or 1
+            if t is not T.BOOL:
+                self.fail(e, f'{label}: passes {t.name} as _Bool')
+        elif p not in ('int8_t', 'uint8_t', 'int16_t', 'uint16_t', 'int32_t', 'uint32_t', 'int64_t', 'uint64_t'):
+            self.fail(e, f'{label}: a parameter of type {p}')
+        elif t.kind == 'float' or t.np == 'dyn' and t.kind != 'int' or t is T.NP_BOOL:
+            self.fail(e, f'{label}: passes {t.name} as {p}, which Python raises for')
+        elif t.np and p in ('int64_t', 'uint64_t'):
+            self.fail(e, f'{label}: passes {t.name} as {p}, and cimo takes numpy\'s integers there as an address: use int(...)')
+
+    def c_call(self, e):
+        """Evaluate the arguments in order, and return the call as C."""
+        _, name = self.c_function_of(e)
+        _, params = self.c_signature(e)
+        cargs = []
+        for a, p in zip(e.args, params):
+            t = self.typeof(a)
+            if t.kind == 'array':
+                cargs.append(f'(void *)v_{self.materialize(a)}')
+            elif p == 'float':
+                cargs.append(self.hold(f'(float)(double)({self.expr(a)[0]})', T.NARROW['float32']))
+            elif p == 'double':
+                cargs.append(self.hold(f'(double)({self.expr(a)[0]})', T.FLOAT))
+            else:
+                cargs.append(self.hold(f'(int64_t)({self.expr(a)[0]})', T.INT))
+        return f'{name}({", ".join(cargs)})'
+
+    def c_number(self, e):
+        ret, _ = self.c_signature(e)
+        return self.hold(self.c_call(e), ret), '0'
 
     def call_args(self, e, spec):
         """The arguments in the order Python evaluates them, and for each parameter which of those it gets."""
@@ -1420,6 +1545,9 @@ class Compiler:
         return out
 
     def call_statement(self, e):
+        if self.c_function_of(e) is not None:
+            self.emit(f'{self.c_call(e)};')
+            return
         c = self.compiled_callee(e)
         if c.ret.kind == 'tuple':
             self.call_results(e)
@@ -2128,6 +2256,8 @@ class Compiler:
     def call_type(self, e):
         if self.callee_of(e) is not None:
             return self.callee_type(e)
+        if self.c_function_of(e) is not None:
+            return self.c_signature(e)[0]
         nf = self.numpy_func(e.func)
         if nf:
             return self.numpy_type(e, nf)
@@ -2452,7 +2582,9 @@ class Compiler:
         self.tb_slot = self.record_slot(len(ret_arrays(self.ret)))
         if self.calls:
             start.append(f'    int64_t *sj_tb = sj_io + {self.tb_slot}; sj_tb[0] = 0;')
-        return snippets(self.helpers | self.unit.helpers) + '\n'.join(self.unit.code + self.lines[:head] + [f'int sj_kernel({", ".join(params)}) {{'] + start
+        if self.unit.modules and self.unit.fma is not False and (self.helpers | self.unit.helpers) & CONTRACTING:
+            raise Unsupported(None, 'math that must not contract a * b + c, with C that was compiled to: pass fma=False to cimo.compile')
+        return self.unit.c_source() + snippets(self.helpers | self.unit.helpers) + '\n'.join(self.unit.code + self.lines[:head] + [f'int sj_kernel({", ".join(params)}) {{'] + start
                          + self.lines[head:] + ['}', ''])
 
     def plan_counts(self, stmts, by_test=False):
@@ -2463,7 +2595,7 @@ class Compiler:
         would stop it becoming a conditional move (a random branch: 0.69 to 4.6 ns). by_test: stmts are one."""
         slot = None
         for s in stmts:
-            if isinstance(s, ast.Expr) and self.callee_of(s.value) is None:    # a docstring: stmt() emits nothing for it
+            if isinstance(s, ast.Expr) and not self.calls_out(s.value):    # a docstring: stmt() emits nothing for it
                 continue
             leads = slot is None and not by_test
             if slot is None:
@@ -2563,11 +2695,11 @@ class Compiler:
             self.emit(f'v_{name}__int = {1 if vt.kind == "int" else 0};')
 
     def stmt(self, s):
-        if isinstance(s, ast.Expr) and self.callee_of(s.value) is None:     # a docstring, or a place to free arrays
+        if isinstance(s, ast.Expr) and not self.calls_out(s.value):     # a docstring, or a place to free arrays
             if isinstance(s.value, Safepoint):
                 self.emit('if (sj_h.since > sj_h.limit) { /*sj_marks*/ sj_sweep(&sj_h); }')
             return
-        self.call_stmt = any(self.callee_of(n) is not None for n in ast.walk(s))
+        self.call_stmt = any(self.calls_out(n) for n in ast.walk(s))
         self.mark(s)
         if self.counts:
             self.count(s)
@@ -2918,7 +3050,7 @@ class Compiler:
         if not fact or fact[0] is None:
             return None
         body = list(ast.walk(ast.Module(body=s.body, type_ignores=[])))
-        if any(isinstance(n, (ast.For, ast.While, ast.comprehension, ast.Continue)) or self.callee_of(n) is not None for n in body):
+        if any(isinstance(n, (ast.For, ast.While, ast.comprehension, ast.Continue)) or self.calls_out(n) for n in body):
             return None                        # a call can write any array it's given
         stores = [n for n in body if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store)]
         if len(stores) != 1 or not isinstance(stores[0].value, ast.Name):
@@ -3750,6 +3882,8 @@ class Compiler:
     def expr_now(self, e):
         if self.callee_of(e) is not None:
             return self.call_number(e)
+        if self.c_function_of(e) is not None:
+            return self.c_number(e)
         if isinstance(e, ast.Constant):
             v = e.value
             if isinstance(v, bool):

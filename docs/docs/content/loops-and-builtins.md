@@ -140,3 +140,49 @@ A call runs as Python, with the same result, and says why, when:
 - it has default values for parameters, or is passed a dict or a list, or a function
 
 Inside a call there's no profile of its own: time in `step` counts toward `run` in `preflight --run`, and `counts=True` counts the lines of the outer function only.
+
+## Calling C
+
+For what's awkward in Python, such as a hash built from shifts and overflow, write that part in C with [cimo](https://www.cimo.dev/) and call it:
+
+```python
+import cimo
+
+hashing = cimo.compile(r"""
+#include <stdint.h>
+int64_t mix(int64_t value) {
+    uint64_t h = (uint64_t)value;
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    return (int64_t)(h >> 1);
+}
+""")
+
+@scram
+def bucket(values, counts):
+    for i in range(len(values)):
+        counts[hashing.mix(int(values[i])) % len(counts)] += 1
+```
+
+The module's source goes into the same C file as the function calling it, so a small C function is inlined: `k.sq(x[i])` took 0.92 ns per element in a compiled loop, against 686 from a Python loop calling it. `f = k.f` at module level works as well. Arguments and results follow what the same call does from Python, which is what runs if any of this doesn't compile:
+
+| C parameter | Compiles with | Otherwise |
+| --- | --- | --- |
+| `double`, `float` | any number | |
+| `int32_t` and narrower | a Python int or bool, a numpy integer, cut to size | a float raises `ArgumentError` from Python |
+| `int64_t`, `uint64_t` | a Python int or bool | `int(x[i])` for a numpy integer: cimo takes one as an address |
+| `_Bool` | a bool | |
+| `double *`, `const uint8_t *`, a VLA, `void *` | an array or view without gaps, of that element type | another type, a gap, a read-only array as non-`const` |
+
+A result that is an integer other than `uint64_t` comes back as a Python int, and `double` or `float` as a Python float. A pointer, a struct, or a variadic function stays in Python.
+
+Some modules can't compile this way, and stay in Python, with a warning saying why:
+
+- **State:** a module with data that isn't `const`, such as a counter in a global or a static local. A second copy of its source wouldn't share that with the module you can call from Python.
+- **Options:** `link=`, `host_headers=` or `include_dirs=`. `defines=` is fine, and so is `fma=`, as long as all the modules a function calls agree.
+- **Math that must stay exact,** such as `math.gamma`, `np.std` or `math.remainder`, in a function calling a module compiled with the default `fma=`: the file has one setting. Pass `fma=False` to `cimo.compile`.
+- **Two modules defining the same name,** in one function.
+
+An `assert` or `abort()` in the C raises `cimo.KernelError`, naming `sj_kernel` rather than your function. A macro your C defines is also visible to the C scramjit generates, after it, so don't define one named like a C library function.
+
+The C runs with the privileges of the process and isn't checked: a wrong length is a bad write, as anywhere in C.

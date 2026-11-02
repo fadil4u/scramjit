@@ -106,7 +106,7 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | Numbers, tuples, arrays and dicts at module level | Assigning to a global, other global objects |
 | `range`, `enumerate`, `zip`, `map`, `filter`, comprehensions | numpy array expressions: `a * 2` |
 | `sum(gen, 0.0)`, `min`, `max`, `abs`, `**`, tuple unpacking | Calls to undecorated Python functions, recursion |
-| Calls to other `@scram` functions, usually inlined | Strings, objects |
+| Calls to other `@scram` functions and to C from `cimo.compile`, usually inlined | Strings, objects |
 | Numbers and n-D numpy arrays, including dtypes like `uint8` | Classes |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | Lists that grow with `append` |
 | Dicts passed in, reading and writing keys it names | Dicts that gain keys, or built in the function |

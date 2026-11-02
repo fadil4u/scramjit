@@ -87,7 +87,8 @@ LLM demo's code; spills per line, once cimo can report them.
 7. **Call boundary cost:** about 1.4 µs with numbers (was 3.2) and 2.4 µs with an array (was 6.6), through
    a function generated per signature (`_make_plan`). For numbers: ctypes about 450 ns (the floor), cimo's
    `Kernel.__call__` about 450 (see cimo's `TODO.md`), scramjit about 500. In Pyodide about 13 µs, not yet
-   broken down. Break-even is 30 to 50 loop iterations per call. Rejected: caching an array's address (saves
+   broken down. Break-even is 30 to 50 loop iterations per call. A Gymnasium-style `step` is below it, with no loop
+   at all: CartPole from a Python loop does 396k steps/s compiled against 698k plain, and 53M with the loop compiled too. Rejected: caching an array's address (saves
    200 ns, but `resize(refcheck=False)` would corrupt memory silently); `__call__` by argument count (100 to
    150 ns, not worth its keyword edge cases).
 8. **Variables that change type, what's left:** a name used for separate things compiles (each web is its own
@@ -129,3 +130,5 @@ LLM demo's code; spills per line, once cimo can report them.
 18. **float32 arithmetic falls back, with a misleading reason:** "arithmetic on numpy bools", because
     `arith_result` returns None for narrow types too. Say what is actually unsupported, then compile it:
     float64 doubles the memory of anything with float32 weights.
+19. **A name assigned in `while True` isn't seen as assigned after the loop.** `while True: ds = f(); if ds >= 17: break`, then
+    reading `ds`, gives "ds may be read before it is assigned". Every way out of such a loop passes the assignment.

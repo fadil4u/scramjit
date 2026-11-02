@@ -19,6 +19,17 @@ for (int64_t i = a; i < b; i += s) {
 
 No range object exists. A step that isn't a constant gets the sign check Python implies, so a negative step counts down as it does in Python.
 
+`for` and `while` can have an `else`, which runs unless a `break` left the loop:
+
+```python
+for i in range(len(x)):
+    if x[i] == target:
+        found = i
+        break
+else:
+    found = -1
+```
+
 ## `enumerate`, `zip`, `reversed`
 
 Over arrays and ranges these become index loops:

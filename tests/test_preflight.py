@@ -558,3 +558,36 @@ def test_f_preflight_after_a_call():
     with contextlib.redirect_stdout(out):
         g.preflight()
     assert 'partly compiled' in out.getvalue() and 'compiled on its own' in out.getvalue()
+
+
+DICTS = '''
+from scramjit import scram
+
+@scram
+def step(p, x):
+    s = 0.0
+    for i in range(p['n']):
+        s += x[i] * p['k']
+    p['s'] = s
+    return s
+
+@scram
+def table(p):
+    s = 0.0
+    for i in range(len(p['a'])):
+        s += p['a'][i] * p['k']
+    return s
+
+@scram
+def not_fixed(p):
+    p['new'] = 1.0
+    return len(p)
+'''
+
+
+def test_static_understands_dict_arguments(tmp_path):
+    f = tmp_path / 'dicts.py'
+    f.write_text(DICTS)
+    d = json.loads(_cli('preflight', f, '--json', '--no-suggest').stdout)
+    states = {x['name']: x['state'] for x in d['files'][0]['functions']}
+    assert states == {'step': 'compiled', 'table': 'compiled', 'not_fixed': 'python'}

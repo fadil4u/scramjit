@@ -20,13 +20,13 @@ def run(args, cwd):
 @pytest.mark.parametrize('name', EXAMPLES)
 def test_example_runs_native(name, tmp_path):
     path = os.path.join(ROOT, 'examples', name)
-    # any fallback is an error, except in the example about falling back
-    args = [path] if name == 'fallback.py' else ['-W', 'error::scramjit.FallbackWarning', path]
+    # any fallback is an error, except in the examples about falling back
+    args = [path] if name in ('fallback.py', 'partly_compiled.py') else ['-W', 'error::scramjit.FallbackWarning', path]
     r = run(args, tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
 
 
 def test_preflight_agrees(tmp_path):
     r = run(['-m', 'scramjit', 'preflight', os.path.join(ROOT, 'examples')], tmp_path)
-    assert '9 compiled, 2 run as Python' in r.stdout, r.stdout
+    assert '10 compiled, 1 partly compiled, 2 run as Python' in r.stdout, r.stdout
     assert '✗ histogram_dict' in r.stdout and '✗ must_be_native' in r.stdout

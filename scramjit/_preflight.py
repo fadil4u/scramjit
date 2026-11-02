@@ -136,17 +136,68 @@ def assumed_signature(fdef):
         if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Tuple) and isinstance(n.value, ast.Attribute) \
                 and n.value.attr == 'shape' and isinstance(n.value.value, ast.Name):
             ndim[n.value.value.id] = max(ndim.get(n.value.value.id, 1), len(n.targets[0].elts))
+    keys = _assumed_dicts(fdef)
     sig = []
     a = fdef.args
     for p in a.posonlyargs + a.args:
         name = ast.unparse(p.annotation) if p.annotation is not None else None
-        if name in ann:
+        if p.arg in keys:
+            sig.append(T.dict_of(sorted(keys[p.arg].items(), key=lambda kv: repr(kv[0]))))
+        elif name in ann:
             sig.append(ann[name])
         elif p.arg in ndim:
             sig.append(T.array(T.NP_FLOAT64, True, ndim[p.arg]))
         else:
             sig.append(T.FLOAT)
     return sig
+
+
+def _assumed_dicts(fdef):
+    """Parameters read with a string key are dicts: {name: {key: its assumed type}}. A value indexed in turn is an
+    array, one used as a range bound or an index is an int, and the rest are floats."""
+    def key_of(n):
+        if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name) and isinstance(n.slice, ast.Constant) \
+                and type(n.slice.value) is str:
+            return n.value.id, n.slice.value
+        return None
+    a = fdef.args
+    names = {p.arg for p in a.posonlyargs + a.args}
+    found = {}
+    for n in ast.walk(fdef):
+        k = key_of(n)
+        if k and k[0] in names:
+            found.setdefault(k[0], {}).setdefault(k[1], T.FLOAT)
+    if not found:
+        return found
+
+    def mark(e, t):
+        for x in ast.walk(e):
+            k = key_of(x)
+            if k and k[0] in found:
+                found[k[0]][k[1]] = t
+    for n in ast.walk(fdef):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'range':
+            for x in n.args:
+                mark(x, T.INT)
+        elif isinstance(n, ast.Subscript) and not key_of(n):
+            mark(n.slice, T.INT)
+    counters = {n.target.id for n in ast.walk(fdef) if isinstance(n, ast.For) and isinstance(n.target, ast.Name)
+                and isinstance(n.iter, ast.Call) and getattr(n.iter.func, 'id', None) == 'range'}
+    for n in ast.walk(fdef):                 # p['day'] = day, with day a range's variable
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Name) and n.value.id in counters:
+            for t in n.targets:
+                mark(t, T.INT)
+    for n in ast.walk(fdef):                 # after the indices: p['a'][p['i']] has an array and an int
+        if isinstance(n, ast.Subscript) and not key_of(n):
+            k = key_of(n.value)
+            if k and k[0] in found:
+                d = len(n.slice.elts) if isinstance(n.slice, ast.Tuple) else 1
+                found[k[0]][k[1]] = T.array(T.NP_FLOAT64, True, d)
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'len' and n.args:
+            k = key_of(n.args[0])
+            if k and k[0] in found:
+                found[k[0]][k[1]] = T.array(T.NP_FLOAT64, True, 1)
+    return found
 
 
 def _innermost_stmt(fdef, line):

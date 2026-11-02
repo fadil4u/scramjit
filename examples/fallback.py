@@ -10,7 +10,7 @@ from scramjit import CompileError, FallbackWarning, scram
 
 @scram
 def histogram_dict(values):
-    """Dicts don't compile, so this runs as plain Python: correct, and no faster."""
+    """A dict that gains keys doesn't compile, so this runs as plain Python: correct, and no faster."""
     counts = {}
     for v in values:
         counts[int(v)] = counts.get(int(v), 0) + 1

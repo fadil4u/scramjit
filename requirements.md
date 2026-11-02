@@ -157,8 +157,14 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   typed** (the element types they start with don't change). Enums and module-level constants are their
   values. Classes and dicts become structs; only fixed dicts for now, so a function that could add a key runs
   as Python. Loop optimizations and loop lifting come first, so that containers don't hide speedups still to
-  be had from loops. Open: what a runtime value that breaks the rule does, aliasing, and the cost of checking
-  and copying at the call. Not built yet; see `TODO.md`.
+  be had from loops. Open, apart from dicts below: what a runtime value that breaks the rule does, aliasing, and the
+  cost of checking and copying at the call. See `TODO.md`.
+- **Fixed dicts (built 2026-11-02).** A dict argument is flattened in source: `p['a']` becomes a variable and `p` one parameter per key
+  the function names, so all loop work applies and the C equals using locals. A dict's type is only those keys, so anything else in it
+  can be anything, at no cost: a read took 2.6 µs per call against 2.6 with plain numbers, in a 1000-key dict too, 3.2 with a write (2.6
+  only through a call plan that checks those keys; the general path takes 9). A write goes back at both of the kernel's exits, so
+  stores before an exception survive. The kernel's written variables are kept out of web splitting, since every exit reads them.
+  Exact `dict` only, since a subclass can run code on a read, and one dict passed twice runs as Python.
 - **Later:** growable lists, dicts, sets and strings as typed C containers: each needs allocation and a runtime.
 
 ## Semantics

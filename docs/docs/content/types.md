@@ -28,6 +28,18 @@ Accepted annotations:
 | `bool` | a Python `bool` |
 | `np.int8`, `np.float32`, … | a numpy scalar type of that size |
 
+## A variable that changes type
+
+One name can hold different types. If the uses never meet, as with `x = 1`, used, then `x = 0.5`, used, each is its own variable. An int that turns into a float also compiles:
+
+```python
+s = 0
+for v in x:          # x holds floats
+    s += v
+```
+
+As in Python, `s` is the int `0` if the loop doesn't run, and a float otherwise. That works when the int is a literal or an argument, and `s` is only combined with floats, compared with them, or returned. Any other use, such as `s + 1`, `-s`, `t = s` or `if s:`, could differ between the two, so it runs as Python.
+
 ## The narrowest type that is proven sufficient
 
 The compiler picks the smallest type that holds every value a variable can take, from annotations, array dtypes and value-range analysis:

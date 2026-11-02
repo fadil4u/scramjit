@@ -92,6 +92,17 @@ def join(a, b):
     return None
 
 
+_DICTS = {}
+
+
+def dict_of(fields):
+    """A dict, by the keys a function uses [(key, type)]: in C, one variable per key."""
+    key = tuple((repr(k), t.name) for k, t in fields)
+    if key not in _DICTS:
+        _DICTS[key] = Type('dict[' + ', '.join(f'{k}: {n}' for k, n in key) + ']', None, 'dict', elem=list(fields))
+    return _DICTS[key]
+
+
 _TUPLES = {}
 
 

@@ -54,8 +54,8 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
    - **Lists as arguments, and nested:** `[[1.0, 2.0], [3.0, 4.0]]`; returning one. The spec's copy in and
      out at the call was never built.
    - **Classes:** attribute reads and writes on instances and dataclasses, then method calls.
-   - **Fixed dicts only, for now:** `d['a']` on a dict whose keys don't change, as a struct. A function that could
-     add a key runs as Python.
+   - **Dicts, what's left:** a dict passed in compiles (see "Containers"). Not yet: nested dicts, a dict built in the function, returning
+     one, `len(p)` and `'a' in p`, which are known from the keys. A function that could add a key still runs as Python.
 
    To settle first, all of it needing differential tests: what happens when a value breaks the rule at runtime
    (an `int` slot given a float); two names for one object (`[[0] * 3] * 2`, one list passed twice),

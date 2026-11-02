@@ -105,8 +105,9 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | `for`, `while`, `break`, `continue`, `if`, conditional expressions | Slices and views: `a[1:]` |
 | `range`, `enumerate`, `zip`, `map`, `filter`, comprehensions | numpy array expressions: `a * 2`, `a.sum()` |
 | `sum(gen, 0.0)`, `min`, `max`, `abs`, `**`, tuple unpacking | Calls to other Python functions |
-| Numbers and n-D numpy arrays, including dtypes like `uint8` | Dicts, strings, objects |
+| Numbers and n-D numpy arrays, including dtypes like `uint8` | Strings, objects |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | Lists that grow with `append` |
+| Dicts passed in, reading and writing keys it names | Dicts that gain keys, or built in the function |
 
 `**` compiles. Where Python's result would change type, it raises `ValueError`: a negative `k` in
 `n ** k` (Python gives a float) and a negative float `x` in `x ** 0.5` (Python gives a complex).
@@ -196,6 +197,7 @@ Pre-release.
 - 93 tests pass. Developed and benchmarked on arm64 Linux and in Pyodide. x86-64, macOS and Windows
   are cimo targets, but scramjit's tests don't run on them in CI yet.
 - A function that doesn't compile whole has its loops compiled on their own, where they fit.
+- Dicts compile when passed in with keys that don't change. Next, the rest of the data structures: see `TODO.md`.
 - Next: see [`TODO.md`](TODO.md).
 
 ## Development

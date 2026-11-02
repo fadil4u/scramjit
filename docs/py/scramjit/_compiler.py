@@ -238,8 +238,55 @@ def exact_int_literal(node):
 
 
 
+def flatten_dicts(fdef, arg_types):
+    """A dict parameter becomes one parameter per key the function uses, and p['a'] a plain variable, so
+    everything the compiler knows about variables applies. Any other use of p can't work this way. Returns the
+    function, the new parameter types, and {variable: (argument index, key, how the user wrote it)}."""
+    a = fdef.args
+    params = a.posonlyargs + a.args
+    if not any(t is not None and t.kind == 'dict' for t in arg_types) or len(params) != len(arg_types):
+        return fdef, arg_types, {}
+    tree = copy.deepcopy(fdef)
+    taken = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {p.arg for p in params}
+    slots, flat = {}, {}
+    new_params, new_types = [], []
+    for i, (p, t) in enumerate(zip(tree.args.posonlyargs + tree.args.args, arg_types)):
+        if t.kind != 'dict':
+            new_params.append(p)
+            new_types.append(t)
+            continue
+        for k, (key, ft) in enumerate(t.elem):
+            name = f'{p.arg}__{key}' if isinstance(key, str) and key.isidentifier() and key.isascii() else f'{p.arg}__k{k}'
+            while name in taken:
+                name += '_'
+            taken.add(name)
+            flat[p.arg, key] = name
+            slots[name] = (i, key, f'{p.arg}[{key!r}]')
+            new_params.append(ast.copy_location(ast.arg(name), p))
+            new_types.append(ft)
+
+    class Flatten(ast.NodeTransformer):
+        def visit_Subscript(self, n):
+            if isinstance(n.value, ast.Name) and isinstance(n.slice, ast.Constant) \
+                    and type(n.slice.value) in (str, int) and (n.value.id, n.slice.value) in flat:
+                return ast.copy_location(ast.Name(flat[n.value.id, n.slice.value], n.ctx), n)
+            return self.generic_visit(n)
+
+        def visit_Name(self, n):
+            if n.id in dicts:
+                raise Unsupported(n, f"{n.id} is used as a dict object, and only {n.id}['key'] with a key it has compiles")
+            return n
+
+    dicts = {p.arg for p, t in zip(params, arg_types) if t.kind == 'dict'}
+    tree = Flatten().visit(tree)
+    tree.args.posonlyargs, tree.args.args = [], new_params
+    return tree, new_types, slots
+
+
+
 class Compiler:
     def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, parity=True):
+        fdef, arg_types, self.dict_slots = flatten_dicts(fdef, arg_types)
         self.again = (arg_types, globals_, filename, line_offset, boundscheck, parity)
         self.split_done = False    # names are split into webs, so a conflict left is within one variable
         self.tagged = set()        # variables holding an exact int or a float: a double and v___int (see may_tag)
@@ -290,7 +337,40 @@ class Compiler:
         return node.lineno + self.offset
 
     def fail(self, node, reason):
-        raise Unsupported(node, WEB_SUFFIX.sub('', reason))
+        raise Unsupported(node, self.shown(WEB_SUFFIX.sub('', reason)))
+
+    def shown(self, text):
+        """Text with the variables a dict's keys became written as the user wrote them."""
+        for flat, (_, _, written) in self.dict_slots.items():
+            text = text.replace(flat, written)
+        return text
+
+    def shown_types(self):
+        return {self.shown(WEB_SUFFIX.sub("'", k)): t.name for k, t in self.env.items()}
+
+    def find_outs(self):
+        """The dict keys this function writes: [(flat name, argument index, key)]. Their values go back to the
+        dict at every exit, since Python would have stored them by then, whatever happens next."""
+        stored = {n.id for n in ast.walk(self.f) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        self.outs = [(flat, i, key) for flat, (i, key, _) in self.dict_slots.items() if flat in stored]
+        for flat, _, _ in self.outs:
+            if not self.env[flat].is_number:
+                self.fail(self.f, f'{flat} is assigned something other than a number')
+
+    def out_slot(self, k):
+        """The sj_io slot of the k-th written key, past anything a return uses."""
+        return 5 + 2 * (len(self.ret.elem) if self.ret.kind == 'tuple' else 0) + 2 * k
+
+    def save_outs(self):
+        for k, (flat, _, _) in enumerate(self.outs):
+            t = self.env[flat]
+            at = self.out_slot(k)
+            if t.kind == 'float':
+                self.emit(f'memcpy(&sj_io[{at}], &v_{flat}, 8);')
+            else:
+                self.emit(f'sj_io[{at}] = (int64_t)v_{flat};')
+            flag = f'v_{flat}__np' if t.np == 'dyn' else flag_of(t)
+            self.emit(f'sj_io[{at + 1}] = {self.ret_flag(ast.Name(flat), flag)};')
 
     def is_builtin(self, name, which):
         return name == which and name not in self.env and name not in self.globals
@@ -977,11 +1057,14 @@ class Compiler:
         except Unsupported as u:
             if 'must keep one type' not in u.reason:
                 raise
-            tree = _webs.split(self.f) or self.f
+            slots = self.dict_slots
+            tree = _webs.split(self.f, set(slots)) or self.f
             self.__init__(tree, *self.again)
+            self.dict_slots = slots
             self.split_done = True
             self.infer()
         self.check_tagged()
+        self.find_outs()
 
     def generate(self):
         self.infer_with_webs()
@@ -1036,10 +1119,12 @@ class Compiler:
                 [f'free({o});' for o, _ in self.owned]
         self.lines[decl_at:decl_at] = ['    ' + f'{ct} *{o} = NULL;' for o, ct in self.owned]
         self.lines.append('sj_done:')
+        self.save_outs()
         if frees:
             self.emit(' '.join(frees))
         self.emit('return 0;')
         self.lines.append('sj_fail:')
+        self.save_outs()
         if frees:
             self.emit(' '.join(frees))
         self.emit('sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;')

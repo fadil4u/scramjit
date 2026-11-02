@@ -154,8 +154,9 @@ class _Flow:
         return out
 
 
-def split(fdef):
-    """A copy of fdef with each web under a name of its own, or None if every name is one variable."""
+def split(fdef, keep=()):
+    """A copy of fdef with each web under a name of its own, or None if every name is one variable. Names in
+    keep stay whole: something reads them at every exit, whichever assignment got there."""
     tree = copy.deepcopy(fdef)
     flow = _Flow()
     st = {}
@@ -174,7 +175,7 @@ def split(fdef):
     taken = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {p.arg for p in a.posonlyargs + a.args + a.kwonlyargs}
     changed = False
     for name, groups in webs.items():
-        if len(groups) < 2:
+        if len(groups) < 2 or name in keep:
             continue
         def first(nodes):
             params = any(isinstance(n, ast.arg) for n in nodes)

@@ -15,7 +15,7 @@ import warnings
 import weakref
 
 from . import _types as T
-from ._compiler import Compiler, WEB_SUFFIX
+from ._compiler import Compiler
 from ._errors import CompileError, FallbackWarning, Unsupported
 from . import _interrupt
 from . import _lift
@@ -124,6 +124,35 @@ def _raise_at(exc, filename, line, name):
     raise exc
 
 
+def _dict_keys(fdef):
+    """For each parameter subscripted by a constant string or int: the keys, if it turns out to be a dict."""
+    if fdef is None:
+        return {}
+    index = {p.arg: i for i, p in enumerate(fdef.args.posonlyargs + fdef.args.args)}
+    found = {}
+    for n in ast.walk(fdef):
+        if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name) and n.value.id in index \
+                and isinstance(n.slice, ast.Constant) and type(n.slice.value) in (str, int):
+            found.setdefault(index[n.value.id], set()).add(n.slice.value)
+    return {i: sorted(keys, key=repr) for i, keys in found.items()}
+
+
+def _push(cargs, x, t):
+    """The C arguments for one Python argument."""
+    if t.kind == 'array':
+        cargs.append(x)
+        cargs.extend(x.shape)
+    elif t.kind == 'tuple':
+        cargs.extend(v.item() if et.np else v for v, et in zip(x, t.elem))
+    elif t.kind == 'dict':
+        for key, ft in t.elem:
+            _push(cargs, x[key], ft)
+    elif t.np:
+        cargs.append(x.item())
+    else:
+        cargs.append(x)
+
+
 class _Python:
     """Marker: this signature runs as the original Python function."""
 
@@ -132,10 +161,11 @@ PYTHON = _Python()
 
 
 class Compiled:
-    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun')
+    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun', 'outs')
 
     def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None, stop=False, rerun=False):
         self.rerun = rerun
+        self.outs = []                        # written dict keys: (argument index, key, byte in io, type)
         self.checks, self.hoisted, self.gotchas, self.stop = checks or {}, hoisted, gotchas or {}, stop
         self.locals = locals_ or {}           # variable -> inferred type name
         self.kernel = kernel
@@ -175,6 +205,11 @@ def _make_plan(f, entry, args):
             cargs.extend(f's{i}[{k}]' for k in range(x.ndim))
         elif t.kind == 'tuple':
             return f._slow_call
+        elif t.kind == 'dict':
+            if not all(ft.is_number for _, ft in t.elem):
+                return f._slow_call
+            for k, (key, ft) in enumerate(t.elem):
+                cargs.append(f'f{i}_{k}.item()' if ft.np else f'f{i}_{k}')
         elif t.np:
             cargs.append(f'{n}.item()')
         else:
@@ -194,12 +229,21 @@ def _make_plan(f, entry, args):
         if t.kind == 'array':
             x = args[i]
             src_guards.append(f'    fl = {n}.flags\n    if {n}.dtype is not d{i} or {n}.ndim != {x.ndim} or not fl.c_contiguous or fl.writeable is not {bool(x.flags.writeable)}:\n        return slow(({", ".join(names)},))\n    s{i} = {n}.shape')
+        elif t.kind == 'dict':
+            # only what this function reads is checked: a missing key or another type goes the general way
+            for k, (key, ft) in enumerate(t.elem):
+                env[f'key{i}_{k}'], env[f'type{i}_{k}'] = key, type(args[i][key])
+                src_guards.append(f'    f{i}_{k} = {n}.get(key{i}_{k})\n    if type(f{i}_{k}) is not type{i}_{k}:\n        '
+                                  f'return slow(({", ".join(names)},))')
+                if ft is T.INT:
+                    src_guards.append(f'    if not -9223372036854775808 <= f{i}_{k} <= 9223372036854775807:\n        '
+                                      f'return slow(({", ".join(names)},))')
         elif t.kind == 'int' and not t.np:
             src_guards.append(f'    if not -9223372036854775808 <= {n} <= 9223372036854775807:\n        return slow(({", ".join(names)},))')
     addresses = ''.join(f'        p{i} = addressof(from_buffer({names[i]}))\n' for i in arrays if args[i].flags.writeable)
     take = (f'    try:\n{addresses}    except (ValueError, TypeError, BufferError):      # empty: no buffer to take the address of\n'
             f'        return slow(({", ".join(names)},))\n') if addresses else ''
-    size = 40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0)
+    size = 40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0) + 16 * len(entry.outs)
     r = entry.ret
     if r is T.NONE:
         result = 'None'
@@ -215,7 +259,15 @@ def _make_plan(f, entry, args):
     rerun = ''
     if entry.rerun:
         env.update(f=f, RERUN=RERUN)
-        rerun = f"        if status == RERUN:\n            return f._py({', '.join(names)})\n"
+        rerun = f"    if status == RERUN:\n        pool.append(entry)\n        return f._py({', '.join(names)})\n"
+    saves = ''
+    for n, (i, key, at, ot) in enumerate(entry.outs):
+        env[f'okey{n}'], env[f'otype{n}'] = key, ot
+        saves += f'    {names[i]}[okey{n}] = box(io, {at}, {at + 8}, otype{n})\n'
+    dicts = [names[i] for i, t in enumerate(entry.types) if t.kind == 'dict']
+    if len(dicts) > 1:                 # two names for one dict: a write must show through both
+        pairs = ' or '.join(f'{a} is {b}' for k, a in enumerate(dicts) for b in dicts[k + 1:])
+        src_guards.append(f'    if {pairs}:\n        return slow(({", ".join(names)},))')
     src = f"""def plan({', '.join(names)}):
 {chr(10).join(src_guards)}
 {take}    if pool:
@@ -227,9 +279,9 @@ def _make_plan(f, entry, args):
         q, d = view.cast('q'), view.cast('d')
         entry = (io, ioaddr, q, d)
     status = kernel({''.join(c + ', ' for c in cargs)}ioaddr)
-    if status:
+{rerun}{saves}    if status:
         pool.append(entry)
-{rerun}        failed(status, io)
+        failed(status, io)
     value = {result}
     pool.append(entry)
     return value
@@ -265,6 +317,8 @@ class Function:
         self._contracts = [(i, p, a) for i, (p, a) in enumerate(
             (p, fn.__annotations__.get(p)) for p in code.co_varnames[:code.co_argcount]) if a in _ANNOTATIONS]
         self._tree, self._why_not = self._parse(fn) if _loop is None else (_loop[0], None)
+        self._dict_keys = _dict_keys(self._tree)
+        self._replans = 8         # how many times more a dict's new value types get a call plan of their own
         self._np = None
 
     @staticmethod
@@ -314,7 +368,7 @@ class Function:
                                 f'not {type(args[i]).__name__}')
         if kwargs:
             return self._fn(*args, **kwargs)
-        key = tuple(map(_arg_type, args))
+        key = self._key(args)
         entry = self._cache.get(key)
         if entry is None:
             entry = self._specialize(key, args)
@@ -322,7 +376,7 @@ class Function:
             return self._timed(key, entry, args)
         if entry is not PYTHON:
             self._plans[tuple(map(type, args))] = _make_plan(self, entry, args)
-        elif None not in key and not any(t.kind == 'array' for t in key):
+        elif None not in key and not any(t.kind == 'array' for t in key) and dict not in map(type, args):
             self._plans[tuple(map(type, args))] = self._py   # these types always run as Python
         if entry is PYTHON:
             return self._py(*args)
@@ -330,11 +384,16 @@ class Function:
 
     def _slow(self, args):
         """A call a plan turned down: an int past 64 bits, an array of another shape of type."""
-        key = tuple(map(_arg_type, args))
+        key = self._key(args)
         entry = self._cache.get(key)
         if entry is None:
             entry = self._specialize(key, args)
-        return self._py(*args) if entry is PYTHON else self._run(entry, args)
+        if entry is PYTHON:
+            return self._py(*args)
+        if self._replans and dict in map(type, args):    # writing p['s'] can change what the plan checks for
+            self._replans -= 1
+            self._plans[tuple(map(type, args))] = _make_plan(self, entry, args)
+        return self._run(entry, args)
 
     def _failed(self, status, io):
         slots = [int.from_bytes(io[i:i + 8], 'little', signed=True) for i in range(0, 40, 8)]
@@ -433,30 +492,51 @@ class Function:
         if any(t.np for t in key) or c.ret.np:
             import numpy
             self._np = numpy
-        return Compiled(kernel, c.ret, key, source, _libm_table() if c.uses_libm else None,
-                        {WEB_SUFFIX.sub("'", k): t.name for k, t in c.env.items()}, c.checks, c.hoisted_lines, c.gotchas,
-                        c.uses_stop, c.uses_rerun)
+        entry = Compiled(kernel, c.ret, key, source, _libm_table() if c.uses_libm else None,
+                         c.shown_types(), c.checks, c.hoisted_lines, c.gotchas, c.uses_stop, c.uses_rerun)
+        entry.outs = [(i, k, 8 * c.out_slot(n), c.env[flat]) for n, (flat, i, k) in enumerate(c.outs)]
+        return entry
+
+    def _key(self, args):
+        """The signature of a call. A dict's type is the keys this function uses: nothing else in it matters."""
+        key = tuple(map(_arg_type, args))
+        if not self._dict_keys or dict not in map(type, args):
+            return key
+        seen, out = set(), list(key)
+        for i, x in enumerate(args):
+            if type(x) is dict:
+                out[i] = None if id(x) in seen else self._dict_type(x, self._dict_keys.get(i))
+                seen.add(id(x))          # two names for one dict: a write must show through both
+        return tuple(out)
+
+    @staticmethod
+    def _dict_type(d, keys):
+        if not keys:
+            return None
+        fields = []
+        for k in keys:
+            if k not in d:
+                return None              # Python raises KeyError, at the right moment
+            t = _arg_type(d[k])
+            if t is None:
+                return None
+            fields.append((k, t))
+        return T.dict_of(fields)
 
     def _run(self, entry, args):
         cargs = []
         for x, t in zip(args, entry.types):
-            if t.kind == 'array':
-                cargs.append(x)
-                cargs.extend(x.shape)
-            elif t.kind == 'tuple':
-                cargs.extend(v.item() if et.np else v for v, et in zip(x, t.elem))
-            elif t.np:
-                cargs.append(x.item())
-            else:
-                cargs.append(x)
+            _push(cargs, x, t)
         if entry.libm is not None:
             cargs.append(entry.libm)
         if entry.stop:
             cargs.append(_interrupt.address())
-        io = bytearray(40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0))
+        io = bytearray(40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0) + 16 * len(entry.outs))
         status = entry.kernel(*cargs, io)
         if status == RERUN and entry.rerun:
             return self._py(*args)
+        for i, key, at, ot in entry.outs:
+            args[i][key] = self._box(io, at, at + 8, ot)
         if status:
             slots = [int.from_bytes(io[i:i + 8], 'little', signed=True) for i in range(0, 40, 8)]
             _raise_at(exception(status, slots), self._filename, slots[1], self.__name__)

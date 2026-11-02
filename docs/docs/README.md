@@ -5,8 +5,8 @@ in the browser, so a pushed edit is live once Pages redeploys (about a minute). 
 with `cache: 'no-cache'`, so readers get the new version on their next load. After changing
 `docs.js` or `docs.css`, update the `?v=` on their tags in `index.html`.
 
-The Prompt for Agents corner here links to the landing page (closing the prompt comes back here), whose banner peels back to show the
-prompt (`../agent-prompt.txt`). Both use `../agent.js` and `../agent.css`; after changing those, update
+The Prompt for Agents corner here peels back over the page to show the prompt (`../agent-prompt.txt`), as the
+landing page's banner does. Both use `../agent.js` and `../agent.css`; after changing those, update
 their `?v=` in both `index.html` files.
 
 - `content/<page>.md`: one page each, plain Markdown (GitHub flavored: tables, fenced code).

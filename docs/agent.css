@@ -1,4 +1,4 @@
-/* Prompt for Agents: the banner's peeling corner, the prompt behind it, and the corner linking to it from the docs. */
+/* Prompt for Agents: the banner's peeling corner, the prompt behind it, and the same over the docs, which have no banner. */
 .i-robot{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.i-robot .eye{fill:currentColor;stroke:none}
 .peel{position:absolute;top:0;right:0;z-index:3;display:block;padding:0;border:0;background:none;cursor:grab;pointer-events:none;touch-action:none;user-select:none;-webkit-user-select:none}
 .peel[hidden]{display:none}
@@ -45,12 +45,8 @@
 .rip-works span{margin-right:2px;white-space:nowrap}
 .rip-works svg{width:18px;height:18px;flex:none;fill:currentColor}
 @media(max-width:600px){.peel-under svg{top:4px;right:4px;width:16px;height:16px}.rip-robot{top:4px;right:4px;width:16px;height:16px}.rip-bar h2{font-size:15px}.rip-bar button{padding:0 8px}}
-/* the corner on pages without a banner: it links to the one that has it */
-.peel-link .peel-under{background:linear-gradient(225deg,#ea580c,#f97316 60%,#fb923c)}
-.peel-link{--p:60px;position:fixed;z-index:55;width:var(--p);height:var(--p);cursor:pointer;transition:width .18s ease-out,height .18s ease-out}
-.peel-link:focus-visible{--p:72px}
-@media(hover:hover){.peel-link:hover{--p:72px}}
-.peel-flap{position:absolute;inset:0;filter:drop-shadow(-2px 3px 4px rgba(15,23,42,.4))}
-.peel-flap i{position:absolute;inset:0;pointer-events:auto;background:linear-gradient(to bottom left,#8f99aa 50%,#f8f9fc 64%,#dde2ea);clip-path:polygon(0 0,100% 100%,0 100%)}
-@media(max-width:600px){.peel-link{--p:44px}}
-@media(prefers-reduced-motion:reduce){.peel-link,.peel-label{transition:none}}
+/* a page without a banner: the window's corner peels, in pale paper */
+.peel-page{position:fixed;inset:0;z-index:55;overflow:hidden;pointer-events:none}
+.peel-page .rip-back{pointer-events:auto}
+.peel-page .rip-flap{filter:drop-shadow(-2px 3px 4px rgba(15,23,42,.4))}
+.peel-page .rip-flap i{background:linear-gradient(225deg,#8f99aa var(--crease),#f8f9fc calc(var(--crease) + 12px),#dde2ea calc(var(--crease) + 44px),#c3cad6 calc(var(--crease) + 70px))}

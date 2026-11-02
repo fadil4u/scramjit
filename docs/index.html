@@ -448,6 +448,7 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
         <li><b>Arrays in place.</b> numpy arrays are passed by pointer, shape and strides, never copied. So are views: <code>m[i]</code>, <code>x[a:b]</code>, <code>m[:, j]</code>.</li>
         <li><b>Arrays it makes.</b> <code>np.zeros(n)</code>, <code>x.copy()</code>, <code>np.arange</code> and friends compile, freed as the loop goes, and what comes back is an ordinary numpy array.</li>
         <li><b>numpy on numbers.</b> <code>np.sqrt(x[i])</code>, <code>np.sin</code>, <code>np.minimum</code> and friends compile, with numpy's result and type. So do <code>x.sum()</code>, <code>x.max()</code> and other reductions.</li>
+        <li><b>Programs, not only loops.</b> A compiled function can call another: <code>reset</code>, <code>step</code> and <code>policy</code> stay separate functions, and small ones are inlined, so a call costs nothing.</li>
         <li><b>Settings in a dict.</b> A dict passed in compiles if its keys don't change, and a loop reading <code>p['k']</code> runs as fast as one reading a local. So does a constant at module level.</li>
       </ul>
     </div>

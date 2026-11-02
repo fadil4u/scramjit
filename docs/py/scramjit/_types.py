@@ -104,6 +104,14 @@ def join_returns(a, b):
     return join(a, b)
 
 
+def function_of(fn):
+    """A @scram function, as what a global name holds. Each has a type of its own, so a new one is a new signature. No C."""
+    t = getattr(fn, '_type', None)
+    if t is None:
+        t = fn._type = Type(f'function {fn.__name__}', None, 'function', elem=fn)
+    return t
+
+
 _DICTS = {}
 
 

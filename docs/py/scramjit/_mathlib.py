@@ -331,6 +331,9 @@ static void sj_free_blocks(sj_heap *h, int keep) {
         b = next;
     }
 }
+static void sj_adopt(sj_heap *h, sj_block *b) {      /* a block a called function returned: it's the caller's now */
+    if (b->mark == 2) { b->mark = 0; b->next = h->all; h->all = b; h->since += b->bytes + 64; }
+}
 int sj_release(int64_t block) { free((void *)(uintptr_t)block); return 0; }
 """),
     'np_folds': ((), """

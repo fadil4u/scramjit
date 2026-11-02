@@ -418,10 +418,59 @@ def flatten_dicts(fdef, arg_types):
 
 
 
+class Callee:
+    """What compiling a call to another function needs from it. hidden: for the globals its compiled tree takes as parameters
+    after its real ones, their identity. hidden_map: identity of a global -> the parameter holding it, within this function."""
+
+    def __init__(self, identity, tree, globals_, filename, offset, boundscheck, parity, hidden=(), hidden_map=None, name=None):
+        self.identity, self.tree, self.globals, self.filename, self.offset = identity, tree, globals_, filename, offset
+        self.boundscheck, self.parity, self.hidden, self.hidden_map, self.name = boundscheck, parity, hidden, hidden_map, name
+
+
+class Unit:
+    """One C file: the function called from Python, and a static C function for each function and signature it calls."""
+
+    def __init__(self, identity=None):
+        self.callees = {}        # (function, argument types) -> its Compiler
+        self.stack = [identity]  # the calls being worked out, to find recursion
+        self.code = []           # the callees' C, each after those it calls
+        self.helpers = set()
+        self.frames = []         # (file, function name) a failed call's trace refers to
+
+    def callee(self, spec, types):
+        key = (spec.identity, tuple(types))
+        c = self.callees.get(key)
+        if c is None:
+            if spec.identity in self.stack:
+                raise Unsupported(None, 'recursion')
+            self.stack.append(spec.identity)
+            try:
+                c = Compiler(spec.tree, list(types), spec.globals, spec.filename, spec.offset, spec.boundscheck, spec.parity, False, self, spec.hidden_map)
+                c.infer_with_webs()
+                if c.tagged:
+                    raise Unsupported(None, 'a variable in it is an int at some times and a float at others')
+                if any(t.kind == 'dict' for t in c.env.values()):
+                    raise Unsupported(None, 'it reads a dict')
+            finally:
+                self.stack.pop()
+            c.cname = f'sj_call_{len(self.callees)}'
+            c.frame = len(self.frames)
+            c.spec = spec
+            self.frames.append((spec.filename, spec.name or spec.tree.name))
+            self.callees[key] = c
+        return c
+
+
 class Compiler:
-    def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, parity=True, counts=False):
+    def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, parity=True, counts=False, unit=None, hidden_map=None):
         fdef, arg_types, self.dict_slots = flatten_dicts(fdef, arg_types)
-        self.again = (arg_types, globals_, filename, line_offset, boundscheck, parity, counts)
+        self.again = (arg_types, globals_, filename, line_offset, boundscheck, parity, counts, unit, hidden_map)
+        self.unit = unit if unit is not None else Unit()
+        self.hidden_map = hidden_map
+        self.cname = 'sj_kernel'
+        self.inferred = False
+        self.calls = False         # the C calls a function of the unit
+        self.call_stmt = False     # this statement calls one: anything read in it is read now, in Python's order
         self.counts = counts       # preflight --counts: the kernel counts how often each line runs
         self.count_lines = []      # counter -> the Python lines it stands for
         self.count_slot = {}       # id(statement) -> (its counter, whether it's the one that adds to it)
@@ -648,6 +697,8 @@ class Compiler:
                         self.infer_target(x, self.typeof(v), s)
                 return
             vt = self.typeof(s.value)
+            if ret_arrays(vt) and vt.kind == 'tuple' and not all(isinstance(t, (ast.Tuple, ast.List)) and len(t.elts) == len(vt.elem) for t in s.targets):
+                self.fail(s, 'a tuple holding arrays assigned to something other than as many names')
             for target in s.targets:          # a = b = value: value once, targets left to right
                 self.infer_target(target, vt, s)
         elif isinstance(s, ast.AnnAssign):
@@ -680,6 +731,8 @@ class Compiler:
         elif isinstance(s, ast.Expr) and docstring_ok and isinstance(s.value, ast.Constant) \
                 and isinstance(s.value.value, str):
             pass
+        elif isinstance(s, ast.Expr) and self.callee_of(s.value) is not None:
+            self.typeof(s.value)
         elif isinstance(s, ast.Expr):
             self.fail(s, 'an expression statement (calls with side effects are not compiled yet)')
         else:
@@ -821,7 +874,7 @@ class Compiler:
         """Could this expression be a view: something indexed, or .T of an array?"""
         return isinstance(e, ast.Subscript) or (isinstance(e, ast.Attribute) and e.attr == 'T' and (
             self.is_view(e.value) or (isinstance(e.value, ast.Name) and self.env.get(e.value.id) is not None
-                                      and self.env[e.value.id].kind == 'array'))) or self.make_of(e) is not None
+                                      and self.env[e.value.id].kind == 'array'))) or self.make_of(e) is not None or self.callee_of(e) is not None
 
     def transpose_type(self, e):
         t = self.typeof(e.value)
@@ -1179,6 +1232,229 @@ class Compiler:
         if not all(t.kind == 'int' and t.ctype == 'int64_t' for t in els):
             self.fail(e, 'math.sumprod() of floats returns the int 0 when empty, so its type depends on the data')
         return T.INT if not any(t.np for t in els) else T.INT_DYN
+
+    # ---- calls to other @scram functions: a static C function per function and signature
+    def callee_of(self, e):
+        """The function this calls, if it's a @scram function at module level."""
+        if not isinstance(e, ast.Call) or not isinstance(e.func, ast.Name) or e.func.id in self.cnames:
+            return None
+        t = self.env.get(e.func.id)
+        if t is not None:
+            return t.elem if t.kind == 'function' else None
+        f = self.globals.get(e.func.id)
+        return f if hasattr(f, '_callee') else None
+
+    def call_args(self, e, spec):
+        """The arguments in the order Python evaluates them, and for each parameter which of those it gets."""
+        a = spec.tree.args
+        names = [p.arg for p in a.posonlyargs + a.args][:len(a.posonlyargs + a.args) - len(spec.hidden)]
+        if any(isinstance(x, ast.Starred) for x in e.args) or any(k.arg is None for k in e.keywords):
+            self.fail(e, f'calls {spec.tree.name}() with * or **')
+        nodes = list(e.args) + [k.value for k in e.keywords]
+        order = dict(zip(names, range(len(e.args))))
+        for i, k in enumerate(e.keywords):
+            if k.arg not in names or k.arg in order:
+                self.fail(e, f'calls {spec.tree.name}() with these arguments')
+            order[k.arg] = len(e.args) + i
+        if len(order) != len(names) or len(e.args) > len(names):
+            self.fail(e, f'calls {spec.tree.name}() with these arguments')
+        return nodes, [order[n] for n in names]
+
+    def compiled_callee(self, e):
+        """The Compiler of what this call calls, for these argument types."""
+        fn = self.callee_of(e)
+        try:
+            spec = fn._callee()
+        except Unsupported as u:
+            self.fail(e, f'calls {e.func.id}(): {u.reason}')
+        nodes, picked = self.call_args(e, spec)
+        ts = [self.typeof(x) for x in nodes]
+        for x, t in zip(nodes, ts):
+            if not (t.is_number or t.kind == 'array' or (t.kind == 'tuple' and all(et.is_number and et.np != 'dyn' for et in t.elem))):
+                self.fail(e, f'passes {t.name} to {e.func.id}()')
+        types = [ts[k] for k in picked]
+        for h in spec.hidden:
+            p = self.hidden_param(h)
+            if p not in self.env:
+                self.fail(e, f'calls {e.func.id}(), which reads the global {h[1]}')
+            types.append(self.env[p])
+        try:
+            return self.unit.callee(spec, types)
+        except Unsupported as u:
+            self.fail(e, f'calls {e.func.id}(): {u.reason}')
+
+    def hidden_param(self, h):
+        return self.hidden_map[h[0], h[1]] if self.hidden_map else h[1]
+
+    def callee_type(self, e):
+        c = self.compiled_callee(e)
+        if c.makes and ret_arrays(c.ret):
+            self.makes = True
+        if c.ret.kind == 'array':
+            self.env[self.view_name(e)] = c.ret
+        elif c.ret.kind == 'tuple':
+            for k, et in enumerate(c.ret.elem):
+                if et.kind == 'array':
+                    self.env[self.result_name(e, k)] = et
+        return c.ret
+
+    def result_name(self, e, k):
+        name = self.view_names.get((id(e), k))
+        if name is None:
+            name = f'sjv__{len(self.view_names)}'
+            self.view_names[(id(e), k)] = name
+        return name
+
+    def emit_call(self, e):
+        """Evaluate the arguments in order and make the call. Returns its Compiler, the temporary holding its sj_io, and the
+        names of the arrays it was passed, in the order its array parameters come."""
+        c = self.compiled_callee(e)
+        if not c.lines:
+            source = c.generate()
+            self.unit.code.append(source)
+        self.calls = True
+        self.uses_libm = self.uses_libm or c.uses_libm
+        self.uses_stop = self.uses_stop or c.uses_stop
+        spec = c.spec
+        nodes, picked = self.call_args(e, spec)
+        done = []
+        for x in nodes:
+            t = self.typeof(x)
+            if t.kind == 'array':
+                done.append((t, self.materialize(x)))
+            elif t.kind == 'tuple':
+                done.append((t, self.texpr(x)))
+            else:
+                v = self.expr(x)
+                done.append((t, (self.hold(v[0], t), self.hold_flag(v[1]))))
+        chosen = [done[k] for k in picked] + [(self.env[self.hidden_param(h)], self.hidden_param(h)) for h in spec.hidden]
+        cargs, arrays = [], []
+        for t, v in chosen:
+            if t.kind == 'function':
+                continue
+            if t.kind == 'array':
+                arrays.append(v)
+                cargs += [f'v_{v}'] + [self.extent(v, k) for k in range(t.ndim)]
+                if t.strided:
+                    cargs += [f'v_{v}__s{k}' for k in range(t.ndim)]
+            elif t.kind == 'tuple':
+                cargs += [val if isinstance(val, str) else val for val, _ in (v if isinstance(v, list) else self.tuple_var(v))]
+            elif isinstance(v, str):           # a global that is a number
+                cargs.append(f'v_{v}')
+                if t.np == 'dyn':
+                    cargs.append(f'v_{v}__np')
+            else:
+                cargs.append(v[0])
+                if t.np == 'dyn':
+                    cargs.append(v[1])
+        if c.uses_libm:
+            cargs.append('sj_m')
+        if c.uses_stop:
+            cargs.append('sj_stop')
+        io, st = self.temp(), self.temp()
+        self.emit(f'int64_t {io}[{c.record_slot(len(ret_arrays(c.ret)))}];')
+        self.emit(f'int {st} = {c.cname}({", ".join(cargs + ["sj_tb", io])});')
+        self.emit(f'if ({st}) {{ sj_tb[++sj_tb[0]] = ((int64_t){c.frame} << 32) | {io}[1]; sj_io[0] = {io}[0]; sj_io[4] = {io}[4]; '
+                  f'SJ_FAIL({st}, {self.line(e)}, {io}[2], {io}[3]); }}')
+        return c, io, arrays
+
+    def call_number(self, e):
+        c, io, _ = self.emit_call(e)
+        return self.number_result(c.ret, io, 0, 2)
+
+    def number_result(self, r, io, at, flag_at):
+        v = self.temp()
+        if r.kind == 'float':
+            self.emit(f'double {v}_d; memcpy(&{v}_d, &{io}[{at}], 8); {r.ctype} {v} = ({r.ctype}){v}_d;')
+        else:
+            self.emit(f'{r.ctype} {v} = ({r.ctype}){io}[{at}];')
+        if r.np != 'dyn':
+            return v, flag_of(r)
+        return v, self.hold_flag(f'{io}[{flag_at}] != 0')
+
+    def take_array(self, name, t, c, io, k, arrays):
+        """Fill a variable from the record of the k-th array a call returned. A block made in the call becomes this function's."""
+        at = c.record_slot(k)
+        self.emit(f'v_{name} = ({t.ctype.strip()})(uintptr_t){io}[{at}];')
+        for d in range(t.ndim):
+            self.emit(f'{self.extent(name, d)} = {io}[{at + 10 + 2 * d}];')
+            if t.strided:
+                self.emit(f'v_{name}__s{d} = {io}[{at + 11 + 2 * d}];')
+        which = f'{io}[{at + 1}]'
+        if self.tracks:
+            bs = ', '.join(f'v_{a}__b' for a in arrays) or '0'
+            os_ = ', '.join(f'v_{a}__o' for a in arrays) or '0'
+            self.open(f'if ({io}[{at + 3}])')
+            self.emit(f'v_{name}__b = -1; v_{name}__o = (int){io}[{at + 2}];')
+            self.close()
+            self.open('else')
+            self.emit(f'int b_[] = {{{bs}}}, o_[] = {{{os_}}}; v_{name}__b = b_[{which}]; v_{name}__o = {io}[{at + 2}] && o_[{which}];')
+            self.close()
+        if self.makes:
+            hs = ', '.join(f'v_{a}__h' for a in arrays) or '0'
+            self.open(f'if ({io}[{at + 3}])')
+            self.emit(f'v_{name}__h = (sj_block *)(uintptr_t){io}[{at + 3}]; sj_adopt(&sj_h, v_{name}__h);')
+            self.close()
+            self.open('else')
+            self.emit(f'sj_block *h_[] = {{{hs}}}; v_{name}__h = h_[{which}];')
+            self.close()
+
+    def call_array(self, e):
+        c, io, arrays = self.emit_call(e)
+        name = self.view_name(e)
+        self.take_array(name, c.ret, c, io, 0, arrays)
+        return name
+
+    def call_results(self, e):
+        """For a call returning a tuple: for each element, the variable holding its array, or (value, flag)."""
+        c, io, arrays = self.emit_call(e)
+        out, k = [], 0
+        for i, et in enumerate(c.ret.elem):
+            if et.kind == 'array':
+                name = self.result_name(e, i)
+                self.take_array(name, et, c, io, k, arrays)
+                out.append(name)
+                k += 1
+            else:
+                out.append(self.number_result(et, io, 4 + 2 * i, 5 + 2 * i))
+        return out
+
+    def call_statement(self, e):
+        c = self.compiled_callee(e)
+        if c.ret.kind == 'tuple':
+            self.call_results(e)
+        elif c.ret.kind == 'array':
+            self.call_array(e)
+        else:
+            self.emit_call(e)
+
+    def assign_from_call(self, targets, e):
+        """a, b = f(x), where f returns arrays in its tuple."""
+        results = self.call_results(e)
+        for target in targets:
+            for x, r, et in zip(target.elts, results, self.typeof(e).elem):
+                if isinstance(r, str):
+                    if isinstance(x, ast.Subscript):
+                        self.store_slice_array(x, r)
+                    else:
+                        self.assign_view(x.id, ast.Name(r, ast.Load()))
+                elif isinstance(x, ast.Name):
+                    self.assign(x.id, r, et)
+                elif self.typeof(x).kind == 'array':
+                    self.store_slice_number(x, r, et)
+                else:
+                    self.store_elem(x, r, et)
+
+    def return_from_call(self, e):
+        results = self.call_results(e)
+        k = 0
+        for i, (r, et, rt) in enumerate(zip(results, self.typeof(e).elem, self.ret.elem)):
+            if isinstance(r, str):
+                self.return_array(ast.Name(r, ast.Load()), k)
+                k += 1
+            else:
+                self.return_number(i, r[0], r[1], et, rt, None)
+        self.emit('goto sj_done;')
 
     # ---- arrays made in the function: np.zeros(n), x.copy()
     def make_of(self, e):
@@ -1850,6 +2126,8 @@ class Compiler:
         return self.hold(f'({a} != {a} ? ({b} != {b} ? {b if second else a} : {b}) : {b} != {b} ? {a} : {pick})', T.FLOAT)
 
     def call_type(self, e):
+        if self.callee_of(e) is not None:
+            return self.callee_type(e)
         nf = self.numpy_func(e.func)
         if nf:
             return self.numpy_type(e, nf)
@@ -2027,6 +2305,7 @@ class Compiler:
         self.check_tagged()
         self.find_outs()
         self.rebound = self.arrays_rebound()
+        self.inferred = True
 
     def arrays_rebound(self):
         """The arrays whose extents can change while something that read them still holds. Not a local assigned once
@@ -2040,7 +2319,7 @@ class Compiler:
     def add_safepoints(self, stmts):
         """After each statement that makes an array, and at the top of a loop in which one is made."""
         def makes(node):
-            return any(isinstance(n, ast.Call) and self.make_of(n) is not None for n in ast.walk(node))
+            return any(isinstance(n, ast.Call) and (self.make_of(n) is not None or self.callee_of(n) is not None) for n in ast.walk(node))
 
         def point(near):
             return ast.copy_location(ast.Expr(ast.copy_location(Safepoint(None), near)), near)
@@ -2057,11 +2336,12 @@ class Compiler:
         return out
 
     def generate(self):
-        self.infer_with_webs()
+        if not self.inferred:
+            self.infer_with_webs()
         if self.makes:
             for n in ast.walk(self.f):
                 if isinstance(n, (ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)) \
-                        and any(isinstance(c, ast.Call) and self.make_of(c) is not None for c in ast.walk(n)):
+                        and any(isinstance(c, ast.Call) and (self.make_of(c) is not None or self.callee_of(c) is not None) for c in ast.walk(n)):
                     self.fail(n, 'an array made inside a comprehension')
             self.f.body = self.add_safepoints(self.f.body)
         da_block(self, self.f.body, set(self.params))
@@ -2070,6 +2350,8 @@ class Compiler:
         params = []
         for p in self.params:
             t = self.env[p]
+            if t.kind == 'function':
+                continue
             if t.kind == 'array':
                 params += [f'{t.ctype}v_{p}', f'int64_t v_{p}__n'] + [f'int64_t v_{p}__n{k}' for k in range(1, t.ndim)]
                 if t.strided:
@@ -2080,6 +2362,8 @@ class Compiler:
                 params.append(f'int64_t v_{p}__in')
             else:
                 params.append(f'{t.ctype} v_{p}')
+                if self.came_as(p).np == 'dyn':     # from a call: the caller's variable and its flag
+                    params.append(f'int v_{p}__np')
         self.mark(self.f)
         head = len(self.lines)
         if self.makes:
@@ -2122,7 +2406,7 @@ class Compiler:
                 self.emit(f'{t.ctype} v_{name} = 0;')
                 if name in self.tagged:
                     self.emit(f'int v_{name}__int = 0;')
-            if t.np == 'dyn':
+            if t.np == 'dyn' and not (name in self.params and self.came_as(name).np == 'dyn'):
                 self.emit(f'int v_{name}__np = {1 if name in self.params and self.came_as(name).np is True else 0};')
         self.emit('int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;')
         decl_at = len(self.lines)
@@ -2157,9 +2441,18 @@ class Compiler:
             params.append('volatile int *sj_stop')
         if self.counts:
             params.append('int64_t *restrict sj_c')
+        if self.cname != 'sj_kernel':
+            if self.uses_rerun:
+                raise Unsupported(None, 'an int argument of it becomes a float')
+            self.unit.helpers |= self.helpers
+            return '\n'.join(self.lines[:head] + [f'static int {self.cname}({", ".join(params + ["int64_t *sj_tb", "int64_t *sj_io"])}) {{']
+                             + self.lines[head:] + ['}', ''])
         params.append('int64_t *sj_io')
         start = ['    *sj_stop = 0;'] if self.uses_stop else []
-        return snippets(self.helpers) + '\n'.join(self.lines[:head] + [f'int sj_kernel({", ".join(params)}) {{'] + start
+        self.tb_slot = self.record_slot(len(ret_arrays(self.ret)))
+        if self.calls:
+            start.append(f'    int64_t *sj_tb = sj_io + {self.tb_slot}; sj_tb[0] = 0;')
+        return snippets(self.helpers | self.unit.helpers) + '\n'.join(self.unit.code + self.lines[:head] + [f'int sj_kernel({", ".join(params)}) {{'] + start
                          + self.lines[head:] + ['}', ''])
 
     def plan_counts(self, stmts, by_test=False):
@@ -2170,7 +2463,7 @@ class Compiler:
         would stop it becoming a conditional move (a random branch: 0.69 to 4.6 ns). by_test: stmts are one."""
         slot = None
         for s in stmts:
-            if isinstance(s, ast.Expr):           # a docstring: stmt() emits nothing for it
+            if isinstance(s, ast.Expr) and self.callee_of(s.value) is None:    # a docstring: stmt() emits nothing for it
                 continue
             leads = slot is None and not by_test
             if slot is None:
@@ -2270,13 +2563,17 @@ class Compiler:
             self.emit(f'v_{name}__int = {1 if vt.kind == "int" else 0};')
 
     def stmt(self, s):
-        if isinstance(s, ast.Expr):           # a docstring, or a place to free arrays
+        if isinstance(s, ast.Expr) and self.callee_of(s.value) is None:     # a docstring, or a place to free arrays
             if isinstance(s.value, Safepoint):
                 self.emit('if (sj_h.since > sj_h.limit) { /*sj_marks*/ sj_sweep(&sj_h); }')
             return
+        self.call_stmt = any(self.callee_of(n) is not None for n in ast.walk(s))
         self.mark(s)
         if self.counts:
             self.count(s)
+        if isinstance(s, ast.Expr):
+            self.call_statement(s.value)
+            return
         if isinstance(s, ast.Assign) and self.is_list_ctor(s.value):
             self.make_list(s.targets[0].id, s.value, s)
             return
@@ -2286,6 +2583,9 @@ class Compiler:
                 self.assign_with_views(targets, s.value)
                 return
             vt = self.typeof(s.value)
+            if vt.kind == 'tuple' and ret_arrays(vt):
+                self.assign_from_call(targets, s.value)
+                return
             if vt.kind == 'tuple':
                 vals = self.texpr(s.value)
                 for target in targets:
@@ -2363,6 +2663,8 @@ class Compiler:
         elif isinstance(s, ast.Return) and self.ret.kind == 'array':
             self.return_array(s.value, 0)
             self.emit('goto sj_done;')
+        elif isinstance(s, ast.Return) and ret_arrays(self.ret) and self.callee_of(s.value) is not None:
+            self.return_from_call(s.value)
         elif isinstance(s, ast.Return) and ret_arrays(self.ret):
             k = 0
             for i, (x, et, rt) in enumerate(zip(s.value.elts, self.typeof_return(s.value), self.ret.elem)):
@@ -2616,8 +2918,8 @@ class Compiler:
         if not fact or fact[0] is None:
             return None
         body = list(ast.walk(ast.Module(body=s.body, type_ignores=[])))
-        if any(isinstance(n, (ast.For, ast.While, ast.comprehension, ast.Continue)) for n in body):
-            return None
+        if any(isinstance(n, (ast.For, ast.While, ast.comprehension, ast.Continue)) or self.callee_of(n) is not None for n in body):
+            return None                        # a call can write any array it's given
         stores = [n for n in body if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store)]
         if len(stores) != 1 or not isinstance(stores[0].value, ast.Name):
             return None
@@ -3035,6 +3337,8 @@ class Compiler:
         first, in order, as Python builds the index before numpy looks at it."""
         if isinstance(e, ast.Name):
             return e.id
+        if self.callee_of(e) is not None:
+            return self.call_array(e)
         if isinstance(e, ast.Call):
             return self.make(e)
         if isinstance(e, ast.Attribute):           # .T: the axes in reverse
@@ -3383,6 +3687,8 @@ class Compiler:
             return [(self.extent(e.value.id, k), '0') for k in range(len(t.elem))]
         if isinstance(e, ast.Call) and self.math_func(e.func):
             return self.math_tuple(e, self.math_func(e.func))
+        if self.callee_of(e) is not None:
+            return self.call_results(e)
         raise AssertionError(e)
 
     def extent(self, name, k):
@@ -3433,7 +3739,17 @@ class Compiler:
         return v
 
     def expr(self, e):
-        """Emit e; return (C value, C numpy flag)."""
+        """Emit e; return (C value, C numpy flag). In a statement with a call in it, what's read so far is read now: the call can write arrays."""
+        v = self.expr_now(e)
+        if self.call_stmt and not isinstance(e, (ast.Constant, ast.Name)):
+            t = self.typeof(e)
+            if t.is_number:
+                return self.hold(v[0], t), self.hold_flag(v[1])
+        return v
+
+    def expr_now(self, e):
+        if self.callee_of(e) is not None:
+            return self.call_number(e)
         if isinstance(e, ast.Constant):
             v = e.value
             if isinstance(v, bool):

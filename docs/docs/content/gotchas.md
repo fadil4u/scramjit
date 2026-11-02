@@ -77,7 +77,7 @@ Crossing from Python into compiled code costs about 1.5 µs per call for numbers
 | 100 | 7,609 ns | 2,565 ns | 3x faster |
 | 1,000 | 79,694 ns | 3,522 ns | 21x faster |
 
-So decorate the function that holds the loop, not a helper called from one. In Pyodide the crossing is about 13 µs, so the break-even is higher. `scramjit preflight` adds a note to decorated functions with no loop, and only suggests decorating functions that have one.
+So decorate the function that holds the loop, not only a helper called from one: [a call from compiled code](loops-and-builtins.md#calls-between-functions) has no such cost, and a small one is inlined. In Pyodide the crossing is about 13 µs, so the break-even is higher. `scramjit preflight` adds a note to decorated functions with no loop, and only suggests decorating functions that have one.
 
 ### Ctrl-C can take a moment, and has limits
 

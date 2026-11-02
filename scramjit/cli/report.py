@@ -62,11 +62,12 @@ def static(t, reports, quiet=False):
         t.write(t.style(r.path, 'path'))
         lines = r.source.splitlines()
         width = max([len(f.name) for f, _ in r.functions] + [len(f.name) for f, _ in shown])
+        called = {n.func.id for f, _ in r.functions for n in ast.walk(f) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
         for f, a in r.functions:
             if a.compiler is not None:
                 if not quiet:
                     t.write(f'  {_mark(t, True)} {f.name:<{width}}  {t.style("compiled", "muted")}')
-                    if not P.has_loop(f):
+                    if not P.has_loop(f) and f.name not in called:      # from compiled code a call has no such cost
                         t.write(f'      {t.style("note:", "note")} no loop: a compiled call costs more than a small Python function')
                     for line, text in sorted(a.compiler.gotchas.items()):
                         t.write(f'      {t.style("note:", "warning")} line {line} {text}')

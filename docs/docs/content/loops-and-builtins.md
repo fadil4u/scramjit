@@ -108,3 +108,35 @@ Only forms that give one number compile. Everything else runs as Python, with nu
 | `dtype=`, `out=`, `where=`, `initial=`, and `mean=`, or a `ddof` that isn't an integer | Python |
 
 `x.sum(axis=1)` on a loop's hot path is worth writing as a loop over `m[i].sum()`, which compiles.
+
+## Calls between functions
+
+A compiled function can call another `@scram` function at module level, or imported from another module:
+
+```python
+@scram
+def step(state, push):
+    state[1] += push * 0.02
+    state[0] += state[1] * 0.02
+    return abs(state[0]) < 2.4
+
+@scram
+def run(state, n):
+    for i in range(n):
+        if not step(state, 1.0 if i % 2 else -1.0):
+            return i
+    return n
+```
+
+Each function compiles once per set of argument types it's called with, so `sq(2)` and `sq(2.0)` are two C functions. A small one is inlined and costs nothing: a loop calling `sq(x[i])` took 0.93 ns per element, the same as writing `x[i] * x[i]`. `step` above, called 1,000,000 times from `run`, costs a few ns each time, against 3 µs from a Python loop.
+
+Arguments can be numbers, arrays, views and tuples of numbers, and a call can return any of these or a tuple holding arrays. An array passed in is the same memory, and one passed back is the same object: `y = f(x)` with `return x` gives you `x`. Everything follows Python: the order things are read in, exceptions, with a traceback showing every function, and any global a called function reads, in its own module.
+
+A call runs as Python, with the same result, and says why, when:
+
+- the function isn't decorated with `@scram`, or is in a closure or a method
+- it calls itself, directly or through another (recursion)
+- it doesn't compile for those argument types: the warning gives its reason
+- it has default values for parameters, or is passed a dict or a list, or a function
+
+Inside a call there's no profile of its own: time in `step` counts toward `run` in `preflight --run`, and `counts=True` counts the lines of the outer function only.

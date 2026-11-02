@@ -87,7 +87,7 @@ Spills per line, once cimo can report them.
    a function generated per signature (`_make_plan`). For numbers: ctypes about 450 ns (the floor), cimo's
    `Kernel.__call__` about 450 (see cimo's `TODO.md`), scramjit about 500. In Pyodide about 13 µs, not yet
    broken down. Break-even is 30 to 50 loop iterations per call. A Gymnasium-style `step` is below it, with no loop
-   at all: CartPole from a Python loop does 396k steps/s compiled against 698k plain, and 53M with the loop compiled too. Rejected: caching an array's address (saves
+   at all: CartPole from a Python loop does 396k steps/s compiled against 698k plain, and 53M with the loop compiled too, which calls between compiled functions now allow without pasting. Rejected: caching an array's address (saves
    200 ns, but `resize(refcheck=False)` would corrupt memory silently); `__call__` by argument count (100 to
    150 ns, not worth its keyword edge cases).
 8. **Variables that change type, what's left:** a name used for separate things compiles (each web is its own
@@ -118,9 +118,7 @@ Spills per line, once cimo can report them.
 15. **Shift operators:** `>>` and `<<` fall back ("the RShift operator"). Hash, RNG and bit-packing loops use
     them constantly, and a model writing code reaches for them first. Python's ints don't wrap on `<<`, so decide
     how that fits the 64-bit rule in Gotchas.
-16. **Calls between compiled functions** (already noted in the spec under "Calls between compiled functions"). A
-    program built from `reset`, `step` and `observe` has to be pasted into one function by hand today: found
-    building a training loop around generated environments, where it is the main obstacle.
+16. **Calls between compiled functions, what's left:** recursion, default parameter values, dicts and lists as arguments, a function passed as an argument, `module.f()`, and a line profile of what's called.
 17. **Compile time jumps on large functions.** In a generated 200-line training loop, adding a 4-line nested
     copy (`rec[t, y, x] = grid[y, x]` under one `if`) took the compile from about 3 s to 11 to 15 s on a loaded
     machine. The cause is bounds-check versioning: a planner over the same world is 4,410 lines of C and 205 loops

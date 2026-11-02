@@ -13,7 +13,7 @@ import re
 
 from . import _lift
 from . import _types as T
-from ._compiler import Compiler, StaticNumpy
+from ._compiler import Callee, Compiler, StaticNumpy
 from ._errors import Unsupported
 
 _OTHER = object()     # a module-level name whose value static analysis can't know
@@ -27,7 +27,8 @@ HINTS = [
     (r'^f-strings|calls (str|print|repr|format)\(\)', 'keep text and printing out of the function: return numbers and format them after the call'),
     (r'slice|view', 'read and write through views, or loop over the indices you want: for i in range(lo, hi): a[i] = 0.0'),
     (r'^calls [\w.]*\.\w+\(\)', 'write it as a loop; methods and numpy calls on whole arrays aren\'t compiled'),
-    (r'^calls \w+\(\)', 'put its body here, or decorate and call it from Python; a compiled function can\'t call Python functions'),
+    (r'^calls \w+\(\): ', 'make that function compile first: this one can call it once it does'),
+    (r'^calls \w+\(\)', 'decorate it with @scram: a compiled function can call compiled functions, not Python ones'),
     (r'empty list|a list assigned', 'make a numpy array of the final size: np.zeros(n)'),
     (r'must keep one type', 'use a new name for the new type'),
     (r'global or undefined name', 'pass it in as an argument'),
@@ -76,6 +77,20 @@ class Analysis:
         return {n for a, b in self.loops for n in range(a, b + 1)}
 
 
+class StaticCallee:
+    """A @scram function of the module being read, as what a call to it compiles against."""
+
+    def __init__(self, fdef, globals_):
+        self.fdef, self.globals = fdef, globals_
+
+    def _callee(self):
+        tree, _ = with_globals(self.fdef, self.globals)
+        count = len(self.fdef.args.posonlyargs + self.fdef.args.args)
+        hidden = [(0, p.arg) for p in (tree.args.posonlyargs + tree.args.args)[count:]]
+        opts = options(self.fdef)
+        return Callee(self, tree, self.globals, '', 0, opts['boundscheck'], opts['parity'], hidden, None, self.fdef.name)
+
+
 def module_globals(tree):
     """What compiling needs from a module, without running it: math, and which names are taken."""
     out = {}
@@ -87,6 +102,8 @@ def module_globals(tree):
             for a in s.names:
                 out[a.asname or a.name] = getattr(math, a.name, _OTHER) if s.module == 'math' \
                     else StaticNumpy(a.name) if s.module == 'numpy' else _OTHER
+        elif isinstance(s, ast.FunctionDef) and any(is_scram(d) for d in s.decorator_list):
+            out[s.name] = StaticCallee(s, out)
         elif isinstance(s, (ast.FunctionDef, ast.ClassDef)):
             out[s.name] = _OTHER
         elif isinstance(s, ast.Assign):
@@ -114,11 +131,20 @@ def options(fdef):
     return opts
 
 
-def assumed_signature(fdef):
+def assumed_signature(fdef, globals_=None, seen=()):
     """Argument types from annotations; the rest are assumed to be numbers or float64 arrays, by how
-    the function uses them."""
+    the function uses them, or by how a function it passes them to does."""
     ann = {'float': T.FLOAT, 'int': T.INT, 'bool': T.BOOL}
     ndim = {}
+    passed_ints = set()
+    for n in ast.walk(fdef):
+        f = (globals_ or {}).get(n.func.id) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) else None
+        if isinstance(f, StaticCallee) and f.fdef not in seen:
+            for a, t in zip(n.args, assumed_signature(f.fdef, globals_, seen + (fdef,))):
+                if isinstance(a, ast.Name) and t.kind == 'array':
+                    ndim[a.id] = max(ndim.get(a.id, 0), t.ndim)
+                elif isinstance(a, ast.Name) and t is T.INT:
+                    passed_ints.add(a.id)
     for n in ast.walk(fdef):
         if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name):
             k = len(n.slice.elts) if isinstance(n.slice, ast.Tuple) else 1
@@ -158,7 +184,7 @@ def assumed_signature(fdef):
                 and n.value.attr == 'shape' and isinstance(n.value.value, ast.Name):
             ndim[n.value.value.id] = max(ndim.get(n.value.value.id, 1), len(n.targets[0].elts))
     keys = _assumed_dicts(fdef)
-    ints = _assumed_ints(fdef)
+    ints = _assumed_ints(fdef) | passed_ints
     sig = []
     a = fdef.args
     for p in a.posonlyargs + a.args:
@@ -298,6 +324,22 @@ def with_globals(fdef, globals_):
         loads |= _lift._split(st)[0]
     called = {n.func.id for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     indexed = {n.value.id for n in ast.walk(fdef) if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)}
+    seen, stack = {fdef.name}, [globals_[n] for n in called - local if isinstance(globals_.get(n), StaticCallee)]
+    while stack:                       # a global read by a function this calls is passed through it
+        f = stack.pop()
+        if f.fdef.name in seen:
+            continue
+        seen.add(f.fdef.name)
+        inner = _lift.local_names(f.fdef)
+        for st in f.fdef.body:
+            loads |= _lift._split(st)[0] - inner
+        for n in ast.walk(f.fdef):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id not in inner:
+                called.add(n.func.id)
+                if isinstance(globals_.get(n.func.id), StaticCallee):
+                    stack.append(globals_[n.func.id])
+            if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name):
+                indexed.add(n.value.id)
     added = []
     tuples = {}
     for name in sorted(loads - local - called):
@@ -322,7 +364,7 @@ def best_analysis(fdef, globals_, filename, offset, opts, first_only=False):
     """Analyze under the assumed signature. An unannotated array whose values are used as indices
     isn't float64, so before calling a function uncompilable, try its arrays as int64 too."""
     fdef, tuples = with_globals(fdef, globals_)
-    sig = assumed_signature(fdef)
+    sig = assumed_signature(fdef, globals_)
     params = fdef.args.posonlyargs + fdef.args.args
     sig = [tuples.get(p.arg, t) for p, t in zip(params, sig)]
     first = None

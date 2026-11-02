@@ -105,8 +105,9 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | Assigning to a slice: `x[1:3] = 0.0`, `m[i] = row`, overlap included | `np.sqrt(x)` on a whole array |
 | Numbers, tuples, arrays and dicts at module level | Assigning to a global, other global objects |
 | `range`, `enumerate`, `zip`, `map`, `filter`, comprehensions | numpy array expressions: `a * 2` |
-| `sum(gen, 0.0)`, `min`, `max`, `abs`, `**`, tuple unpacking | Calls to other Python functions |
-| Numbers and n-D numpy arrays, including dtypes like `uint8` | Strings, objects |
+| `sum(gen, 0.0)`, `min`, `max`, `abs`, `**`, tuple unpacking | Calls to undecorated Python functions, recursion |
+| Calls to other `@scram` functions, usually inlined | Strings, objects |
+| Numbers and n-D numpy arrays, including dtypes like `uint8` | Classes |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | Lists that grow with `append` |
 | Dicts passed in, reading and writing keys it names | Dicts that gain keys, or built in the function |
 | numpy functions on single numbers: `np.sqrt(x[i])`, `np.sin`, `np.minimum` | numpy calls that make arrays: `np.sqrt(x)`, `x.sum(axis=0)` |
@@ -182,7 +183,7 @@ generated expressions. This covers floor division and modulo on negatives, `Zero
 
 There are three exceptions: integers are 64-bit and wrap, and the two `**` cases above raise
 `ValueError`. Compiled calls also skip numpy's warnings and `errstate`, are invisible to debuggers and
-coverage, and cost about 1.4 µs each, so decorate the function with the loop, not a small helper. See
+coverage, and cost about 1.4 µs each from Python, so a loop should be compiled too, not only a small helper. See
 [Gotchas](https://www.scramjit.dev/docs/?p=gotchas).
 
 | Option | Default | Effect |

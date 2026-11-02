@@ -16,7 +16,7 @@ import warnings
 import weakref
 
 from . import _types as T
-from ._compiler import Compiler, array_record_slots, ret_arrays, ret_pairs
+from ._compiler import Callee, Compiler, Unit, array_record_slots, ret_arrays, ret_pairs
 from ._errors import CompileError, FallbackWarning, Unsupported
 from . import _interrupt
 from . import _lift
@@ -63,6 +63,8 @@ def _libm_table():
 def _arg_type(x):
     """The compiled type of an argument, or None if it isn't compiled."""
     t = type(x)
+    if t is Function:
+        return T.function_of(x)
     if t is int:
         return T.INT if -(1 << 63) <= x < (1 << 63) else None
     if t is float:
@@ -128,6 +130,22 @@ def _raise_at(exc, filename, line, name):
     raise exc
 
 
+def _raise_chain(exc, frames):
+    """Raise exc through a frame for each of [(file, line, function name)], outermost first, so the traceback reads as Python's would."""
+    def run(i):
+        if i == len(frames) - 1:
+            _raise_at(exc, *frames[i])
+        filename, line, name = frames[i]
+        if not name.isidentifier():
+            name = 'compiled'
+        ns = {'__sj_next__': lambda: run(i + 1)}
+        if line and line >= 2:
+            exec(compile('\n' * (line - 2) + f'def {name}():\n __sj_next__()\n', filename, 'exec'), ns)
+            ns[name]()
+        run(i + 1)
+    run(0)
+
+
 def _dict_keys(fdef):
     """For each parameter subscripted by a constant string or int: the keys, if it turns out to be a dict."""
     if fdef is None:
@@ -143,6 +161,8 @@ def _dict_keys(fdef):
 
 def _push(cargs, x, t):
     """The C arguments for one Python argument."""
+    if t.kind == 'function':
+        return
     if t.kind == 'array' and t.strided:
         cargs.append(x.ctypes.data)
         cargs.extend(x.shape)
@@ -185,7 +205,7 @@ PYTHON = _Python()
 
 class Compiled:
     __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun', 'outs',
-                 'counts', 'count_lines', 'count_heads', 'count_rest', 'array_args', 'records', 'io_size', 'free')
+                 'counts', 'count_lines', 'count_heads', 'count_rest', 'array_args', 'records', 'io_size', 'free', 'frames', 'tb_at')
 
     def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None, stop=False, rerun=False):
         self.rerun = rerun
@@ -254,20 +274,25 @@ def _make_plan(f, entry, args):
     dtype, dimension or layout, an empty one) goes to f._slow, so plans change only speed."""
     if entry.counts is not None:
         return f._slow_call
-    env = {'kernel': entry.kernel, 'slow': f._slow, 'failed': f._failed, 'box': f._box, 'ret': entry.ret, 'pool': [],
+    env = {'kernel': entry.kernel, 'slow': f._slow, 'failed': f._failed, 'box': f._box, 'ret': entry.ret, 'pool': [], 'compiled': entry,
            'addressof': ctypes.addressof, 'from_buffer': ctypes.c_char.from_buffer, 'bytearray': bytearray, 'memoryview': memoryview}
     names = [f'a{i}' for i in range(len(args))]
     real = names[:len(args) - len(f._hidden or ())]
     again = '(' + ''.join(n + ', ' for n in real) + ')'
     hidden = []                        # globals the function reads: read now, and turned down if their type has changed
-    for k, g in enumerate(f._hidden or ()):
+    for k, (g, gname) in enumerate(f._hidden_from or ()):
         i = len(real) + k
-        env[f'gname{k}'], env[f'gtype{k}'] = g, type(args[i])
-        hidden.append(f'    a{i} = G.get(gname{k}, MISSING)\n    if type(a{i}) is not gtype{k}:\n        return slow({again})')
+        env[f'gname{k}'], env[f'gtype{k}'], env[f'G{k}'] = gname, type(args[i]), g
+        hidden.append(f'    a{i} = G{k}.get(gname{k}, MISSING)\n    if type(a{i}) is not gtype{k}:\n        return slow({again})')
+        if entry.types[i].kind == 'function':     # a new function is a new signature
+            env[f'gval{k}'] = args[i]
+            hidden.append(f'    if a{i} is not gval{k}:\n        return slow({again})')
     if hidden:
-        env.update(G=f._fn.__globals__, MISSING=_MISSING)
+        env.update(MISSING=_MISSING)
     cargs = []
     for i, (x, t, n) in enumerate(zip(args, entry.types, names)):
+        if t.kind == 'function':
+            continue
         if t.kind == 'array' and t.strided:
             return f._slow_call
         if t.kind == 'array':
@@ -317,7 +342,7 @@ def _make_plan(f, entry, args):
     size = entry.io_size
     r = entry.ret
     if entry.records:
-        env.update(arrays=f._array_result, compiled=entry)
+        env.update(arrays=f._array_result)
         result = f"arrays(compiled, io, ({''.join(n + ', ' for n in names)}))"
     elif r is T.NONE:
         result = 'None'
@@ -355,7 +380,7 @@ def _make_plan(f, entry, args):
     status = kernel({''.join(c + ', ' for c in cargs)}ioaddr)
 {rerun}{saves}    if status:
         pool.append(entry)
-        failed(status, io)
+        failed(compiled, status, io)
     value = {result}
     pool.append(entry)
     return value
@@ -384,6 +409,7 @@ class Function:
         self._stats = {}          # signature -> [calls, native seconds, Python seconds], under preflight --run
         self._lock = threading.Lock()
         self._hidden = None       # the globals this function reads, found at the first call: they may not exist before it
+        self._hidden_from = None  # for each of those: (the dict it's in, its name there), which a called function's may differ in
         self._ctree = None        # the tree with those as parameters, which is what's compiled
         code = fn.__code__
         if _loop is None:
@@ -468,13 +494,12 @@ class Function:
             self._find_globals()
         if not self._hidden:
             return args
-        g = self._fn.__globals__
-        return args + tuple(g.get(n, _MISSING) for n in self._hidden)
+        return args + tuple(g.get(n, _MISSING) for g, n in self._hidden_from)
 
     def _find_globals(self):
         """A number, tuple, array or dict at module level is one more input: it's read at each call and passed like the others, so
         loops can use it, a new value needs no recompile, and a new type is a new signature. Anything else stays a name."""
-        self._hidden = []
+        self._hidden, self._hidden_from = [], []
         tree = self._tree
         if tree is None:
             return
@@ -485,10 +510,25 @@ class Function:
         called = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
         g = self._fn.__globals__
         self._hidden = sorted(n for n in loads - local - called if n in g and (_arg_type(g[n]) is not None or type(g[n]) is dict))
+        callees = sorted(n for n in called - local if type(g.get(n)) is Function)
+        self._hidden += callees
+        self._hidden_from = [(g, n) for n in self._hidden]
+        for n in callees:                # what they read is read at each call too, and may be in another module
+            f = g[n]
+            if f._hidden is None:
+                f._find_globals()        # recursion finds this one's list unfinished, and won't compile anyway
+            for og, on in f._hidden_from:
+                if not any(og is a and on == b for a, b in self._hidden_from):
+                    self._hidden.append(on if og is g and on not in self._hidden else f'sjg{len(self._hidden)}_{on}')
+                    self._hidden_from.append((og, on))
         if self._hidden:
             self._ctree = copy.deepcopy(tree)
             self._ctree.args.args = self._ctree.args.args + [ast.copy_location(ast.arg(n), tree) for n in self._hidden]
             self._dict_keys = _dict_keys(self._ctree)
+
+    def _hidden_names_read(self):
+        """The globals this function itself reads, not those it reads only through what it calls."""
+        return {n for n in self._hidden if not n.startswith('sjg')}
 
     def _real(self, args):
         """The caller's arguments, without the globals added to them."""
@@ -509,9 +549,28 @@ class Function:
             self._plans[tuple(map(type, args))] = _make_plan(self, entry, args)
         return self._run(entry, args)
 
-    def _failed(self, status, io):
+    def _failed(self, entry, status, io):
         slots = [int.from_bytes(io[i:i + 8], 'little', signed=True) for i in range(0, 40, 8)]
-        _raise_at(exception(status, slots), self._filename, slots[1], self.__name__)
+        frames = [(self._filename, slots[1], self.__name__)]
+        if entry.frames:                 # those a call passed through, innermost first
+            n = int.from_bytes(io[entry.tb_at:entry.tb_at + 8], 'little', signed=True)
+            for k in range(n, 0, -1):
+                v = int.from_bytes(io[entry.tb_at + 8 * k:entry.tb_at + 8 * k + 8], 'little', signed=True)
+                filename, name = entry.frames[v >> 32]
+                frames.append((filename, v & 0xffffffff, name))
+        _raise_chain(exception(status, slots), frames)
+
+    def _callee(self):
+        """What a compiled function needs to call this one."""
+        if self._tree is None:
+            raise Unsupported(None, self._why_not)
+        if self._hidden is None:
+            self._find_globals()
+        return Callee(self, self._ctree or self._tree, self._fn.__globals__, self._filename, self._first - 1, self._boundscheck, self._parity,
+                      [(id(g), n) for g, n in self._hidden_from], self._hidden_map(), self.__name__)
+
+    def _hidden_map(self):
+        return {(id(g), on): p for (g, on), p in zip(self._hidden_from, self._hidden)}
 
     def _slow_call(self, *args):
         return self._slow(args)
@@ -616,12 +675,17 @@ class Function:
     def _compile(self, key, args):
         if self._tree is None:
             raise Unsupported(None, self._why_not)
-        for x, t in zip(args, key):
+        real = len(args) - len(self._hidden or ())
+        for i, (x, t) in enumerate(zip(args, key)):
+            if t is None and i >= real and self._hidden[i - real] not in self._hidden_names_read():
+                raise Unsupported(None, f'a function it calls reads the global {self._hidden_from[i - real][1]}, which is {_describe(x, t)}')
             if t is None:
                 raise Unsupported(None, f'an argument of type {_describe(x, t)} is not compiled')
+            if t.kind == 'function' and i < real:
+                raise Unsupported(None, 'a function passed as an argument')
         counts = self._counting or _counts is True or bool(_counts and self._owner in _counts)
         c = Compiler(self._ctree or self._tree, list(key), self._fn.__globals__, self._filename, self._first - 1,
-                     self._boundscheck, self._parity, counts)
+                     self._boundscheck, self._parity, counts, Unit(self), self._hidden_map() if self._hidden else None)
         source = c.generate()
         cimo = _get_cimo()
         try:
@@ -644,6 +708,10 @@ class Function:
             self._np = numpy
             entry.records = [(at, layout, numpy.dtype(name).str) for at, layout, name in entry.records]
         entry.io_size = 8 * c.record_slot(len(entry.records))
+        entry.frames = c.unit.frames if c.calls else None
+        if c.calls:                      # room for the trace of a failed call
+            entry.tb_at = entry.io_size
+            entry.io_size += 8 * (1 + len(c.unit.frames))
         entry.free = module.sj_release if c.makes else None
         if counts:
             entry.counts = bytearray(8 * max(len(c.count_lines), 1))
@@ -693,8 +761,7 @@ class Function:
         for i, key, at, ot in entry.outs:
             args[i][key] = self._box(io, at, at + 8, ot)
         if status:
-            slots = [int.from_bytes(io[i:i + 8], 'little', signed=True) for i in range(0, 40, 8)]
-            _raise_at(exception(status, slots), self._filename, slots[1], self.__name__)
+            self._failed(entry, status, io)
         r = entry.ret
         if r is T.NONE:
             return None

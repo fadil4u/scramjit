@@ -195,7 +195,7 @@ Pre-release.
 
 - 93 tests pass. Developed and benchmarked on arm64 Linux and in Pyodide. x86-64, macOS and Windows
   are cimo targets, but scramjit's tests don't run on them in CI yet.
-- Not built yet: loop lifting, so a function compiles whole or runs as Python.
+- A function that doesn't compile whole has its loops compiled on their own, where they fit.
 - Next: see [`TODO.md`](TODO.md).
 
 ## Development

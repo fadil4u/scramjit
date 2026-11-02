@@ -18,6 +18,7 @@ from . import _types as T
 from ._compiler import Compiler
 from ._errors import CompileError, FallbackWarning, Unsupported
 from . import _interrupt
+from . import _lift
 from ._runtime import LIBM, PRELUDE, exception
 
 _cimo = None
@@ -233,9 +234,12 @@ def _make_plan(f, entry, args):
 
 
 class Function:
-    def __init__(self, fn, boundscheck=True, cache=True, fallback=True, parity=True):
+    def __init__(self, fn, boundscheck=True, cache=True, fallback=True, parity=True, _loop=None):
         functools.update_wrapper(self, fn)
         self._fn = fn
+        self._py = fn             # what runs when a signature doesn't compile: fn, or fn with its loops lifted
+        self._lifted = None       # the Functions of its lifted loops, once that has been tried
+        self._loop = _loop        # a lifted loop: (its function's tree, the first line, the file)
         self._boundscheck = boundscheck
         self._fallback = fallback
         self._parity = parity
@@ -246,13 +250,16 @@ class Function:
         self._why = {}            # signature -> (line, reason) it runs as Python
         self._stats = {}          # signature -> [calls, native seconds, Python seconds], under preflight --run
         self._lock = threading.Lock()
-        _functions.add(self)
         code = fn.__code__
+        if _loop is None:
+            _functions.add(self)
+            self._first = code.co_firstlineno
+        else:
+            self._first = _loop[1]
         self._filename = code.co_filename
-        self._first = code.co_firstlineno
         self._contracts = [(i, p, a) for i, (p, a) in enumerate(
             (p, fn.__annotations__.get(p)) for p in code.co_varnames[:code.co_argcount]) if a in _ANNOTATIONS]
-        self._tree, self._why_not = self._parse(fn)
+        self._tree, self._why_not = self._parse(fn) if _loop is None else (_loop[0], None)
         self._np = None
 
     @staticmethod
@@ -311,9 +318,9 @@ class Function:
         if entry is not PYTHON:
             self._plans[tuple(map(type, args))] = _make_plan(self, entry, args)
         elif None not in key and not any(t.kind == 'array' for t in key):
-            self._plans[tuple(map(type, args))] = self._fn   # these types always run as Python
+            self._plans[tuple(map(type, args))] = self._py   # these types always run as Python
         if entry is PYTHON:
-            return self._fn(*args)
+            return self._py(*args)
         return self._run(entry, args)
 
     def _slow(self, args):
@@ -322,7 +329,7 @@ class Function:
         entry = self._cache.get(key)
         if entry is None:
             entry = self._specialize(key, args)
-        return self._fn(*args) if entry is PYTHON else self._run(entry, args)
+        return self._py(*args) if entry is PYTHON else self._run(entry, args)
 
     def _failed(self, status, io):
         slots = [int.from_bytes(io[i:i + 8], 'little', signed=True) for i in range(0, 40, 8)]
@@ -336,7 +343,7 @@ class Function:
         s[0] += 1
         t = time.perf_counter()
         try:
-            return self._fn(*args) if entry is PYTHON else self._run(entry, args)
+            return self._py(*args) if entry is PYTHON else self._run(entry, args)
         finally:
             s[2 if entry is PYTHON else 1] += time.perf_counter() - t
 
@@ -365,11 +372,42 @@ class Function:
                 if not self._fallback:
                     raise CompileError(f'{self._filename}:{line}: {self.__name__}({sig}) is not compiled: '
                                        f'{u.reason}') from None
-                warnings.warn_explicit(f'{self.__name__}({sig}) runs as Python: {u.reason}',
-                                       FallbackWarning, self._filename, line)
+                self._lift()
+                if self._loop is None:
+                    apart = ', apart from the loops that compile' if self._lifted else ''
+                    warnings.warn_explicit(f'{self.__name__}({sig}) runs as Python{apart}: {u.reason}',
+                                           FallbackWarning, self._filename, line)
                 entry = PYTHON
             self._cache[key] = entry
             return entry
+
+    def _native_loops(self):
+        """The lifted loops that have compiled for some signature, however deep."""
+        out = []
+        for f in self._lifted or []:
+            if any(isinstance(v, Compiled) for v in f._cache.values()):
+                out.append(f)
+            out += f._native_loops()
+        return out
+
+    def _all_loops(self):
+        out = []
+        for f in self._lifted or []:
+            out.append(f)
+            out += f._all_loops()
+        return out
+
+    def _lift(self):
+        """Python runs from now on for some signature: lift the loops that may still compile."""
+        if self._lifted is not None or self._tree is None:
+            return
+        self._lifted = []
+
+        def native(python, tree, loop):
+            return Function(python, self._boundscheck, self._use_disk, True, self._parity, (tree, self._first))
+
+        self._py, self._lifted = _lift.lift(self._tree, self._fn, self._filename, self._first, native,
+                                            self._tree.body[0] if self._loop else None)
 
     def _compile(self, key, args):
         if self._tree is None:

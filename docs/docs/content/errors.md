@@ -30,7 +30,15 @@ def tally(px, hist):
     return labels
 ```
 
-scramjit lifts the first loop out and compiles it on its own. The interpreter runs the rest and calls the compiled loop, passing in the variables it reads (`px`, `hist`) and taking back the ones it writes. A loop can be lifted when everything it reads and writes is a number, an array, a tuple or a fixed-size list.
+scramjit lifts the first loop out and compiles it on its own. The interpreter runs the rest and calls the compiled loop, passing in the variables it reads (`px`, `hist`) and taking back the ones it writes. A loop is compiled when everything it reads and writes is a number, an array or a tuple, checked for the types it actually receives; otherwise it runs as Python, and any loops inside it are tried in turn.
+
+Some loops always stay in Python, because a compiled loop can't keep the function's variables up to date while it runs:
+
+- loops inside `try` or `with`, since a handler could read those variables
+- loops containing `return`
+- every loop of a function that uses closures, `locals()`, `eval`, `exec`, `del`, `global`, or is a generator
+
+A variable that changes type stops its loop compiling, as it does a whole function: `s = 0` then `s += a[i]` on a float array. Use `s = 0.0`.
 
 ## The whole function falls back
 
@@ -38,10 +46,10 @@ A function falls back to Python entirely when nothing in it compiles, or for a c
 
 ## FallbackWarning
 
-Each fallback emits `scramjit.FallbackWarning` once per function and signature, naming the line and the reason:
+Each fallback emits `scramjit.FallbackWarning` once per function and signature, naming the line and the reason. Loops are compiled when they first run, so the warning can't say yet which ones will fit; preflight can:
 
 ```text
-tally.py:9: FallbackWarning: tally(uint8[:], int64[:]) is partly compiled: the loop on line 9 writes labels, a dict
+tally.py:3: FallbackWarning: tally(uint8[:], int64[:]) runs as Python, apart from the loops that compile: dicts aren't compiled
 ```
 
 It is a standard Python warning, so the usual filters apply:
@@ -62,7 +70,7 @@ def step(grid, out, dt: float):
 With `fallback=False`, anything less than compiled raises `scramjit.CompileError` at the Python line instead of falling back:
 
 ```text
-scramjit.CompileError: sim.py:24: step(float64[:, :], float64[:, :], float) is partly compiled: line 24 calls print()
+scramjit.CompileError: sim.py:24: step(float64[:, :], float64[:, :], float) is not compiled: calls print()
 ```
 
 Use it for functions that must be fast, and in tests. [Preflight](profiling.md#in-ci) checks the same thing for a whole codebase before anything runs.

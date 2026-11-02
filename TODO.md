@@ -31,10 +31,10 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 3. **Store-to-load forwarding, what's left:** `y[i - 1]` comes from a temporary when `y[i] = ...` is the
    loop's only array store and runs every iteration. Not yet: `y[i - 2]`, 2-D rows (`m[r, j - 1]`), and loops
    with other stores, which need a runtime test that the arrays don't overlap.
-4. **Loop lifting (M4):** compile the loops that fit inside a function that doesn't, and let Python run the rest,
-   which makes "partly compiled" real. The risk is matching Python when a loop raises partway: every variable
-   must hold what it would in plain Python. Build it in small steps with differential tests from the start. It
-   also gives "continue in Python", which could remove the `**` errors below.
+4. **Loop lifting, what's left:** a loop stays in Python if a variable changes type at its start (`s = 0`, then
+   `s += a[i]` on floats: SSA below would fix this very common case), if a variable read afterwards may be unbound
+   (`for i ...` then reading `i`, with nothing assigned first), inside `try` or `with`, or containing `return`.
+   "Partly compiled" is per function, not per signature. Tracebacks show one extra frame for a loop that raises.
 5. **Python data structures, nested, when statically sized and statically typed, after the loop work above:** so
    that containers don't hide speedups we can still get from loops, each step must leave `bench/` unchanged.
    Dicts, lists, tuples, classes and enums that don't resize at runtime and whose element types don't change. See "Containers" in

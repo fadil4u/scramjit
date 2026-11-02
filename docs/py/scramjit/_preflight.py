@@ -1,8 +1,8 @@
 """Preflight: which functions compile, and which lines keep them from it.
 
 Static analysis reads source without importing or running it. A run reports what happened with the
-real argument types. A function compiles whole or falls back whole until loop lifting exists, so
-"partly compiled" doesn't occur yet. Rendering is in cli/report.py.
+real argument types. A function that doesn't compile whole may still have loops that do: those are
+"partly compiled". Rendering is in cli/report.py.
 """
 
 import ast
@@ -11,6 +11,7 @@ import math
 import os
 import re
 
+from . import _lift
 from . import _types as T
 from ._compiler import Compiler
 from ._errors import Unsupported
@@ -60,14 +61,18 @@ class Problem:
 class Analysis:
     """One function under one signature. compiler is None when it doesn't compile."""
 
-    __slots__ = ('signature', 'compiler', 'problems')
+    __slots__ = ('signature', 'compiler', 'problems', 'loops')
 
     def __init__(self, signature, compiler, problems):
         self.signature, self.compiler, self.problems = signature, compiler, problems
+        self.loops = []       # (first line, last line) of each loop that compiles on its own
 
     @property
     def state(self):
-        return 'compiled' if self.compiler is not None else 'python'
+        return 'compiled' if self.compiler is not None else 'partly' if self.loops else 'python'
+
+    def native_lines(self):
+        return {n for a, b in self.loops for n in range(a, b + 1)}
 
 
 def module_globals(tree):
@@ -208,7 +213,80 @@ def best_analysis(fdef, globals_, filename, offset, opts, first_only=False):
         if a.compiler is not None:
             return a
         first = first or a
+    if not first_only:
+        first.loops = lifted_loops(fdef, sig, globals_, filename, offset, opts)
+        inside = first.native_lines()
+        first.problems = [p for p in first.problems if p.line not in inside]
     return first
+
+
+_NOT_NUMBERS = (ast.Dict, ast.List, ast.Set, ast.Tuple, ast.JoinedStr, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _assumed_local(fdef, name):
+    """A local's type as far as its assignments show: a type, None if it can't be passed to a compiled loop,
+    or ... if they don't say."""
+    seen = ...
+    for n in ast.walk(fdef):
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in n.targets):
+            v = n.value
+            if isinstance(v, _NOT_NUMBERS) or (isinstance(v, ast.Constant) and not isinstance(v.value, (bool, int, float))):
+                return None
+            if isinstance(v, ast.Constant) and seen is ...:
+                seen = T.BOOL if isinstance(v.value, bool) else T.INT if isinstance(v.value, int) else T.FLOAT
+    return seen
+
+
+def _loop_compiles(c, loop_def, fdef, sig, globals_, filename, offset, opts):
+    """Does this lifted loop compile, under what the function's source says its variables are?"""
+    args = fdef.args.posonlyargs + fdef.args.args
+    by_arg = {p.arg: (t, p.annotation is not None) for p, t in zip(args, sig)}
+    usage = assumed_signature(loop_def)
+    fixed, vary = [], []
+    for k, name in enumerate(c.params):
+        t, annotated = by_arg.get(name, (None, False))
+        if t is None:
+            t = _assumed_local(fdef, name)
+            if t is None:
+                return False
+            annotated = t is not ...
+            if t is ...:
+                t = usage[k]
+        fixed.append(t)
+        if not annotated:
+            vary.append(k)
+    for mask in range(1 << min(len(vary), 4)):
+        trial = list(fixed)
+        for bit, k in enumerate(vary[:4]):
+            t = usage[k] if usage[k].kind == 'array' else fixed[k]
+            if mask >> bit & 1:
+                t = T.array(T.NP_INT64, True, t.ndim) if t.kind == 'array' else T.INT
+            trial[k] = t
+        if analyze(loop_def, trial, globals_, filename, offset, opts, True).compiler is not None:
+            return True
+    return False
+
+
+def lifted_loops(fdef, sig, globals_, filename, offset, opts, root=None):
+    """(first line, last line) of the outermost loops that would compile on their own."""
+    if not _lift.can_lift(fdef):
+        return []
+    out = []
+    for c in _lift.candidates(fdef, _lift.local_names(fdef), root):
+        loop_def = _lift.loop_function(c, fdef.name)
+        if _loop_compiles(c, loop_def, fdef, sig, globals_, filename, offset, opts):
+            out.append((c.loop.lineno + offset, c.loop.end_lineno + offset))
+        else:
+            out += lifted_loops(loop_def, _inner_signature(c, fdef, sig), globals_, filename, offset, opts, c.loop)
+    return out
+
+
+def _inner_signature(c, fdef, sig):
+    """What a lifted loop's parameters are known to be, for the loops inside it."""
+    args = fdef.args.posonlyargs + fdef.args.args
+    by_arg = {p.arg: t for p, t in zip(args, sig)}
+    usage = assumed_signature(_lift.loop_function(c, fdef.name))
+    return [by_arg.get(name, usage[k]) for k, name in enumerate(c.params)]
 
 
 class FileReport:

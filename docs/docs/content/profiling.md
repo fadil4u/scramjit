@@ -7,7 +7,7 @@ Every function is in one of three states:
 | | State | Means |
 | --- | --- | --- |
 | ✓ | **compiled** | the whole function runs as native code |
-| ~ | **partly compiled** | some loops run native, the rest as Python (needs loop lifting, not built yet) |
+| ~ | **partly compiled** | some loops run native, the rest as Python |
 | ✗ | **runs as Python** | nothing compiled |
 
 `scramjit` is a command installed with the package; `python -m scramjit` works the same. Every command has `--help`, and `scramjit completion bash` (or `zsh`, `fish`) prints a shell completion script. Colors follow `--color`, `SCRAMJIT_COLOR`, `NO_COLOR` and `FORCE_COLOR`.

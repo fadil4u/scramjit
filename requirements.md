@@ -519,6 +519,17 @@ keeps stdout.
 mixing Python-only setup (dicts, strings) with a numeric loop is partly compiled, matches CPython,
 and preflight (static, `--run` and `f.preflight()`) shows the state per line.
 
+**M4 done (2026-11-02).** `scramjit/_lift.py`: a loop becomes `def f(live_in): <loop>; return live_out`, an ordinary
+Function, so it specializes on run-time types and, if it doesn't compile, runs as Python with its inner loops as the
+next candidates. So anything the compiler refuses (a variable maybe unbound, a type change) is simply not lifted, and
+lifting only has to protect the frame: nothing in `try` or `with`, no function with closures, `locals()`, `del` or
+`global`, and live-ins definitely assigned before the loop, or the call could raise where Python wouldn't. Live-outs
+need real liveness: reusing `i` in the next loop is not reading it. Arrays stay correct because stores happen in order;
+a frame that dies with an exception has no variables left to get wrong. A call costs more than a very short loop, so
+lifting alone made a 3-iteration inner loop 10x slower than Python. `Tier` times tiny loops both ways and keeps the
+faster, comparing minimums because single samples misled it (the second native call builds the call plan; a pause in a
+long run is certain): now 0.7x at 3 iterations, 1.1x at 40, 71x at 100,000.
+
 ## Risks
 
 - **First-call latency** in pure Python decides whether library authors can use it. Measure cimo's

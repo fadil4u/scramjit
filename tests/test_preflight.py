@@ -444,3 +444,117 @@ def test_cache_false_writes_nothing(tmp_path):
     r = run(['p.py'], tmp_path, CIMO_CACHE_DIR=str(cc))
     assert r.returncode == 0 and '91.5' in r.stdout, r.stderr
     assert not [f for f in _images(cc) if f.endswith('.img')]
+
+
+TALLY = '''
+import numpy as np
+from scramjit import scram
+
+@scram
+def tally(px, hist):
+    labels = {}
+    for i in range(len(px)):
+        hist[px[i]] += 1
+    for k in range(len(hist)):
+        if hist[k]:
+            labels[k] = f"{k}: {hist[k]}"
+    return labels
+
+@scram
+def nothing_fits(names):
+    out = {}
+    for n in names:
+        out[n] = str(n)
+    return out
+
+@scram
+def whole(x):
+    s = 0.0
+    for v in x:
+        s += v
+    return s
+
+if __name__ == '__main__':
+    px = np.array([1, 2, 2], dtype=np.int64)
+    print(tally(px, np.zeros(4, dtype=np.int64)))
+    print(whole(np.ones(3)))
+'''
+
+
+@pytest.fixture
+def tally_file(tmp_path):
+    p = tmp_path / 'tally.py'
+    p.write_text(TALLY)
+    return p
+
+
+def _cli(*args, cwd=None):
+    env = dict(os.environ, NO_COLOR='1', PYTHONWARNINGS='ignore')
+    env['PYTHONPATH'] = os.pathsep.join(p for p in sys.path if p)
+    return subprocess.run([sys.executable, '-m', 'scramjit', *map(str, args)], capture_output=True, text=True, env=env, cwd=cwd)
+
+
+def test_static_shows_all_three_states(tally_file):
+    r = _cli('preflight', tally_file, '--no-suggest')
+    assert 'partly compiled (native: lines 8-9)' in r.stdout
+    assert '1 compiled, 1 partly compiled, 1 runs as Python' in r.stdout
+    assert r.returncode == 1
+
+
+def test_static_json(tally_file):
+    r = _cli('preflight', tally_file, '--json', '--no-suggest')
+    d = json.loads(r.stdout)
+    states = {f['name']: f for f in d['files'][0]['functions']}
+    assert {k: v['state'] for k, v in states.items()} == {'tally': 'partly', 'nothing_fits': 'python', 'whole': 'compiled'}
+    assert states['tally']['native_loops'] == [{'first': 8, 'last': 9}]
+    assert (d['compiled'], d['partly'], d['python']) == (1, 1, 1)
+
+
+def test_allow_partial_accepts_only_partly(tally_file):
+    assert _cli('preflight', f'{tally_file}:tally').returncode == 1
+    assert _cli('preflight', f'{tally_file}:tally', '--allow-partial').returncode == 0
+    assert _cli('preflight', f'{tally_file}:nothing_fits', '--allow-partial').returncode == 1
+
+
+def test_one_function_marks_each_line(tally_file):
+    out = _cli('preflight', f'{tally_file}:tally').stdout
+    lines = out.splitlines()
+    assert any('partly compiled' in x for x in lines[:3])
+    assert 'compiled on its own' in next(x for x in lines if 'for i in range' in x)
+    native = next(x for x in lines if 'hist[px[i]] += 1' in x)
+    python = next(x for x in lines if 'labels = {}' in x)
+    assert '✓' in native or '+' in native
+    assert '✗' in python or ' x ' in python
+
+
+def test_run_reports_partly(tally_file, tmp_path):
+    r = _cli('preflight', '--json', '-o', tmp_path / 'out.json', '--allow-partial', '--run', tally_file)
+    d = json.loads((tmp_path / 'out.json').read_text())
+    states = {f['name']: f for f in d['functions']}
+    assert states['tally']['state'] == 'partly' and states['whole']['state'] == 'compiled'
+    assert states['tally']['native'] > 0
+    assert r.returncode == 0
+    assert _cli('preflight', '--run', tally_file).returncode == 1
+
+
+def test_f_preflight_after_a_call():
+    import contextlib
+    import io
+    import warnings
+    import numpy as np
+    from scramjit import scram
+
+    def tally(px, hist):
+        labels = {}
+        for i in range(len(px)):
+            hist[px[i]] += 1
+        return labels
+
+    g = scram(cache=False)(tally)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        g(np.array([1], dtype=np.int64), np.zeros(2, dtype=np.int64))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        g.preflight()
+    assert 'partly compiled' in out.getvalue() and 'compiled on its own' in out.getvalue()

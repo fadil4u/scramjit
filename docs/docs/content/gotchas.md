@@ -110,6 +110,10 @@ with np.errstate(all='raise'):
 
 Check for `inf` and `nan` yourself if you rely on these.
 
+### A short loop inside a Python loop gains nothing
+
+In a function that doesn't compile whole, each lifted loop is a call, which costs more than a few iterations do in Python. scramjit times a loop whose calls are all tiny both ways and keeps the faster, so this is bounded: a 3-iteration loop in a Python loop ran at 0.7x plain Python, a 40-iteration one at about the same speed, and longer ones far faster. Making the outer loop compile too removes the call.
+
 ### Debuggers, tracers and coverage don't see inside
 
 `pdb`, `sys.settrace` and coverage tools see no lines of a compiled function. It will look uncovered even when tests run it. To debug or measure a function, call the original: `f.__wrapped__(...)`.

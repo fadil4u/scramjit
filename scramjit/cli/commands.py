@@ -47,7 +47,7 @@ def build_tree():
     p.opt('-o', '--output', metavar='file', complete='file',
           help='Write the `--json` report to a file, the reliable way with `--run`, where stderr also has the '
                'program\'s own output')
-    p.opt('--allow-partial', flag=True, help='Accept partly compiled functions (none exist until loop lifting)')
+    p.opt('--allow-partial', flag=True, help='Accept partly compiled functions')
     p.example('scramjit preflight src/')
     p.example('scramjit preflight src/sim.py:ema', 'one function, line by line')
     p.example('scramjit preflight --run simulate.py --steps 2000')
@@ -178,7 +178,7 @@ def cmd_preflight(ctx):
         if k:
             out.write('')
         report.one_static(out, fdef, a, source, path, P.options(fdef)['boundscheck'])
-        status = max(status, a.compiler is None)
+        status = max(status, a.state == 'python' or (a.state == 'partly' and not v.get('allow_partial')))
     if not paths:
         return status
     files = [f for p in paths for f in P.python_files(p)]
@@ -192,17 +192,17 @@ def cmd_preflight(ctx):
                 reports.append(r)
     if v.get('json'):
         _with_output(ctx, lambda stream: report.static_json(stream, reports), sys.stdout)
-        return max(status, any(r.error is not None or any(a.compiler is None for _, a in r.functions) for r in reports))
+        return max(status, any(r.error is not None or any(a.state == 'python' or (a.state == 'partly' and not v.get('allow_partial')) for _, a in r.functions) for r in reports))
     if not reports:
         e = ctx.err
         e.write(f'{e.style("note:", "note")} no {e.style("@scram", "code")} functions under {", ".join(paths)}')
         e.write(f'  {e.style("hint:", "hint")} {e.code("decorate a function: `from scramjit import scram`, then `@scram`")}')
         return status
-    good, bad, broken = report.static(out, reports, v.get('quiet'))
-    if not (v.get('quiet') and not bad and not broken):
+    good, partly, bad, broken = report.static(out, reports, v.get('quiet'))
+    if not (v.get('quiet') and not partly and not bad and not broken):
         out.write('')
-    report.summary(out, good, bad, broken, 0 if v.get('quiet') else sum(len(r.candidates) for r in reports))
-    return max(status, 1 if bad or broken else 0)
+    report.summary(out, good, partly, bad, broken, 0 if v.get('quiet') else sum(len(r.candidates) for r in reports))
+    return max(status, 1 if bad or broken or (partly and not v.get('allow_partial')) else 0)
 
 
 def _with_output(ctx, write, default):
@@ -257,9 +257,9 @@ def _preflight_run(ctx, program):
     total = time.perf_counter() - t0
     sys.stdout.flush()
     if ctx.values.get('json'):
-        bad = _with_output(ctx, lambda stream: report.run_json(stream, total, status), sys.stderr)
+        bad = _with_output(ctx, lambda stream: report.run_json(stream, total, status, ctx.values.get('allow_partial')), sys.stderr)
     else:
-        bad = report.run(ctx.err, total, status)
+        bad = report.run(ctx.err, total, status, ctx.values.get('allow_partial'))
     if ctx.values.get('paths'):
         names = {a.rpartition(':')[2] for a in ctx.values['paths'] if ':' in a}
         for f in _dispatch.functions():

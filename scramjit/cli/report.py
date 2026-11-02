@@ -15,6 +15,10 @@ def _mark(t, ok):
     return t.style(t.symbol('ok'), 'ok') if ok else t.style(t.symbol('fail'), 'error')
 
 
+def _partly(t):
+    return t.style('~', 'warning')
+
+
 def _excerpt(t, lines, p, indent):
     """The source line of a problem, with carets under the construct and the reason beside them."""
     bar = t.style(t.symbol('bar'), 'muted')
@@ -38,8 +42,8 @@ def _excerpt(t, lines, p, indent):
 
 
 def static(t, reports, quiet=False):
-    """The report for scanned files. Returns (compiled, python, broken)."""
-    good = bad = broken = 0
+    """The report for scanned files. Returns (compiled, partly compiled, python, broken)."""
+    good = partly = bad = broken = 0
     for r in reports:
         if r.error is not None:
             broken += 1
@@ -49,7 +53,8 @@ def static(t, reports, quiet=False):
             continue
         failing = [f for f in r.functions if f[1].compiler is None]
         good += len(r.functions) - len(failing)
-        bad += len(failing)
+        partly += sum(a.state == 'partly' for _, a in failing)
+        bad += sum(a.state == 'python' for _, a in failing)
         shown = [] if quiet else r.candidates
         if not failing and not shown and quiet:
             continue
@@ -65,18 +70,25 @@ def static(t, reports, quiet=False):
                     for line, text in sorted(a.compiler.gotchas.items()):
                         t.write(f'      {t.style("note:", "warning")} line {line} {text}')
                 continue
-            t.write(f'  {_mark(t, False)} {t.style(f"{f.name:<{width}}", "bold")}  runs as Python')
+            if a.state == 'partly':
+                spans = ', '.join(str(x) if x == y else f'{x}-{y}' for x, y in a.loops)
+                t.write(f'  {_partly(t)} {t.style(f"{f.name:<{width}}", "bold")}  {t.style("partly compiled", "warning")} '
+                        f'{t.style(f"(native: lines {spans})", "muted")}')
+            else:
+                t.write(f'  {_mark(t, False)} {t.style(f"{f.name:<{width}}", "bold")}  runs as Python')
             for p in a.problems:
                 _excerpt(t, lines, p, 6)
         for f, _ in shown:
             arrow = t.style(t.symbol('arrow'), 'cyan')
             t.write(f'  {arrow} {f.name:<{width}}  {t.style("would compile with", "muted")} {t.style("@scram", "code")} '
                     f'{t.style(f"(line {f.lineno})", "muted")}')
-    return good, bad, broken
+    return good, partly, bad, broken
 
 
-def summary(t, good, bad, broken=0, candidates=0):
+def summary(t, good, partly, bad, broken=0, candidates=0):
     parts = [t.style(f'{good} compiled', 'ok') if good else '0 compiled']
+    if partly:
+        parts.append(t.style(f'{partly} partly compiled', 'warning'))
     if bad:
         parts.append(t.style(f'{bad} {"runs" if bad == 1 else "run"} as Python', 'error'))
     if broken:
@@ -90,7 +102,7 @@ def summary(t, good, bad, broken=0, candidates=0):
 
 def static_json(stream, reports):
     files = []
-    good = bad = 0
+    good = partly = bad = 0
     for r in reports:
         if r.error is not None:
             files.append({'path': r.path, 'error': r.error.msg, 'line': r.error.lineno, 'functions': []})
@@ -98,20 +110,22 @@ def static_json(stream, reports):
         fs = []
         for f, a in r.functions:
             good += a.compiler is not None
-            bad += a.compiler is None
+            partly += a.state == 'partly'
+            bad += a.state == 'python'
             fs.append({'name': f.name, 'line': f.lineno, 'state': a.state, 'signature': [x.name for x in a.signature],
+                       'native_loops': [{'first': x, 'last': y} for x, y in a.loops],
                        'problems': [p.as_dict() for p in a.problems],
                        'differences': [{'line': k, 'text': v} for k, v in sorted(a.compiler.gotchas.items())] if a.compiler else []})
         files.append({'path': r.path, 'functions': fs,
                       'would_compile': [{'name': f.name, 'line': f.lineno, 'signature': [x.name for x in a.signature]}
                                         for f, a in r.candidates]})
-    json.dump({'files': files, 'compiled': good, 'python': bad,
+    json.dump({'files': files, 'compiled': good, 'partly': partly, 'python': bad,
                'would_compile': sum(len(r.candidates) for r in reports)}, stream, indent=2)
     stream.write('\n')
 
 
-def lines_table(t, lines, first, fdef, offset, title, status, bounds, problems, types, gotchas=None):
-    """One function, line by line."""
+def lines_table(t, lines, first, fdef, offset, title, status, bounds, problems, types, gotchas=None, loops=()):
+    """One function, line by line. loops: (first line, last line) of what is native in a partly compiled one."""
     t.write(t.style(title, 'bold'))
     t.write(status)
     rule = t.style(t.symbol('dash') * min(t.width, 72), 'muted')
@@ -134,7 +148,11 @@ def lines_table(t, lines, first, fdef, offset, title, status, bounds, problems, 
         note = ''
         if n < start or not text.strip():
             mark = ' '
-        elif problems:
+        elif any(x <= n <= y for x, y in loops):
+            mark = _mark(t, True)
+            if any(n == x for x, _ in loops):
+                note = t.style('compiled on its own', 'ok')
+        elif problems or loops:
             mark = _mark(t, False)
             if n in bad:
                 note = t.style(bad[n].reason, 'bold')
@@ -166,6 +184,8 @@ def lines_table(t, lines, first, fdef, offset, title, status, bounds, problems, 
 
 
 def _state_line(t, ok, rest):
+    if ok == 'partly':
+        return f'{_partly(t)} {t.style("partly compiled", "warning")} {t.style(rest, "muted")}'
     return f'{_mark(t, ok)} {t.style("compiled", "ok") if ok else t.style("runs as Python", "error")} {t.style(rest, "muted")}'
 
 
@@ -175,9 +195,9 @@ def one_static(t, fdef, a, source, path, boundscheck):
     text = source.splitlines()[start - 1:fdef.end_lineno]
     c = a.compiler
     lines_table(t, text, start, fdef, 0, f'{fdef.name}({", ".join(x.name for x in a.signature)})',
-                _state_line(t, c is not None, f'· {os.path.basename(path)} · assumed signature'),
+                _state_line(t, 'partly' if a.state == 'partly' else c is not None, f'· {os.path.basename(path)} · assumed signature'),
                 (c.checks, c.hoisted_lines, boundscheck) if c else None, a.problems,
-                {k: v.name for k, v in c.env.items()} if c else {}, c.gotchas if c else None)
+                {k: v.name for k, v in c.env.items()} if c else {}, c.gotchas if c else None, a.loops)
 
 
 def function_report(f, signature, stream):
@@ -202,9 +222,9 @@ def function_report(f, signature, stream):
         a = P.best_analysis(fdef, f._fn.__globals__, f._filename, offset, {'boundscheck': f._boundscheck, 'parity': f._parity})
         c = a.compiler
         lines_table(t, lines, f._first, fdef, offset, f'{f.__name__}({", ".join(x.name for x in a.signature)})',
-                    _state_line(t, c is not None, f'· {where} · assumed signature, not called yet'),
+                    _state_line(t, 'partly' if a.state == 'partly' else c is not None, f'· {where} · assumed signature, not called yet'),
                     (c.checks, c.hoisted_lines, f._boundscheck) if c else None, a.problems,
-                    {k: v.name for k, v in c.env.items()} if c else {}, c.gotchas if c else None)
+                    {k: v.name for k, v in c.env.items()} if c else {}, c.gotchas if c else None, a.loops)
         return
     for i, key in enumerate(keys):
         if i:
@@ -218,6 +238,12 @@ def function_report(f, signature, stream):
                         (entry.checks, entry.hoisted, f._boundscheck), [], entry.locals, entry.gotchas)
         else:
             line, why = f._why.get(key, (f._first, 'not compiled'))
+            loops = [(x._tree.lineno + offset, x._tree.end_lineno + offset) for x in f._native_loops()]
+            if loops:
+                problems = [] if any(a <= line <= b for a, b in loops) else [P.Problem(line, None, 1, why)]
+                lines_table(t, lines, f._first, fdef, offset, f'{f.__name__}({names})',
+                            _state_line(t, 'partly', f'· {where}'), None, problems, {}, None, loops)
+                continue
             lines_table(t, lines, f._first, fdef, offset, f'{f.__name__}({names})', _state_line(t, False, f'· {where}'),
                         None, [P.Problem(line, None, 1, why)], {})
 
@@ -233,10 +259,17 @@ def run_rows():
     for f in sorted(_dispatch.functions(), key=lambda f: f.__name__):
         st = f._stats
         if st:
+            loops = f._all_loops()
+            done = [x for x in loops if x._stats]
+            native = sum(s[1] for x in done for s in x._stats.values())          # lifted loops: inside its Python time
+            building = sum(v for x in done for v in x._compile_s.values())
+            compiled = sum(isinstance(f._cache.get(k), _dispatch.Compiled) for k in st)
             rows.append({'function': f, 'name': f.__name__, 'calls': sum(s[0] for s in st.values()),
-                         'compile': sum(f._compile_s.get(k, 0.0) for k in st), 'native': sum(s[1] for s in st.values()),
-                         'python': sum(s[2] for s in st.values()), 'signatures': len(st),
-                         'compiled': sum(isinstance(f._cache.get(k), _dispatch.Compiled) for k in st)})
+                         'compile': sum(f._compile_s.get(k, 0.0) for k in st) + building,
+                         'native': sum(s[1] for s in st.values()) + native,
+                         'python': max(sum(s[2] for s in st.values()) - native - building, 0.0), 'signatures': len(st),
+                         'compiled': compiled,
+                         'state': 'compiled' if compiled == len(st) else 'partly' if f._native_loops() else 'python'})
     return rows
 
 
@@ -259,8 +292,8 @@ def run_hints(rows):
     return out
 
 
-def run(t, total, status):
-    """The table for a run. Returns how many functions weren't compiled."""
+def run(t, total, status, allow_partial=False):
+    """The table for a run. Returns how many functions weren't compiled, as far as the exit status goes."""
     rows = run_rows()
     native = sum(r['native'] for r in rows)
     share = min(native / total, 1.0) if total else 0.0
@@ -277,8 +310,9 @@ def run(t, total, status):
     bad = 0
     for r, n in zip(rows, names):
         ok = r['compiled'] == r['signatures']
-        bad += not ok
-        t.write(f'  {_mark(t, ok)} {n:<{width}}  {r["calls"]:>8,}  {secs(r["compile"]):>7}  {secs(r["native"]):>7}  {secs(r["python"]):>7}')
+        bad += r['state'] == 'python' or (r['state'] == 'partly' and not allow_partial)
+        mark = _partly(t) if r['state'] == 'partly' else _mark(t, ok)
+        t.write(f'  {mark} {n:<{width}}  {r["calls"]:>8,}  {secs(r["compile"]):>7}  {secs(r["native"]):>7}  {secs(r["python"]):>7}')
     hints = run_hints(rows)
     if hints:
         t.write('')
@@ -287,18 +321,22 @@ def run(t, total, status):
             if hint:
                 for k, text in enumerate(wrap(f'{t.style("hint:", "hint")} {t.code(hint)}', t.width - 2)):
                     t.write(f'  {"      " if k else ""}{text}')
-    failed = [r['name'] for r in rows if r['compiled'] != r['signatures']]
+    some = [r['name'] for r in rows if r['state'] == 'partly']
+    if some:
+        t.write('')
+        t.write(t.style(f'{", ".join(some)} {"is" if len(some) == 1 else "are"} partly compiled', 'warning'))
+    failed = [r['name'] for r in rows if r['state'] == 'python']
     if failed:
         t.write('')
         t.write(t.style(f'{", ".join(failed)} {"runs" if len(failed) == 1 else "run"} as Python', 'error'))
     return bad
 
 
-def run_json(stream, total, status):
+def run_json(stream, total, status, allow_partial=False):
     rows = run_rows()
     out = {'seconds': total, 'exit_status': status, 'native_share': min(sum(r['native'] for r in rows) / total, 1.0) if total else 0.0,
            'functions': [{k: v for k, v in r.items() if k != 'function'} for r in rows],
            'hints': [{'where': w, 'reason': why, 'hint': h} for w, why, h in run_hints(rows)]}
     json.dump(out, stream, indent=2)
     stream.write('\n')
-    return sum(r['compiled'] != r['signatures'] for r in rows)
+    return sum(r['state'] == 'python' or (r['state'] == 'partly' and not allow_partial) for r in rows)

@@ -2,6 +2,12 @@
 
 Biggest first. `requirements.md` is the spec; this is the work queue.
 
+## From cimo
+
+- **Signed overflow is now undefined in cimo, as in C** (`compile(wrapv=True)` for `-fwrapv`): `x + 1 > x` folds to true
+  and `int` counters widen to 64 bits. Generated C must keep doing wrapping arithmetic through unsigned, as it
+  does today (scramjit's 726 tests pass).
+
 ## Workarounds waiting on cimo
 
 Each has a matching entry in cimo's `TODO.md`, which asks for a note here when it lands.

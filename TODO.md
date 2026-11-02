@@ -23,6 +23,11 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
   temporaries. Both help any compiler; revisit what else can go once cimo merges repeated
   expressions (cimo `TODO.md`: "Slower than gcc -O3 on scramjit's kernels").
 
+- **The LLM demo moves compiled code by listing what changes in `CIMO_CACHE_DIR`** (`docs/demos/llm/demo_py.py`: `precompile`), which depends on
+  cimo's cache layout. Needs a public way to save a compiled module and load it without compiling (cimo `TODO.md`). Then scramjit
+  needs its own: save a function's compiled signatures and load them, with no compiler imported, for keeping compiles between visits and
+  for shipping kernels in a single HTML file. The demo's tabs also read the private `fn._cache`, for the C and the inferred types.
+
 - **The demo's WebAssembly tab calls `cimo.wasm.build`** (`docs/lab/lab.py`: `wasm_text`) for the
   module's bytes, which isn't cimo's documented API. When cimo exposes a compiled module's
   WebAssembly (or a disassembly), use that.

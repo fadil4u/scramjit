@@ -17,7 +17,7 @@ from ._compiler import Compiler, StaticNumpy
 from ._errors import Unsupported
 
 _OTHER = object()     # a module-level name whose value static analysis can't know
-REDUCTIONS = {'sum', 'prod', 'mean', 'max', 'min', 'any', 'all', 'argmax', 'argmin'}
+REDUCTIONS = {'sum', 'prod', 'mean', 'max', 'min', 'any', 'all', 'argmax', 'argmin', 'std', 'var'}
 SKIP_DIRS = {'__pycache__', 'node_modules', 'venv', 'env', 'site-packages', 'build', 'dist'}
 
 # What to do about a reason: the first match wins. Hints must be something to act on.

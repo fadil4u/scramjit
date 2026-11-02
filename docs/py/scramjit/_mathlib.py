@@ -238,6 +238,58 @@ static double sj_np_sum(const double *a, int64_t n, int64_t st, int64_t chunk) {
     return r;
 }
 """),
+    'np_stats': (('np_sum',), """
+/* The same pairwise order over a computed element: an int as a double, or a squared difference from the mean */
+#define SJ_NP_PW(NAME, TYPE, ELEM) \\
+static double NAME(const TYPE *a, int64_t n, int64_t st, double m) { \\
+    if (n < 8) { \\
+        double r = 0.0; \\
+        for (int64_t i = 0; i < n; i++) r += ELEM(a[i * st], m); \\
+        return r; \\
+    } \\
+    if (n <= 128) { \\
+        double r0 = ELEM(a[0], m), r1 = ELEM(a[st], m), r2 = ELEM(a[2 * st], m), r3 = ELEM(a[3 * st], m); \\
+        double r4 = ELEM(a[4 * st], m), r5 = ELEM(a[5 * st], m), r6 = ELEM(a[6 * st], m), r7 = ELEM(a[7 * st], m); \\
+        int64_t i = 8, e = n - n % 8; \\
+        for (; i < e; i += 8) { \\
+            r0 += ELEM(a[i * st], m); r1 += ELEM(a[(i + 1) * st], m); r2 += ELEM(a[(i + 2) * st], m); r3 += ELEM(a[(i + 3) * st], m); \\
+            r4 += ELEM(a[(i + 4) * st], m); r5 += ELEM(a[(i + 5) * st], m); r6 += ELEM(a[(i + 6) * st], m); r7 += ELEM(a[(i + 7) * st], m); \\
+        } \\
+        double r = ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7)); \\
+        for (; i < n; i++) r += ELEM(a[i * st], m); \\
+        return r; \\
+    } \\
+    int64_t half = n / 2; \\
+    half -= half % 8; \\
+    return NAME(a, half, st, m) + NAME(a + half * st, n - half, st, m); \\
+}
+#define SJ_NP_AS_DOUBLE(v, m) ((double)(v))
+#define SJ_NP_SQUARED(v, m) (((double)(v) - (m)) * ((double)(v) - (m)))
+SJ_NP_PW(sj_np_pw_i, int64_t, SJ_NP_AS_DOUBLE)
+SJ_NP_PW(sj_np_pw_sq_f, double, SJ_NP_SQUARED)
+SJ_NP_PW(sj_np_pw_sq_i, int64_t, SJ_NP_SQUARED)
+/* numpy converts ints a buffer at a time, whatever the build */
+static double sj_np_sum_as_float(const int64_t *a, int64_t n, int64_t st) {
+    if (n <= 8192) return sj_np_pw_i(a, n, st, 0.0);
+    double r = 0.0;
+    for (int64_t i = 0; i < n; i += 8192) r += sj_np_pw_i(a + i * st, n - i < 8192 ? n - i : 8192, st, 0.0);
+    return r;
+}
+static double sj_np_var_f(const double *a, int64_t n, int64_t st, int64_t chunk, int64_t ddof) {
+    double mean = sj_np_sum(a, n, st, chunk) / (double)n, r = 0.0;
+    int64_t div = n > ddof ? n - ddof : 0;
+    if (!chunk || n <= chunk) r = sj_np_pw_sq_f(a, n, st, mean);
+    else for (int64_t i = 0; i < n; i += chunk) r += sj_np_pw_sq_f(a + i * st, n - i < chunk ? n - i : chunk, st, mean);
+    return r / (double)div;
+}
+static double sj_np_var_i(const int64_t *a, int64_t n, int64_t st, int64_t chunk, int64_t ddof) {
+    double mean = sj_np_sum_as_float(a, n, st) / (double)n, r = 0.0;
+    int64_t div = n > ddof ? n - ddof : 0;
+    if (!chunk || n <= chunk) r = sj_np_pw_sq_i(a, n, st, mean);
+    else for (int64_t i = 0; i < n; i += chunk) r += sj_np_pw_sq_i(a + i * st, n - i < chunk ? n - i : chunk, st, mean);
+    return r / (double)div;
+}
+"""),
     'np_folds': ((), """
 static int64_t sj_np_sum_i(const int64_t *a, int64_t n, int64_t st) {
     uint64_t r = 0;

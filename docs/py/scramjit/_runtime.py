@@ -13,6 +13,7 @@ INDEX_ERROR, ZERO_DIVISION, VALUE_ERROR, OVERFLOW_ERROR, LIST_INDEX_ERROR, MEMOR
     1, 2, 3, 4, 5, 6, 7
 INTERRUPTED = 8      # the kernel saw Ctrl-C (see _interrupt.py)
 RERUN = 9            # the kernel did nothing and this call should run as Python
+BROADCAST_ERROR = 10  # assigning an array to a slice: io[2] and io[3] hold the shapes, two dimensions packed in each
 RETURNS_INT = 2      # a returned float's flag, when the value is really a Python int
 NARROW_INT_DTYPES = ['int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
 
@@ -98,6 +99,11 @@ def exception(status, io):
         return IndexError(LIST_INDEX_MESSAGES[io[2]])
     if status == MEMORY_ERROR:
         return MemoryError()
+    if status == BROADCAST_ERROR:
+        def shape(packed, nd):
+            dims = (packed >> 32, packed & 0xffffffff)[2 - nd:]
+            return '(' + ','.join(map(str, dims)) + (',)' if nd == 1 else ')')
+        return ValueError(f'could not broadcast input array from shape {shape(io[2], io[4] >> 8)} into shape {shape(io[3], io[4] & 255)}')
     if status == INT_BOUNDS_ERROR:      # numpy (NEP 50): a Python int stored into a narrower dtype
         return OverflowError(f'Python integer {io[2]} out of bounds for {NARROW_INT_DTYPES[io[3]]}')
     return SystemError(f'scramjit: unknown status {status}')

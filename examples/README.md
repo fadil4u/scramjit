@@ -14,6 +14,7 @@ Python and through scramjit, and asserts the results are identical. They need nu
 | [`reductions.py`](reductions.py) | Spikes in a signal, with `x[a:b].mean()`, `.max()` and `.min()` on a sliding window | Each sample's window, and a stored list of what's found | 1.47 s | 62 ms | 24x |
 | [`views.py`](views.py) | Gaussian elimination with rows and columns as views | Each step changes what the next sees; the pivot depends on the data | 1.65 s | 5.7 ms | 291x |
 | [`numpy_functions.py`](numpy_functions.py) | A greedy route over a sphere, with `np.sin`, `np.arcsin`, `np.sqrt` | Each stop depends on the one before | 0.175 s | 2.4 ms | 74x |
+| [`slices.py`](slices.py) | Heat flow, written with slice assignment and views, returning a view | Each step reads the last | 0.314 s | 0.41 ms | 776x |
 | [`config_dict.py`](config_dict.py) | An epidemic model with its settings and results in dicts | Each day depends on the one before | 0.081 s | 4.4 ms | 18x |
 
 One run of each on arm64 Linux, on a busy machine, so expect faster and somewhat different numbers. The

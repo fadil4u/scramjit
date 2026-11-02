@@ -26,14 +26,33 @@ def normalize(m):
 
 Writes go to the array, and show through every other view of it. Slices follow Python's rules: bounds clamp, negatives count from the end, and a step of zero raises `ValueError`. `len()`, `.shape`, `.size` and `.ndim` work on a view.
 
-A variable can be assigned a different view of the same kind later, as `x = x[1:]` does. Some forms still run as Python, with loops around them lifted where they fit:
+A variable can be assigned a different view later, as `x = x[1:]` does. Passing one in works too, so `f(x[::2])` and `f(m.T)` compile, and so does returning one: you get a real numpy array sharing the memory, or the very same array if the function returns an argument untouched. `.T` works, and rows work in `for`, `enumerate()` and `zip()`, and in `a, b = m[0], m[1]`.
 
-- returning a view, or passing one back, since it has to be a real numpy array sharing the memory
-- assigning to a slice: `x[1:3] = 0.0`. Write it as a loop, or through a view
-- arithmetic on whole arrays or views: `x[1:] * 2.0`
-- masks and index arrays: `x[x > 0]`, `x[indices]`, and `None` or `...` in an index
-- a tuple of views: `a, b = m[0], m[1]`. Assign them one at a time
-- `enumerate()` or `zip()` over rows, and a variable holding either a view with gaps or one without: `v = x[1:]` and later `v = x[::2]`
+### Assigning to a slice
+
+```python
+x[1:3] = 0.0            # a number, into any view
+m[i] = row              # an array, broadcast as numpy does
+m[1:3] = row            # into each row
+m[:, j] = m[:, k]       # columns
+x[1:] = x[:-1]          # overlapping: as if the right side were copied first
+```
+
+A shape that doesn't broadcast raises numpy's `ValueError`. An array can go into a view of up to two dimensions; a number into any. Storing floats into an integer array runs as Python.
+
+### What numpy things compile
+
+| | Compiles | Runs as Python |
+| --- | --- | --- |
+| Indexing | ints, slices of any step, `.T`, `m[i][j]` | `None`, `...`, masks `x[x > 0]`, index arrays `x[idx]` |
+| Assigning | an element; a number or an array into a slice | `x[1:] += y`, a list into a slice |
+| Functions on one number | [these](loops-and-builtins.md#numpy-functions-on-single-numbers) | `np.tanh`, `np.power` |
+| Reductions to one number | [`sum`, `mean`, `std`, `var`, `max`, `argmax` and the rest](loops-and-builtins.md#numpy-reductions) | `axis=` on more than one dimension, `keepdims=True` |
+| Making arrays | | `x * 2`, `a + b`, `np.zeros(n)`, `x.copy()`, `np.sqrt(x)` |
+| Element types | `float64`, `int64`, and reading and storing smaller ones | arithmetic on `float32`, `int32`, `uint8` and friends |
+| Other | `len()`, `.shape`, `.size`, `.ndim`, returning a view alone | `np.dot`, `np.linalg`, `np.sort`, `np.cumsum`, a view inside a returned tuple |
+
+Anything in the right column runs as Python with numpy's own result, and the loops around it still compile if they fit. The biggest gap is making arrays: a function that starts with `y = np.zeros(n)` has to take `y` as an argument for now.
 
 ## Tuples
 

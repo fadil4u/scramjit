@@ -53,11 +53,13 @@ Spills per line, once cimo can report them.
    - **numpy functions on single numbers: built.** See `loops-and-builtins.md`. Left in Python: `np.tanh` and `np.power`, which aren't libm's, and
      combinations whose result depends on the platform or numpy version. Bit for bit checked on arm64, wasm and x86-64 with AVX2 (Windows, emulated). Check AVX-512, where numpy
      may use its own `exp` and `sin`. Not yet: `np.mod`, `np.floor_divide`, `np.degrees`, `np.radians`.
-   - **Views: built.** Pointer, extents and strides, no allocation; `m[i]`, slices of any step, `m[:, j]`, `for row in m`. Not yet: returning one,
-     assigning to a slice, `a, b = m[0], m[1]`, rows in `enumerate()` and `zip()`, strided arrays as arguments (`f(x[::2])` from Python runs as Python).
-   - **Reductions: built,** for one number from `float64` or `int64`. `axis=` that returns an array, `keepdims=True`, `dtype=`, `out=`, `where=`, `initial=` stay Python.
-     Not yet: integer `mean` (numpy converts in chunks), strided n-D (numpy's order depends on strides), other dtypes, `std`, `var`, `argmax` on wasm32 (it's `int32`).
-   - **Not now, operations that create arrays:** `x * 2`, `a + b` need allocation, lifetimes, broadcasting and dtype rules, which is rewriting numpy.
+   - **Views: built,** as arguments and results too, with `.T`, slice assignment and tuples of views. Not yet: a view inside a returned tuple, `a, b = m` (unpacking rows), `x[1:] += y`,
+     a two-dimensional-or-more array assigned into three dimensions or more.
+   - **Reductions: built,** with `std`, `var`, integer `mean` and `argmax` on wasm32, for one number from `float64` or `int64`. `axis=` that returns an array, `keepdims=True`, `dtype=`, `out=`, `where=`, `initial=` stay Python.
+     Not yet: views with gaps in more than one dimension (numpy's order depends on strides), other dtypes.
+   - **Next, arrays made inside a function:** `y = np.zeros(n)`, `x.copy()`. The largest gap left: such a function has to take `y` as an argument today. They need allocation inside a kernel, and a result that
+     becomes a real numpy array. Worth doing before whole-array arithmetic.
+   - **Not now, whole-array arithmetic:** `x * 2`, `a + b` need broadcasting and dtype rules on top, which is rewriting numpy.
      They stay in Python, with the loops around them lifted.
    - **Not `np.dot`, and no MKL or BLAS:** they would break "standard library plus cimo", and their results depend on the library, CPU and thread count.
      `A @ B` and `np.linalg` already run at full speed in Python. An opt-in through cimo's `link=` for BLAS inside a hot loop is possible

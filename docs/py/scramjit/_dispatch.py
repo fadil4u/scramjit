@@ -15,7 +15,7 @@ import warnings
 import weakref
 
 from . import _types as T
-from ._compiler import Compiler
+from ._compiler import Compiler, ret_pairs
 from ._errors import CompileError, FallbackWarning, Unsupported
 from . import _interrupt
 from . import _lift
@@ -76,11 +76,14 @@ def _arg_type(x):
     np = sys.modules.get('numpy')
     if np is not None:
         if t is np.ndarray:
-            if x.ndim >= 1 and x.flags.c_contiguous and x.dtype.isnative:
+            if x.ndim >= 1 and x.dtype.isnative:
                 name = x.dtype.name
                 elem = T.NP_FLOAT64 if name == 'float64' else T.NP_INT64 if name == 'int64' else T.NARROW.get(name)
                 if elem is not None:
-                    return T.array(elem, x.flags.writeable, x.ndim)
+                    if x.flags.c_contiguous:
+                        return T.array(elem, x.flags.writeable, x.ndim)
+                    if x.flags.aligned and all(s % x.itemsize == 0 for s in x.strides):      # a view, as it is
+                        return T.array(elem, x.flags.writeable, x.ndim, True)
             return None
         if t is np.float64:
             return T.NP_FLOAT64
@@ -139,7 +142,11 @@ def _dict_keys(fdef):
 
 def _push(cargs, x, t):
     """The C arguments for one Python argument."""
-    if t.kind == 'array':
+    if t.kind == 'array' and t.strided:
+        cargs.append(x.ctypes.data)
+        cargs.extend(x.shape)
+        cargs.extend(s // x.itemsize for s in x.strides)
+    elif t.kind == 'array':
         cargs.append(x)
         cargs.extend(x.shape)
     elif t.kind == 'tuple':
@@ -153,6 +160,17 @@ def _push(cargs, x, t):
         cargs.append(x)
 
 
+class _Interface:
+    """Memory numpy can wrap as an array without copying: it keeps the array it belongs to alive."""
+
+    __slots__ = ('base', '__array_interface__')
+
+    def __init__(self, base, address, shape, strides):
+        self.base = base
+        self.__array_interface__ = {'data': (address, not base.flags.writeable), 'shape': tuple(shape), 'strides': tuple(strides),
+                                    'typestr': base.dtype.str, 'version': 3}
+
+
 class _Python:
     """Marker: this signature runs as the original Python function."""
 
@@ -162,7 +180,7 @@ PYTHON = _Python()
 
 class Compiled:
     __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun', 'outs',
-                 'counts', 'count_lines', 'count_heads', 'count_rest')
+                 'counts', 'count_lines', 'count_heads', 'count_rest', 'array_args')
 
     def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None, stop=False, rerun=False):
         self.rerun = rerun
@@ -236,6 +254,8 @@ def _make_plan(f, entry, args):
     names = [f'a{i}' for i in range(len(args))]
     cargs = []
     for i, (x, t, n) in enumerate(zip(args, entry.types, names)):
+        if (t.kind == 'array' and t.strided) or entry.ret.kind == 'array':
+            return f._slow_call
         if t.kind == 'array':
             env[f'd{i}'] = x.dtype
             cargs.append(f'p{i}' if x.flags.writeable else n)
@@ -561,6 +581,7 @@ class Function:
         entry = Compiled(kernel, c.ret, key, source, _libm_table() if c.uses_libm else None,
                          c.shown_types(), c.checks, c.hoisted_lines, c.gotchas, c.uses_stop, c.uses_rerun)
         entry.outs = [(i, k, 8 * c.out_slot(n), c.env[flat]) for n, (flat, i, k) in enumerate(c.outs)]
+        entry.array_args = c.array_args
         if counts:
             entry.counts = bytearray(8 * max(len(c.count_lines), 1))
             entry.count_lines, entry.count_heads, entry.count_rest = c.count_lines, c.count_heads, c.count_rest
@@ -602,7 +623,7 @@ class Function:
             cargs.append(_interrupt.address())
         if entry.counts is not None:
             cargs.append(entry.counts)
-        io = bytearray(40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0) + 16 * len(entry.outs))
+        io = bytearray(40 + 16 * ret_pairs(entry.ret) + 16 * len(entry.outs))
         status = entry.kernel(*cargs, io)
         if status == RERUN and entry.rerun:
             return self._py(*args)
@@ -614,9 +635,23 @@ class Function:
         r = entry.ret
         if r is T.NONE:
             return None
+        if r.kind == 'array':
+            return self._view(entry, io, args)
         if r.kind == 'tuple':
             return tuple(self._box(io, 32 + 16 * i, 40 + 16 * i, et) for i, et in enumerate(r.elem))
         return self._box(io, 0, 16, r)
+
+    @staticmethod
+    def _view(entry, io, args):
+        """A returned array: the argument itself if it is one, else a real numpy view of the argument's memory."""
+        value = struct.unpack_from(f'<{5 + 2 * entry.ret.ndim}q', io)
+        i, key = entry.array_args[value[2]]
+        root = args[i] if key is None else args[i][key]
+        if value[3]:
+            return root
+        import numpy
+        size = root.itemsize
+        return numpy.asarray(_Interface(root, value[0], value[5::2], [s * size for s in value[6::2]]))
 
     def _box(self, io, at, flag_at, r):
         if r.np == 'dyn' and r.kind == 'float' and io[flag_at] == RETURNS_INT:

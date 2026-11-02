@@ -71,6 +71,7 @@ These compile on a single number, such as `np.sqrt(x[i])`, and give numpy's resu
 - `np.abs`, `np.absolute`, `np.fabs`, `np.sign`, `np.square`, `np.floor`, `np.ceil`, `np.trunc`, `np.rint`
 - `np.minimum`, `np.maximum`, `np.fmin`, `np.fmax`, `np.hypot`, `np.arctan2`, `np.fmod`, `np.copysign`
 - `np.isnan`, `np.isinf`, `np.isfinite`, `np.signbit`, `np.float64(x)`, `np.int64(n)`
+- on floats only: `np.round(x)`, `np.clip(x, lo, hi)`, `np.degrees`, `np.radians`, `np.rad2deg`, `np.deg2rad`
 - the constants `np.pi`, `np.e`, `np.inf`, `np.nan`
 
 Arguments can be Python ints and floats, `np.int64` and `np.float64`. A few combinations run as Python, because what numpy returns for them depends on the platform or the numpy version:
@@ -82,7 +83,7 @@ Bools and narrow types such as `np.float32` or `np.uint8` run as Python too. So 
 
 ## numpy reductions
 
-`sum`, `prod`, `mean`, `max`, `min`, `any`, `all`, `argmax` and `argmin` compile as methods and as functions (`x.sum()`, `np.sum(x)`, and `np.amax` and `np.amin`), on arrays and on views. They give numpy's exact result, down to rounding, since `np.sum` adds in a particular order, and numpy's type:
+`sum`, `prod`, `mean`, `std`, `var`, `max`, `min`, `any`, `all`, `argmax` and `argmin` compile as methods and as functions (`x.sum()`, `np.sum(x)`, and `np.amax` and `np.amin`), on arrays and on views. They give numpy's exact result, down to rounding, since `np.sum` adds in a particular order, and numpy's type:
 
 ```python
 @scram
@@ -93,7 +94,7 @@ def spread(m):
     return total / m.size
 ```
 
-Inside a compiled loop there's no call to pay for, so short rows gain the most: `m[i].sum()` took 8 ns on rows of 8, against 1.2 µs in Python. They work on `float64` and `int64` arrays, of any shape if the elements are contiguous, and on one-dimensional views with gaps. Integer `mean` runs as Python.
+Inside a compiled loop there's no call to pay for, so short rows gain the most: `m[i].sum()` took 8 ns on rows of 8, against 1.2 µs in Python. They work on `float64` and `int64` arrays, of any shape if the elements are contiguous, and on one-dimensional views with gaps. `std` and `var` take `ddof=`.
 
 Only forms that give one number compile. Everything else runs as Python, with numpy's result:
 
@@ -104,6 +105,6 @@ Only forms that give one number compile. Everything else runs as Python, with nu
 | `x.sum(axis=0)` on more than one dimension | Python: it returns an array |
 | `x.sum(axis=(0, 1))`, an axis held in a variable | Python |
 | `x.sum(keepdims=True)` | Python: it returns an array |
-| `dtype=`, `out=`, `where=`, `initial=` | Python |
+| `dtype=`, `out=`, `where=`, `initial=`, and `mean=`, or a `ddof` that isn't an integer | Python |
 
 `x.sum(axis=1)` on a loop's hot path is worth writing as a loop over `m[i].sum()`, which compiles.

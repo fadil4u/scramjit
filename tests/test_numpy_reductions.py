@@ -218,8 +218,8 @@ def test_not_arrays():
     check('x.sum()', [ONE.tolist()], compiled=False)        # AttributeError
 
 
-def test_integer_mean_stays_python():
-    check('x.mean()', [np.arange(5, dtype=np.int64)], compiled=False)
+def test_integer_mean_compiles():
+    check('x.mean()', [np.arange(5, dtype=np.int64)])
 
 
 # In real code

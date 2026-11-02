@@ -635,7 +635,7 @@ def test_static_understands_views(tmp_path):
     f.write_text(VIEWS)
     d = json.loads(_cli('preflight', f, '--json', '--no-suggest').stdout)
     states = {x['name']: x['state'] for x in d['files'][0]['functions']}
-    assert states == {'by_row': 'compiled', 'by_iteration': 'compiled', 'chained': 'compiled', 'sliced': 'compiled', 'gives_back_a_view': 'python'}
+    assert states == {'by_row': 'compiled', 'by_iteration': 'compiled', 'chained': 'compiled', 'sliced': 'compiled', 'gives_back_a_view': 'compiled'}
 
 
 REDUCES = '''

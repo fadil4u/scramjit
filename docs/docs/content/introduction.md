@@ -39,7 +39,6 @@ numpy is fast when the work fits one array expression; these don't. In CPython e
 
 ## When not to
 
-- Machine learning: use PyTorch or JAX.
 - Code that is already one vectorized numpy or pandas expression, where numpy runs: it is already running native loops.
 - If an existing JIT already works for you on a standard desktop or server, it has a head start, notably SIMD vectorization.
 

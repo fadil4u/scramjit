@@ -53,7 +53,7 @@ In priority order:
 4. **Library authors** who want fast hot paths in a pure-Python package, with no wheel matrix.
    The largest group if first-call latency and caching are good enough.
 
-Not for: ML (PyTorch/JAX); code that is already vectorized numpy or pandas in an environment
+Not for: code that is already vectorized numpy or pandas in an environment
 where numpy runs (it is already native loops); users happy with an existing JIT on a standard
 desktop or server.
 

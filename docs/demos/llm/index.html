@@ -72,10 +72,8 @@ h1{font-size:clamp(25px,3vw,33px);font-weight:800;letter-spacing:-.03em;line-hei
 .lab.nudge .lab-sj{animation:labpulse 1.4s ease-in-out infinite}
 @keyframes labpulse{50%{box-shadow:0 0 0 4px rgba(249,115,22,.35),0 0 22px rgba(249,115,22,.6);color:#fff}}
 /* the code: the editor; with scramjit on, tabs for the syntax tree, the C and the WebAssembly */
-.codecard{background:var(--code);border-color:var(--codeline);overflow:hidden;display:flex;flex-direction:column;height:calc(100vh - 118px);min-height:560px}
-.codebar{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--codeline);flex-wrap:wrap}
-.codebar span{font-size:13px;color:#8b949e}
-.codebar .icon{background:transparent;color:#d7dde8;border-color:var(--codeline)}.codebar .icon:not(:disabled):hover{color:#fff;border-color:#f9731688}
+.codecard{background:var(--code);border-color:var(--codeline);overflow:hidden;display:flex;flex-direction:column;height:max(480px,calc(100vh - 290px))}
+#reset{position:absolute;top:8px;right:12px;z-index:6;width:32px;height:32px;background:#141a28;color:#c9d1e2;border-color:#2a3042}#reset:not(:disabled):hover{color:#fff;border-color:#f9731688}#reset .ic{width:15px;height:15px}
 #err{display:none;flex:none;background:#2a1014;color:#ffb4b4;font:12.5px/1.45 var(--mono);padding:10px 14px;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto}
 .lab-tabs{flex:none;display:flex;align-items:flex-end;gap:0;padding:6px 8px 0;background:var(--code2);border-bottom:1px solid #232838;overflow-x:auto;overflow-y:hidden}
 .lab-tab{position:relative;flex:none;display:inline-flex;align-items:center;gap:6px;margin-bottom:-1px;border:1px solid transparent;border-bottom:0;border-radius:7px 7px 0 0;background:none;color:#7d869c;font:500 11.5px var(--mono);padding:7px 13px 8px;cursor:pointer;white-space:nowrap;transition:color .2s,background .2s,max-width .45s,padding .45s,opacity .35s}
@@ -150,7 +148,7 @@ h1{font-size:clamp(25px,3vw,33px);font-weight:800;letter-spacing:-.03em;line-hei
 </div></header>
 <main class="page">
   <h1>Edit a language model while it writes</h1>
-  <p class="lede">The whole forward pass of this 15M-parameter Llama 2 is the plain Python on the right, running in this tab. Turn on scramjit to compile it. Change a line and the story carries on with the new code, from the same point. It's a tiny model trained on children's stories. The first visit downloads 60 MB.</p>
+  <p class="lede">The whole forward pass of this 15M-parameter Llama 2 is the plain Python on the right, running in this tab. Turn on scramjit to compile it. Change a line and it recompiles as you type, while the story carries on from the same point. It's a tiny model trained on children's stories. The first visit downloads 60 MB.</p>
   <p id="status" role="status" aria-live="polite">Starting</p>
   <div class="grid lab" id="demo">
     <section class="card stage" aria-label="The story">
@@ -178,7 +176,6 @@ h1{font-size:clamp(25px,3vw,33px);font-weight:800;letter-spacing:-.03em;line-hei
       </div>
     </section>
     <section class="card codecard" aria-label="The forward pass">
-      <div class="codebar"><button class="btn btn-p" id="run" disabled><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg><i id="runlabel" style="font-style:normal">Run this code</i></button><button class="icon" id="reset" disabled title="Reset the code" aria-label="Reset the code"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></button><span>Ctrl+Enter</span></div>
       <div class="lab-tabs" role="tablist" aria-label="The code, and what scramjit makes of it">
         <button type="button" class="lab-tab open" role="tab" data-s="python"><svg class="li" viewBox="0 0 16 16" aria-hidden="true"><path fill="#3b82f6" d="M7.9 1C5 1 5.2 2.3 5.2 2.3v1.3h2.8V4H3.9S2 3.8 2 6.8 3.6 9.7 3.6 9.7h1V8.3s-.1-1.7 1.7-1.7h2.8s1.6 0 1.6-1.6V2.6S11 1 7.9 1zM6.4 1.9a.5.5 0 1 1 0 1 .5.5 0 0 1 0-1z"/><path fill="#facc15" d="M8.1 15c2.9 0 2.7-1.3 2.7-1.3v-1.3H8V12h4.1s1.9.2 1.9-2.8-1.6-2.9-1.6-2.9h-1v1.4s.1 1.7-1.7 1.7H6.9s-1.6 0-1.6 1.6v2.4S5 15 8.1 15zm1.5-.9a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1z"/></svg>forward.py</button>
         <button type="button" class="lab-tab lab-more" role="tab" data-s="tree"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="3" r="1.6"/><circle cx="3.5" cy="12.5" r="1.6"/><circle cx="12.5" cy="12.5" r="1.6"/><path d="M8 4.6v3M8 7.6 3.5 11M8 7.6l4.5 3.4"/></svg>AST &amp; types</button>
@@ -189,7 +186,7 @@ h1{font-size:clamp(25px,3vw,33px);font-weight:800;letter-spacing:-.03em;line-hei
       <div class="lab-progress" id="progress" aria-hidden="true"><i></i></div>
       <div id="err" role="alert"></div>
       <div class="lab-pane" id="pane">
-        <div class="lab-code" id="codepane"><textarea id="code" spellcheck="false" aria-label="The forward pass"></textarea></div>
+        <div class="lab-code" id="codepane"><button class="icon" id="reset" disabled title="Reset the code" aria-label="Reset the code"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></button><textarea id="code" spellcheck="false" aria-label="The forward pass"></textarea></div>
         <div class="lab-panel" id="panel" hidden></div>
         <div class="lab-tree" id="tree" hidden></div>
         <i class="lab-scan" aria-hidden="true"></i>

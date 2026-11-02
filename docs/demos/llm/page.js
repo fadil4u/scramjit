@@ -3,7 +3,7 @@
 const ICON = {"pause": "<svg class=\"ic\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M8 5v14M16 5v14\"/></svg>", "play": "<svg class=\"ic\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M7 4.5v15l12-7.5z\"/></svg>"};
 const CHIP = {"short": "<svg class=\"ic\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"13\" r=\"8\"/><path d=\"M12 9v4l2 2M9 2h6\"/></svg>", "none": "<svg class=\"ic\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"m3 3 18 18M10.6 5.1A10 10 0 0 1 22 12a14 14 0 0 1-3 3.6M6.6 6.6A14 14 0 0 0 2 12a10 10 0 0 0 13.4 5.4\"/></svg>", "flat": "<svg class=\"ic\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M4 9h16M4 15h16\"/></svg>", "rope": "<svg class=\"ic\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5\"/></svg>", "layers": "<svg class=\"ic\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"m12 2 10 5-10 5L2 7z\"/><path d=\"m2 12 10 5 10-5M2 17l10 5 10-5\"/></svg>", "hot": "<svg class=\"ic\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M12 22c4 0 7-3 7-7 0-5-4-6-5-11-3 2-5 5-4 8-2-1-3-3-3-3s-2 3-2 6c0 4 3 7 7 7z\"/></svg>", "cold": "<svg class=\"ic\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M12 2v20M2 12h20M5 5l14 14M19 5 5 19\"/></svg>", "robot": "<svg class=\"ic\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><rect x=\"4\" y=\"8\" width=\"16\" height=\"12\" rx=\"2\"/><path d=\"M12 8V4M9 13v2M15 13v2M2 14h2M20 14h2\"/></svg>"};
 const $ = id => document.getElementById(id);
-const BOOT_MS = 300000, COMPILE_MS = 60000, GEN_MS = 30000, PLAIN_MS = 90000, CHUNK_MS = 60, MAX_CHARS = 30000;
+const TYPING_MS = 700, BOOT_MS = 300000, COMPILE_MS = 60000, GEN_MS = 30000, PLAIN_MS = 90000, CHUNK_MS = 60, MAX_CHARS = 30000;
 const ATT = 'range(pos + 1)', TEMP = 'logits[i] /= 0.8', MARK = '    # temperature\n';
 const RM = matchMedia('(prefers-reduced-motion:reduce)').matches;
 let robot = -1;
@@ -24,8 +24,8 @@ let worker, editor, viewer, watchdog, original = '', lastGood = '', previousGood
 let ready = false, running = false, asking = false, compiling = false, booted = false, restarting = false;
 let compiled = false, runningPlain = true, nudged = false, startedAt = 0, stage = 'python', info = {}, lastCompile = 5000, barTimer = null;
 let tokens = 0, recent = [], version = 0, span = null, pyRate = 0;
-let compiler = null, compilerUp = false, compilerDog, background = null;
-const known = new Set(), infos = new Map(), active = new Set();
+let compiler = null, compilerUp = false, compilerDog, background = null, want = null, editTimer = null;
+const known = new Set(), infos = new Map();
 // A second Python uses memory; a machine that can't spare it compiles in the writing worker, pausing the story.
 const roomy = () => (navigator.deviceMemory || 8) >= 4 && (navigator.hardwareConcurrency || 4) >= 4 && !/Mobi/.test(navigator.userAgent);
 const say = m => { $('status').textContent = m; };
@@ -36,7 +36,7 @@ function arm(ms) { clearTimeout(watchdog); watchdog = setTimeout(hung, ms); }
 function calm() { clearTimeout(watchdog); }
 function showError(text) { $('err').textContent = text; $('err').style.display = text ? 'block' : 'none'; }
 function controls(on) {
-  for (const b of ['run', 'reset', 'again', 'pause', 'sj']) $(b).disabled = !on;
+  for (const b of ['reset', 'again', 'pause', 'sj']) $(b).disabled = !on;
   document.querySelectorAll('.chip').forEach(c => { c.disabled = !on; });
 }
 function note(t, busy) { $('note').textContent = t; $('note').classList.toggle('busy', !!busy); }
@@ -61,6 +61,7 @@ function hung() {
   showError(booted ? 'That code stopped responding, so the tab stopped it and went back to the last code that worked. An infinite loop?' : 'Loading took too long. Reload the page to try again.');
   state({ hung: (window.demoState?.hung || 0) + 1 });
   asking = compiling = running = ready = false;
+  want = background = null; dropCompiler(); clearTimeout(editTimer);
   controls(false); progress(false); note('');
   if (!booted) return say('Stopped');
   say('Restarting');
@@ -77,19 +78,28 @@ function startCompiler() {
 }
 function dropCompiler() { clearTimeout(compilerDog); if (compiler) compiler.terminate(); compiler = null; compilerUp = false; }
 function onCompiler({ data: m }) {
-  if (m.type === 'compilerReady') { compilerUp = true; state({ compilerUp: m.seconds }); }
-  if (m.type === 'failed') { dropCompiler(); if (background) { const b = background; background = null; swapIn(b.code, b.name, b.intro); } }
+  if (m.type === 'compilerReady') { compilerUp = true; state({ compilerUp: m.seconds }); pump(); }
+  if (m.type === 'failed') {                           // no second worker: compile in the writing one
+    const b = background;
+    dropCompiler(); background = null;
+    if (b && !want) want = { code: b.code, name: b.name, intro: b.intro, compiled: b.compiled };
+    pump();
+  }
   if (m.type === 'precompiled' && background && m.id === background.id) {
     clearTimeout(compilerDog);
-    const b = background; background = null;
+    const b = background;
+    background = null;
+    if (want) { state({ dropped: (window.demoState?.dropped || 0) + 1 }); return pump(); }   // newer code is waiting
     if (m.error) return rejected(m.error, b.intro);
     worker.postMessage({ type: 'adopt', files: m.files }, m.files.map(f => f.data.buffer));
-    swapIn(b.code, b.name, b.intro, m.seconds);
+    swapIn(b.code, b.name, b.intro, m.seconds, b.compiled);
   }
 }
 function rejected(error, intro) {
-  compiling = false; controls(true); progress(false); note('');
+  compiling = false;
   state({ compiles: (window.demoState?.compiles || 0) + 1, compile: null, error });
+  if (want) return pump();                             // already out of date: say nothing about it
+  progress(false); note('');
   showError(error);
   if (intro) setSwitch(false);
   say(`That code did not ${compiled ? 'compile' : 'load'}. The story is still running the last code that worked.`);
@@ -97,12 +107,14 @@ function rejected(error, intro) {
 }
 function compilerHung() {
   const intro = background?.intro;
-  dropCompiler(); background = null; controls(true); progress(false); note('');
-  if (intro) setSwitch(false);
+  dropCompiler(); background = null;
   state({ hung: (window.demoState?.hung || 0) + 1, compiles: (window.demoState?.compiles || 0) + 1, compile: null });
+  startCompiler();
+  if (want) return pump();
+  progress(false); note('');
+  if (intro) setSwitch(false);
   showError(`That code didn't finish compiling in ${COMPILE_MS / 1000} s, so it was stopped. The story is still running the last code that worked.`);
   say('Stopped that compile');
-  startCompiler();
 }
 function onMessage({ data: m }) {
   if (m.type === 'status') say(m.msg);
@@ -113,7 +125,7 @@ function onMessage({ data: m }) {
     state({ python: m.python, boot: m.seconds });
     buildChips();
     if (compiled) { note('compiling…', true); progress(true); }
-    swapIn(restarting || editor.getValue(), '', false);
+    swapIn(restarting || editor.getValue(), '', false, undefined, compiled);
   }
   if (m.type === 'compiled') swapped(m);
   if (m.type === 'text') gotText(m);
@@ -126,34 +138,63 @@ function onMessage({ data: m }) {
 }
 
 // ---- code: as plain Python, or compiled in the background and swapped in
-function compile(code, name, intro) {
+// Only the newest code matters: a request replaces any that's waiting, and a compile it overtakes is thrown
+// away. A compile that has outlived what one should take is stopped, since it may never finish: the second
+// worker can be killed and restarted while the story keeps writing.
+function request(code, name, intro) {
+  clearTimeout(editTimer);
+  if (!ready) return;
   showError('');
-  controls(false); $('pause').disabled = false;
-  if (!compiled) { swapIn(code, name, false); return; }
-  if (!known.has(code)) { note('compiling…', true); progress(true); }
-  if (ready && compilerUp && !known.has(code)) {
+  if (compiled && (want?.intro || background?.intro)) intro = true;
+  want = { code, name, intro, compiled };
+  if (background) {
+    clearTimeout(request.limit);
+    const running = background;
+    request.limit = setTimeout(() => {
+      if (background !== running || !want) return;
+      state({ cancelled: (window.demoState?.cancelled || 0) + 1 });
+      dropCompiler(); background = null;
+      startCompiler();
+      pump();
+    }, Math.max(0, running.at + Math.max(3000, lastCompile * 1.5) - performance.now()));
+  }
+  pump();
+}
+function pump() {
+  if (!ready || !want || background || compiling) return;
+  const w = want, first = !known.has(w.code);
+  if (w.code === lastGood && w.compiled === !runningPlain) {   // back where it already is
+    want = null; progress(false);
+    if (w.compiled) note($('compile').textContent === 'cached' ? '' : $('compile').textContent);
+    return;
+  }
+  if (w.compiled && first) { note('compiling…', true); progress(true); }
+  if (w.compiled && first && compiler && !compilerUp) return;  // the second worker is on its way: compilerReady calls here
+  want = null;
+  if (!w.compiled) return swapIn(w.code, w.name, false, undefined, false);
+  if (first && compilerUp) {
     say('Compiling; the story keeps writing');
-    const mine = ++id;
-    background = { id: mine, code, name, intro };
+    background = { id: ++id, code: w.code, name: w.name, intro: w.intro, compiled: true, at: performance.now() };
     clearTimeout(compilerDog); compilerDog = setTimeout(compilerHung, COMPILE_MS);
-    compiler.postMessage({ type: 'precompile', id: mine, code });
+    compiler.postMessage({ type: 'precompile', id, code: w.code });
     state({ tokensAtCompile: tokens });
     return;
   }
-  say(known.has(code) ? 'Swapping' : 'Compiling; the story waits here');
-  swapIn(code, name, intro);
+  say(first ? 'Compiling; the story waits here' : 'Swapping');
+  swapIn(w.code, w.name, w.intro, undefined, true);
 }
-function swapIn(code, name, intro, seconds) {
+function swapIn(code, name, intro, seconds, isCompiled) {
   compiling = true; pendingLabel = name;
-  swapIn.pending = { code, intro, seconds, compiled };
+  swapIn.pending = { code, intro, seconds, compiled: isCompiled };
   arm(COMPILE_MS);
-  worker.postMessage({ type: 'compile', id: ++id, code, compiled });
+  worker.postMessage({ type: 'compile', id: ++id, code, compiled: isCompiled });
 }
 function swapped(m) {
   calm();
   compiling = false;
   const p = swapIn.pending, took = p.seconds ?? m.seconds;
-  controls(true); progress(false);
+  controls(true);
+  if (!want) progress(false);
   state({ compile: p.compiled ? took : null, pause: m.seconds, compiles: (window.demoState?.compiles || 0) + 1, error: m.error || null, writtenDuring: tokens - (window.demoState?.tokensAtCompile ?? tokens), mode: p.compiled ? 'compiled' : 'python' });
   if (m.error) return rejected(m.error, p.intro);
   previousGood = lastGood; lastGood = p.code;
@@ -182,22 +223,24 @@ function swapped(m) {
     say(!p.compiled ? 'Swapped in as plain Python. Same story, new code.' : !fresh ? 'Swapped in. Same story, new code.' : p.seconds !== undefined ? `Compiled in ${when} while the story kept writing; the swap paused it ${m.seconds.toFixed(1)} s.` : `Compiled and swapped in, ${when}. Same story, new code.`);
     newSpan(p.compiled ? `${pendingLabel || 'your edit'} · ${when}` : pendingLabel || 'your edit');
   }
-  if (p.compiled && p.intro) sweep(); else if (p.compiled) showStage(stage); else if (stage !== 'python') showStage('python');
+  if (want && p.intro && want.compiled) want.intro = true;
+  else if (p.compiled && p.intro) sweep();
+  else if (p.compiled) { if (stage !== 'python') showStage(stage); } else if (stage !== 'python') showStage('python');
   ask();
+  pump();
 }
 function setSwitch(on) {
   compiled = on;
   $('sj').setAttribute('aria-checked', on);
   $('sj').querySelector('.lab-state').textContent = on ? 'on' : 'off';
   root.classList.toggle('sj', on);
-  $('runlabel').textContent = on ? 'Compile and swap in' : 'Run this code';
 }
 function setMode(on) {
   if (on === compiled || !ready) return;
   setSwitch(on);
   root.classList.remove('nudge'); nudged = true;
   if (!on) showStage('python');
-  compile(editor.getValue(), on ? 'scramjit on' : 'scramjit off', on);
+  request(editor.getValue(), on ? 'scramjit on' : 'scramjit off', on);
 }
 
 // ---- the tabs, as in the home page's demos
@@ -342,6 +385,8 @@ function flash(found) {
   const mine = ++flashRun, lines = found.lines.map(h => editor.getLineNumber(h)).filter(l => l !== null).sort((a, b) => a - b);
   if (!lines.length) return;
   state({ flashed: { lines, marks: found.marks.length } });
+  // side by side, the code may sit partly below the window; stacked on a phone, stay with the story
+  if (matchMedia('(min-width:1001px)').matches) $('pane').scrollIntoView({ block: 'nearest', behavior: RM ? 'auto' : 'smooth' });
   const pulse = line => {
     const h = editor.getLineHandle(line);
     editor.removeLineClass(h, 'background', 'pulse'); editor.removeLineClass(h, 'gutter', 'pulse-g');
@@ -357,25 +402,28 @@ function flash(found) {
   })();
   setTimeout(() => found.marks.forEach(m => m.clear()), 2700 + lines.length * 760);
 }
+const isOn = e => editor.getValue().includes(toText(e));
 function toggle(e) {
   showStage('python');
-  const found = { lines: [], marks: [] }, on = active.has(e.key), to = toText(e);
+  const found = { lines: [], marks: [] }, on = isOn(e), to = toText(e);
   showError('');
   if (on) {
-    replaceEvery(to, e.from, found); active.delete(e.key);
+    replaceEvery(to, e.from, found);
   } else {
-    const mates = EDITS.filter(o => o.group && o.group === e.group && active.has(o.key));
+    const mates = EDITS.filter(o => o.group && o.group === e.group && isOn(o));
     const check = mates.reduce((code, o) => code.split(toText(o)).join(o.from), editor.getValue());
     if (!check.includes(e.from)) return showError(`"${e.label}" changes a line that's no longer there. Press Reset, then try it again.`);
-    for (const o of mates) { replaceEvery(toText(o), o.from, { lines: [], marks: [] }); active.delete(o.key); }
-    replaceEvery(e.from, to, found); active.add(e.key);
+    for (const o of mates) replaceEvery(toText(o), o.from, { lines: [], marks: [] });
+    replaceEvery(e.from, to, found);
   }
   showChips();
   changedLines();
   flash(found);
-  compile(editor.getValue(), (on ? 'undo: ' : '') + e.label.toLowerCase());
+  request(editor.getValue(), (on ? 'undo: ' : '') + e.label.toLowerCase());
 }
-function showChips() { document.querySelectorAll('.chip').forEach(c => c.setAttribute('aria-pressed', active.has(c.dataset.key))); }
+function showChips() {
+  document.querySelectorAll('.chip').forEach(c => { const e = EDITS.find(x => x.key === c.dataset.key); c.setAttribute('aria-pressed', robot >= 0 || e.key !== 'robot' ? isOn(e) : false); });
+}
 function buildChips() {
   if ($('chips').children.length) return;
   for (const e of EDITS) {
@@ -390,15 +438,8 @@ function changedLines() {
   const orig = new Set(original.split('\n'));
   editor.operation(() => { for (let i = 0; i < editor.lineCount(); i++) { const c = !orig.has(editor.getLine(i)); editor[c ? 'addLineClass' : 'removeLineClass'](i, 'background', 'changed'); } });
 }
-function run() {
-  if (compiling || background || !booted || !ready) return;
-  active.clear(); showChips(); showStage('python');
-  compile(editor.getValue(), '');
-}
-
 // ---- controls
-$('run').onclick = run;
-$('reset').onclick = () => { active.clear(); showChips(); showStage('python'); editor.setValue(original); compile(original, 'reset'); };
+$('reset').onclick = () => { showStage('python'); editor.setValue(original); showChips(); request(original, 'reset'); };
 $('sj').onclick = () => setMode(!compiled);
 $('ask').onsubmit = e => {
   e.preventDefault();
@@ -423,10 +464,17 @@ $('tree').addEventListener('click', e => {
 });
 document.addEventListener('visibilitychange', () => { if (!hidden()) ask(); });
 
-editor = CodeMirror.fromTextArea($('code'), { mode: 'python', theme: 'sj', lineNumbers: true, indentUnit: 4, scrollbarStyle: null, viewportMargin: Infinity, extraKeys: { 'Ctrl-Enter': run, 'Cmd-Enter': run } });
+editor = CodeMirror.fromTextArea($('code'), { mode: 'python', theme: 'sj', lineNumbers: true, indentUnit: 4, scrollbarStyle: null, viewportMargin: Infinity });
 viewer = CodeMirror($('panel'), { theme: 'sj', lineNumbers: true, readOnly: 'nocursor', mode: 'text/x-csrc', scrollbarStyle: null });
-editor.on('change', () => { clearTimeout(changedLines.t); changedLines.t = setTimeout(changedLines, 120); });
-window.demoApi = { editor, viewer, run, EDITS, setMode, showStage, get lastGood() { return lastGood; }, get stage() { return stage; } };
+// typing recompiles once it pauses, as in the home page's demos; presets and Reset ask for themselves
+editor.on('change', (cm, c) => {
+  clearTimeout(changedLines.t);
+  changedLines.t = setTimeout(() => { changedLines(); showChips(); }, 120);
+  if (c.origin === 'setValue' || c.origin === '+edit') return;
+  clearTimeout(editTimer);
+  if (ready) editTimer = setTimeout(() => request(editor.getValue(), ''), TYPING_MS);
+});
+window.demoApi = { editor, viewer, EDITS, setMode, showStage, get lastGood() { return lastGood; }, get stage() { return stage; } };
 
 async function kept() { try { const c = await caches.open('scramjit-llm-1'); return !!(await c.match('https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin')); } catch { return false; } }
 (async () => {

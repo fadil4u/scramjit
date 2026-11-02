@@ -69,10 +69,8 @@ Spills per line, once cimo can report them.
    Dicts, lists, tuples, classes and enums that don't resize at runtime and whose element types don't change. See "Containers" in
    `requirements.md`. Today only flat tuples of numbers and flat local lists compile. In this order, simplest
    and most useful first:
-   - **Module-level constants:** `K = 3` and `TABLE = (1.0, 2.0)` read by a function. Both fall back today. Compile
-     them as constants, so loops can use them, and check each on every call, to recompile if it was rebound.
-     Measured: 21 to 25 ns per constant on a 1.4 µs call, nothing for functions that read none. Compare with `==`
-     after `is`, so an equal new object doesn't recompile, and stop recompiling a global that keeps changing.
+   - **Module-level constants: built.** Numbers, tuples, arrays and dicts are hidden arguments, read at each call, at about 0.2 µs each. Not as compile-time literals: only `x[i % K]` would gain, 1.25 to 1.06
+     ns, against recompiling on every change. Not yet: lists at module level, and a global that is a list of numbers.
    - **Enums:** `Level.HIGH`, comparisons, and members as arguments, as their values.
    - **Nested tuples:** `((1, 2), 3)`, and tuples holding arrays, as locals, arguments and results.
    - **Lists as arguments, and nested:** `[[1.0, 2.0], [3.0, 4.0]]`; returning one. The spec's copy in and

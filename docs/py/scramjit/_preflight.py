@@ -270,10 +270,42 @@ def analyze(fdef, sig, globals_, filename, offset, opts, first_only=False):
     return Analysis(sig, None, problems)
 
 
+def with_globals(fdef, globals_):
+    """fdef with what it reads from module level as parameters, as a call would pass them: annotated if they're plain numbers,
+    so their types are known. A name whose value can't be known counts if the function indexes it, as an array."""
+    local = _lift.local_names(fdef)
+    loads = set()
+    for st in fdef.body:
+        loads |= _lift._split(st)[0]
+    called = {n.func.id for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    indexed = {n.value.id for n in ast.walk(fdef) if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)}
+    added = []
+    tuples = {}
+    for name in sorted(loads - local - called):
+        if name not in globals_:
+            continue
+        v = globals_[name]
+        if type(v) in (int, float, bool):
+            added.append(ast.arg(name, ast.Name(type(v).__name__, ast.Load())))
+        elif type(v) is tuple and v and all(type(x) in (int, float, bool) for x in v):
+            added.append(ast.arg(name))
+            tuples[name] = T.tuple_of([{int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(x)] for x in v])
+        elif type(v) is dict or (v is _OTHER and name in indexed):
+            added.append(ast.arg(name))
+    if not added:
+        return fdef, tuples
+    tree = copy.deepcopy(fdef)
+    tree.args.args = tree.args.args + [ast.copy_location(a, fdef) for a in added]
+    return tree, tuples
+
+
 def best_analysis(fdef, globals_, filename, offset, opts, first_only=False):
     """Analyze under the assumed signature. An unannotated array whose values are used as indices
     isn't float64, so before calling a function uncompilable, try its arrays as int64 too."""
+    fdef, tuples = with_globals(fdef, globals_)
     sig = assumed_signature(fdef)
+    params = fdef.args.posonlyargs + fdef.args.args
+    sig = [tuples.get(p.arg, t) for p, t in zip(params, sig)]
     first = None
     arrays = [i for i, t in enumerate(sig) if t.kind == 'array']
     for mask in range(1 << min(len(arrays), 4)):

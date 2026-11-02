@@ -256,7 +256,7 @@ def function_report(f, signature, stream):
         if i:
             t.write('')
         entry = f._cache.get(key)
-        names = ', '.join(x.name if x is not None else '?' for x in key)
+        names = ', '.join(x.name if x is not None else '?' for x in key[:len(key) - len(f._hidden or ())])
         if isinstance(entry, _dispatch.Compiled):
             s = f._compile_s.get(key)
             when = f' · compiled in {s * 1000:.0f} ms' if s is not None else ''

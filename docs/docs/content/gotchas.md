@@ -130,6 +130,10 @@ The numpy functions that compile matched numpy bit for bit on arm64, in WebAssem
 
 `pdb`, `sys.settrace` and coverage tools see no lines of a compiled function. It will look uncovered even when tests run it. To debug or measure a function, call the original: `f.__wrapped__(...)`.
 
+### Globals are read once per call
+
+A compiled function reads the module-level values it uses when it's called. If another thread rebinds one while it runs, as a compiled function releases the GIL, it carries on with the value it started with. Writes to the contents of a global array are seen straight away, as in Python.
+
 ### Threads really do run at the same time
 
 Compiled code releases the GIL, which is the point, but it also removes what was slowing down data races. Four threads each running `a[0] += 1` five million times on one array ended at about 6.5 million instead of 20 million. Give each thread its own array or its own part of one, and combine the results after they finish.

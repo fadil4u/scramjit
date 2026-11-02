@@ -191,6 +191,8 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
 - **numpy calls (decided 2026-11-02; see `TODO.md`):** array-creating calls stay in Python. Array-creating
   operations stay in Python, and MKL and BLAS stay out: not pure Python, and their results vary by library, CPU and thread count. A
   plain loop doesn't reproduce `np.sum` (pairwise), and is 6 to 12x slower than numpy on 1,000,000 elements until cimo has SIMD.
+- **Module-level constants (built 2026-11-02).** Hidden parameters, read at each call, not embedded literals: a new value needs no recompile, and arrays and dicts get them for free. Passing one costs about what an
+  argument does, 0.2 µs, more than the 21-25 ns measured for only checking one. A literal gains only on `%`: `x[i % K]` 1.25 against 1.06 ns; `x[i] * R` and `range(K)` nothing measurable.
 - **Later:** growable lists, dicts, sets and strings as typed C containers: each needs allocation and a runtime.
 
 ## Semantics

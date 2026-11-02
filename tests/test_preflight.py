@@ -671,3 +671,50 @@ def test_static_understands_reductions(tmp_path):
     states = {x['name']: x['state'] for x in d['files'][0]['functions']}
     assert states['total'] == states['biggest'] == 'compiled'
     assert states['by_row'] == 'compiled'
+
+
+GLOBALS = '''
+import numpy as np
+from scramjit import scram
+
+K = 3
+RATE = 0.5
+TABLE = (1.0, 2.0)
+WEIGHTS = np.ones(4)
+SETTINGS = {'dt': 0.5, 'steps': 4}
+NAME = 'text'
+
+@scram
+def with_number(x):
+    s = 0.0
+    for i in range(K):
+        s += x[i] * RATE
+    return s
+
+@scram
+def with_tuple(x):
+    return x[0] * TABLE[0]
+
+@scram
+def with_array(x):
+    return x[0] * WEIGHTS[1]
+
+@scram
+def with_dict(x):
+    s = 0.0
+    for i in range(SETTINGS['steps']):
+        s += x[i] * SETTINGS['dt']
+    return s
+
+@scram
+def with_text(x):
+    return x[0] if NAME == 'text' else x[1]
+'''
+
+
+def test_static_understands_module_level_constants(tmp_path):
+    f = tmp_path / 'g.py'
+    f.write_text(GLOBALS)
+    d = json.loads(_cli('preflight', f, '--json', '--no-suggest').stdout)
+    states = {x['name']: x['state'] for x in d['files'][0]['functions']}
+    assert states == {'with_number': 'compiled', 'with_tuple': 'compiled', 'with_array': 'compiled', 'with_dict': 'compiled', 'with_text': 'python'}

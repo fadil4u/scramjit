@@ -102,6 +102,7 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | `for`, `while`, `break`, `continue`, `if`, conditional expressions | Masks and index arrays: `x[x > 0]` |
 | Views: `m[i]`, `x[a:b]`, `x[::-1]`, `m[:, j]`, `.T`, `for row in m`, as arguments and results | Making arrays: `np.zeros(n)`, `x.copy()` |
 | Assigning to a slice: `x[1:3] = 0.0`, `m[i] = row`, overlap included | `x[1:] += y` |
+| Numbers, tuples, arrays and dicts at module level | Assigning to a global, other global objects |
 | `range`, `enumerate`, `zip`, `map`, `filter`, comprehensions | numpy array expressions: `a * 2` |
 | `sum(gen, 0.0)`, `min`, `max`, `abs`, `**`, tuple unpacking | Calls to other Python functions |
 | Numbers and n-D numpy arrays, including dtypes like `uint8` | Strings, objects |

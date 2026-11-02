@@ -1076,7 +1076,8 @@ _NEON2 = {'neg': (0x6e20b800, 's'), 'fneg': (0x6ea0f800, 'f'), 'fabs': (0x4ea0f8
           'mvn': (0x6e205800, '')}
 _NEONSH = {'shl': 0x4f005400, 'ushr': 0x6f000400, 'sshr': 0x4f000400}
 _LANES = {'16b': 0, '8h': 1, '4s': 2, '2d': 3}
-_VREG = re.compile(r'v(\\d+)\\.(16b|8h|4s|2d)$')
+_NEONW = {'saddw': 0x0ea01000, 'saddw2': 0x4ea01000, 'uaddw': 0x2ea01000, 'uaddw2': 0x6ea01000}
+_VREG = re.compile(r'v(\\d+)\\.(16b|8h|4s|2d|2s)$')
 _VELEM = re.compile(r'v(\\d+)\\.([bhsd])\\[(\\d+)\\]$')
 def _isneon(ops):
     return bool(ops) and ops[0].strip().lower()[:1] == 'v' and _VREG.match(ops[0].strip().lower()) is not None
@@ -1087,10 +1088,14 @@ def _v(s):
     return int(m[1]), m[2]
 def _neon(mn, ops):
     d, lane = _v(ops[0])
-    size = _LANES[lane]
+    size = _LANES.get(lane, 2)
     if mn == 'mov':
         n, _ = _v(ops[1])
         return 0x4ea01c00 | n << 16 | n << 5 | d
+    if mn in _NEONW:
+        n, _ = _v(ops[1])
+        m, _ = _v(ops[2])
+        return _NEONW[mn] | m << 16 | n << 5 | d
     if mn == 'dup':
         s = ops[1].strip().lower()
         e = _VELEM.match(s)
@@ -6784,6 +6789,11 @@ def _qins(i, e):
     if name in ('qand', 'qor', 'qxor'):
         f.write("\\t%s\\t%s, %s, %s\\n" % ({'qand': 'and', 'qor': 'orr', 'qxor': 'eor'}[name], _qv(i.to), _qv(i.arg[0]), _qv(i.arg[1])))
         return True
+    if name in ('qsaddl', 'qsaddh', 'quaddl', 'quaddh'):
+        high = name[-1] == 'h'
+        mn = ('saddw' if name[1] == 's' else 'uaddw') + ('2' if high else '')
+        f.write("\\t%s\\t%s, %s, %s\\n" % (mn, _qv(i.to, '2d'), _qv(i.arg[0], '2d'), _qv(i.arg[1], '4s' if high else '2s')))
+        return True
     if name == 'qnot':
         f.write("\\tmvn\\t%s, %s\\n" % (_qv(i.to), _qv(i.arg[0])))
         return True
@@ -10730,6 +10740,7 @@ _QOPS = [(n + x, _QQ()) for n, lanes in (('qadd', 'bhwlsd'), ('qsub', 'bhwlsd'),
                                          ('qcugt', 'bhwl'), ('qcuge', 'bhwl')) for x in lanes]
 _QOPS += [(n + x, _Q1()) for n, lanes in (('qneg', 'bhwlsd'), ('qabs', 'sd'), ('qsqrt', 'sd')) for x in lanes]
 _QOPS += [(n + x, _QS()) for n in ('qshl', 'qshr', 'qsar') for x in 'bhwl']
+_QOPS += [('qsaddl', _QQ()), ('qsaddh', _QQ()), ('quaddl', _QQ()), ('quaddh', _QQ())]
 _QOPS += [('qand', _QQ()), ('qor', _QQ()), ('qxor', _QQ()), ('qnot', _Q1()), ('qsel1', _QQ()),
           ('qdupb', ((Ke, Ke, Ke, Ke, Ke, Kw), (Kx,) * 6)), ('qduph', ((Ke, Ke, Ke, Ke, Ke, Kw), (Kx,) * 6)),
           ('qdupw', ((Ke, Ke, Ke, Ke, Ke, Kw), (Kx,) * 6)), ('qdupl', ((Ke, Ke, Ke, Ke, Ke, Kl), (Kx,) * 6)),
@@ -31707,6 +31718,7 @@ class Fast:
         self.chk = set()
         self.vf = 0
         self.vchecks = ()
+        self.vreds = ()
     def leaf(self, key):
         r, kind = key
         if key in self.memo:
@@ -32131,7 +32143,7 @@ def _lanes(fn, lp, sh, A, ctl, rts):
     probe.ctl = ctl
     probe.plan(1)
     vf = vectorize.plan(probe, rts)
-    return (vf, probe.vchecks) if vf else 0
+    return (vf, probe.vchecks, probe.vreds) if vf else 0
 def vectorizable(fn, lp, rts):
     if not (_ext.vector and D.T.name.startswith('arm64') and M.vectorizing):
         return False
@@ -32182,11 +32194,12 @@ def transform(fn, lp, rts, done, mode='opt'):
         return False
     A, ctl, hoist, noalias_load = _hoisted(fn, lp, sh, A, ctl, rts)
     lanes = _lanes(fn, lp, sh, A, ctl, rts)
-    vf, vchecks = lanes or (0, ())
+    vf, vchecks, vreds = lanes or (0, (), ())
     fast = Fast(fn, lp, sh, A, rts)
     fast.ctl = ctl
     fast.vf = vf
     fast.vchecks = vchecks
+    fast.vreds = vreds
     if not vf:
         fast.find_chains(noalias_load)
     ncl = 0
@@ -32358,7 +32371,17 @@ def emit_versioned(fn, lp, sh, A, ctl, fast, U, done):
         for sv in svs:
             ir.addphi(MB, _svcls(fn, sv, fast, [(None, state0[sv])]), stM[sv],
                       [(FP, state0[sv]), (MB, out[sv])])
-        stRC = phis_for(RC, [(FP, state0), (MB, out)])
+        if fast.vreds:
+            VX = ir.newblock(fn, MB, 'vx')
+            newblocks.add(VX)
+            ev = Emitter(fn, VX)
+            outv = vectorize.closeloop(fast, ev, MB, FP, out)
+            ev.flush()
+            ir.setjnz(MB, c, MB, VX)
+            ir.setjmp(VX, RC)
+            stRC = phis_for(RC, [(FP, state0), (VX, outv)])
+        else:
+            stRC = phis_for(RC, [(FP, state0), (MB, out)])
         fast.em = ef
         ef.flush()
         ir.setjnz(FP, big, MB, RC)
@@ -33481,6 +33504,7 @@ def transform(fn, lp):
 'middle/vectorize.py': '''\
 from ..backend import defs as D
 from ..backend.defs import R, Kw, Kl, Ks, Kd, Kq, Ins, optab, rval
+from ..backend.util import newtmp
 from . import ir
 _LANE = {Ks: 's', Kd: 'd', Kw: 'w', Kl: 'l'}
 _SIZE = {Ks: 4, Kd: 8, Kw: 4, Kl: 8}
@@ -33519,18 +33543,74 @@ def _distance(store, load, vf, storeat, loadat):
     if d == 0 or abs(d) >= vf * size:
         return True
     return d < 0 and loadat < storeat
+class Reduction:
+    __slots__ = ('t', 'i', 'op', 'v', 'ext', 'acc0', 'in0', 'in1', 'out0', 'out1', 'cls')
+_REDOPS = {D.Oadd: 'qadd', D.Osub: 'qsub', D.Oand: 'qand', D.Oor: 'qor', D.Oxor: 'qxor'}
+def _reduction(fast, p, cloned):
+    A = fast.A
+    fn = fast.fn
+    if p.cls not in (Kw, Kl):
+        return None
+    t = rval(p.to)
+    nxt = ir.phiargof(p, fast.sh.latch)
+    if not ir.istmp(nxt):
+        return None
+    i = None
+    for x in cloned:
+        if x.to == nxt:
+            i = x
+    if i is None or i.op not in _REDOPS or i.cls != p.cls:
+        return None
+    if i.arg[0] == p.to and i.arg[1] != p.to:
+        v = i.arg[1]
+    elif i.arg[1] == p.to and i.arg[0] != p.to and i.op != D.Osub:
+        v = i.arg[0]
+    else:
+        return None
+    reads = 0
+    for x in cloned:
+        reads += sum(1 for a in x.arg[:2] if a == p.to)
+        if x is not i and nxt in x.arg[:2]:
+            return None
+    if reads != 1:
+        return None
+    for q in ir.phis(fast.sh.H):
+        if q is not p and (p.to in q.arg[:q.narg] or nxt in q.arg[:q.narg]):
+            return None
+    r = Reduction()
+    r.t, r.i, r.op, r.v, r.cls = t, i, i.op, v, p.cls
+    r.ext = None
+    return r
+def _widening(fast, r, cloned):
+    if r.op != D.Oadd or r.cls != Kl or not ir.istmp(r.v):
+        return None
+    for x in cloned:
+        if x.to == r.v and x.op in (D.Oextsw, D.Oextuw) and x.cls == Kl:
+            if sum(1 for y in cloned for a in y.arg[:2] if a == r.v) == 1:
+                return x
+    return None
 def plan(fast, rts):
     A = fast.A
     sh = fast.sh
+    fast.vreds = []
+    skip = set()
     for p in ir.phis(sh.H):
         if rval(p.to) not in A.biv:
-            return 0
+            r = _reduction(fast, p, fast.cloned)
+            if r is None:
+                return 0
+            x = _widening(fast, r, fast.cloned)
+            if x is not None:
+                r.ext = x
+                skip.add(id(x))
+            fast.vreds.append(r)
+            skip.add(id(r.i))
     widths = set()
     mem = []
     made = set()
     third = None
     for n, i in enumerate(fast.cloned):
-        if i.op in (D.Onop, D.Odbgloc):
+        if i.op in (D.Onop, D.Odbgloc) or id(i) in skip:
             continue
         if i.op == D.Ofma0:
             if i.cls not in (Ks, Kd):
@@ -33576,7 +33656,18 @@ def plan(fast, rts):
             if not _operand(fast, a, made):
                 return 0
         made.add(rval(i.to))
-    if third is not None or len(widths) != 1 or not mem:
+    if third is not None or not mem:
+        return 0
+    for r in fast.vreds:
+        if r.ext is not None:
+            if not _operand(fast, r.ext.arg[0], made):
+                return 0
+            widths.add(4)
+        else:
+            if not _operand(fast, r.v, made):
+                return 0
+            widths.add(_SIZE[r.cls])
+    if len(widths) != 1:
         return 0
     vf = 16 // widths.pop()
     far = set()
@@ -33643,8 +33734,13 @@ def body(fast, em, state):
             fast.em = em0
             fast.memo[key] = fast.fp.raw(getattr(D, 'Oqdup' + _LANE[k]), Kq, s)
         return fast.memo[key]
+    skip = set()
+    for r in fast.vreds:
+        skip.add(id(r.i))
+        if r.ext is not None:
+            skip.add(id(r.ext))
     for i in fast.cloned:
-        if i.op in (D.Onop, D.Odbgloc):
+        if i.op in (D.Onop, D.Odbgloc) or id(i) in skip:
             continue
         if i.op == D.Ofma0:
             third = vec(i.arg[0], i.cls)
@@ -33670,16 +33766,49 @@ def body(fast, em, state):
             env[rval(i.to)] = em.raw(op, Kq, vec(i.arg[0], i.cls))
         else:
             env[rval(i.to)] = em.raw(op, Kq, vec(i.arg[0], i.cls), vec(i.arg[1], i.cls))
+    for r in fast.vreds:
+        identity = fast.fp.raw(getattr(D, 'Oqdup' + _LANE[r.cls]), Kq, fast.fp.con(-1 if r.op == D.Oand else 0))
+        r.acc0 = identity
+        r.in0 = newtmp('v', Kq, fn)
+        if r.ext is not None:
+            signed = r.ext.op == D.Oextsw
+            r.in1 = newtmp('v', Kq, fn)
+            w = vec(r.ext.arg[0], Kw)
+            low, high = (D.Oqsaddl, D.Oqsaddh) if signed else (D.Oquaddl, D.Oquaddh)
+            r.out0 = em.raw(low, Kq, r.in0, w)
+            r.out1 = em.raw(high, Kq, r.in1, w)
+            continue
+        r.in1 = None
+        op = getattr(D, 'O' + _REDOPS[r.op] + ('' if r.op in (D.Oand, D.Oor, D.Oxor) else _LANE[r.cls]))
+        r.out0 = em.raw(op, Kq, r.in0, vec(r.v, r.cls))
+        r.out1 = None
     return dict(state)
+def closeloop(fast, em, MB, FP, state):
+    out = dict(state)
+    for r in fast.vreds:
+        ir.addphi(MB, Kq, r.in0, [(FP, r.acc0), (MB, r.out0)])
+        total = r.out0
+        k = r.cls
+        if r.ext is not None:
+            ir.addphi(MB, Kq, r.in1, [(FP, r.acc0), (MB, r.out1)])
+            total = em.raw(D.Oqaddl, Kq, r.out0, r.out1)
+        x = _LANE[k]
+        lanes = 16 // _SIZE[k]
+        op = D.Oadd if r.op in (D.Oadd, D.Osub) else r.op
+        v = state[('phi', r.t)]
+        for n in range(lanes):
+            v = em.raw(op, k, v, em.raw(getattr(D, 'Oqget' + x), k, total, em.con(n)))
+        out[('phi', r.t)] = v
+    return out
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "ff3316e69bc4f697a203",
-"runtime-amd64_sysv": "857971c6b0db1c97384d",
-"runtime-amd64_windows": "050e191577fb2c84e10d",
-"runtime-arm64": "5f7268a9562f37bde531",
-"runtime-arm64_apple": "6be9a6b193949b566797",
-"runtime-arm64_win": "726b60b3231b63359508"
+"compiler": "4f817e374e387f94c1bf",
+"runtime-amd64_sysv": "d34ac46e2face522ecbb",
+"runtime-amd64_windows": "b15f3463c2383cda2311",
+"runtime-arm64": "3c0eb8187c8ba68159ad",
+"runtime-arm64_apple": "e5f6ebcb827c4843b59f",
+"runtime-arm64_win": "cd2912e10df4ad98acdc"
 }
 ''',
 'onefile.py': '''\

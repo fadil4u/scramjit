@@ -109,6 +109,25 @@ Each of these runs as Python, for that call, with the same results:
 
 And each of these keeps the function, or the loop it's in, in Python: adding or deleting a key, a key in a variable (`p[k]`), `len(p)`, `'a' in p`, `p.get()`, iterating over `p`, returning `p`, and building a dict inside the function. Those loops can still be [lifted out](errors.md#loops-are-lifted-out) if they don't touch the dict that way.
 
+## Constants at module level
+
+A function can read numbers, tuples of numbers, arrays and dicts from module level, and loops can use them:
+
+```python
+RATE = 0.25
+TABLE = (1.0, 2.5)
+WEIGHTS = np.hanning(16)
+
+@scram
+def apply(x):
+    s = 0.0
+    for i in range(len(WEIGHTS)):
+        s += WEIGHTS[i] * x[i] * RATE
+    return s + TABLE[0]
+```
+
+They work like arguments, read at each call. A new value needs no recompile, a new type compiles for that type, and writes to a global array or dict reach it. Each one costs about what an argument does, around 0.2 µs per call. One that isn't there raises `NameError` as usual. Any other global, such as a string, a list or `None`, keeps the function or loop in Python, as does assigning to a global with `global`.
+
 ## What stays in Python
 
 Growable lists, dicts that gain keys, sets and strings. Each would need allocation and a runtime inside compiled code, so code that uses them runs as Python, and the loops around it that don't are still compiled. See [Fallback and errors](errors.md).

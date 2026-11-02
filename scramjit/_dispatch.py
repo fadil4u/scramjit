@@ -1,6 +1,7 @@
 """The @scram decorator: signatures, the compile cache, the call boundary and fallback."""
 
 import ast
+import copy
 import functools
 import inspect
 import struct
@@ -171,6 +172,9 @@ class _Interface:
                                     'typestr': base.dtype.str, 'version': 3}
 
 
+_MISSING = object()               # a global that isn't there: nothing compiled can read it, so that call runs as Python
+
+
 class _Python:
     """Marker: this signature runs as the original Python function."""
 
@@ -252,6 +256,15 @@ def _make_plan(f, entry, args):
     env = {'kernel': entry.kernel, 'slow': f._slow, 'failed': f._failed, 'box': f._box, 'ret': entry.ret, 'pool': [],
            'addressof': ctypes.addressof, 'from_buffer': ctypes.c_char.from_buffer, 'bytearray': bytearray, 'memoryview': memoryview}
     names = [f'a{i}' for i in range(len(args))]
+    real = names[:len(args) - len(f._hidden or ())]
+    again = '(' + ''.join(n + ', ' for n in real) + ')'
+    hidden = []                        # globals the function reads: read now, and turned down if their type has changed
+    for k, g in enumerate(f._hidden or ()):
+        i = len(real) + k
+        env[f'gname{k}'], env[f'gtype{k}'] = g, type(args[i])
+        hidden.append(f'    a{i} = G.get(gname{k}, MISSING)\n    if type(a{i}) is not gtype{k}:\n        return slow({again})')
+    if hidden:
+        env.update(G=f._fn.__globals__, MISSING=_MISSING)
     cargs = []
     for i, (x, t, n) in enumerate(zip(args, entry.types, names)):
         if (t.kind == 'array' and t.strided) or entry.ret.kind == 'array':
@@ -281,25 +294,25 @@ def _make_plan(f, entry, args):
         cargs.append('(FLAG if get_ident() == interrupt._main else NEVER)')
     # an array's checks go one at a time, each read after the last passed, then its address and shape
     arrays = [i for i, t in enumerate(entry.types) if t.kind == 'array']
-    src_guards = []
+    src_guards = hidden
     for i, (t, n) in enumerate(zip(entry.types, names)):
         if t.kind == 'array':
             x = args[i]
-            src_guards.append(f'    fl = {n}.flags\n    if {n}.dtype is not d{i} or {n}.ndim != {x.ndim} or not fl.c_contiguous or fl.writeable is not {bool(x.flags.writeable)}:\n        return slow(({", ".join(names)},))\n    s{i} = {n}.shape')
+            src_guards.append(f'    fl = {n}.flags\n    if {n}.dtype is not d{i} or {n}.ndim != {x.ndim} or not fl.c_contiguous or fl.writeable is not {bool(x.flags.writeable)}:\n        return slow({again})\n    s{i} = {n}.shape')
         elif t.kind == 'dict':
             # only what this function reads is checked: a missing key or another type goes the general way
             for k, (key, ft) in enumerate(t.elem):
                 env[f'key{i}_{k}'], env[f'type{i}_{k}'] = key, type(args[i][key])
                 src_guards.append(f'    f{i}_{k} = {n}.get(key{i}_{k})\n    if type(f{i}_{k}) is not type{i}_{k}:\n        '
-                                  f'return slow(({", ".join(names)},))')
+                                  f'return slow({again})')
                 if ft is T.INT:
                     src_guards.append(f'    if not -9223372036854775808 <= f{i}_{k} <= 9223372036854775807:\n        '
-                                      f'return slow(({", ".join(names)},))')
+                                      f'return slow({again})')
         elif t.kind == 'int' and not t.np:
-            src_guards.append(f'    if not -9223372036854775808 <= {n} <= 9223372036854775807:\n        return slow(({", ".join(names)},))')
+            src_guards.append(f'    if not -9223372036854775808 <= {n} <= 9223372036854775807:\n        return slow({again})')
     addresses = ''.join(f'        p{i} = addressof(from_buffer({names[i]}))\n' for i in arrays if args[i].flags.writeable)
     take = (f'    try:\n{addresses}    except (ValueError, TypeError, BufferError):      # empty: no buffer to take the address of\n'
-            f'        return slow(({", ".join(names)},))\n') if addresses else ''
+            f'        return slow({again})\n') if addresses else ''
     size = 40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0) + 16 * len(entry.outs)
     r = entry.ret
     if r is T.NONE:
@@ -316,7 +329,7 @@ def _make_plan(f, entry, args):
     rerun = ''
     if entry.rerun:
         env.update(f=f, RERUN=RERUN)
-        rerun = f"    if status == RERUN:\n        pool.append(entry)\n        return f._py({', '.join(names)})\n"
+        rerun = f"    if status == RERUN:\n        pool.append(entry)\n        return f._py({', '.join(real)})\n"
     saves = ''
     for n, (i, key, at, ot) in enumerate(entry.outs):
         env[f'okey{n}'], env[f'otype{n}'] = key, ot
@@ -324,8 +337,8 @@ def _make_plan(f, entry, args):
     dicts = [names[i] for i, t in enumerate(entry.types) if t.kind == 'dict']
     if len(dicts) > 1:                 # two names for one dict: a write must show through both
         pairs = ' or '.join(f'{a} is {b}' for k, a in enumerate(dicts) for b in dicts[k + 1:])
-        src_guards.append(f'    if {pairs}:\n        return slow(({", ".join(names)},))')
-    src = f"""def plan({', '.join(names)}):
+        src_guards.append(f'    if {pairs}:\n        return slow({again})')
+    src = f"""def plan({', '.join(real)}):
 {chr(10).join(src_guards)}
 {take}    if pool:
         io, ioaddr, q, d = entry = pool.pop()
@@ -366,6 +379,8 @@ class Function:
         self._why = {}            # signature -> (line, reason) it runs as Python
         self._stats = {}          # signature -> [calls, native seconds, Python seconds], under preflight --run
         self._lock = threading.Lock()
+        self._hidden = None       # the globals this function reads, found at the first call: they may not exist before it
+        self._ctree = None        # the tree with those as parameters, which is what's compiled
         code = fn.__code__
         if _loop is None:
             _functions.add(self)
@@ -427,6 +442,8 @@ class Function:
                                 f'not {type(args[i]).__name__}')
         if kwargs:
             return self._fn(*args, **kwargs)
+        real = args
+        args = self._with_globals(args)
         key = self._key(args)
         entry = self._cache.get(key)
         if entry is None:
@@ -434,21 +451,55 @@ class Function:
         if _profile:
             return self._timed(key, entry, args)
         if entry is not PYTHON:
-            self._plans[tuple(map(type, args))] = _make_plan(self, entry, args)
-        elif None not in key and not any(t.kind == 'array' for t in key) and dict not in map(type, args):
-            self._plans[tuple(map(type, args))] = self._py   # these types always run as Python
+            self._plans[tuple(map(type, real))] = _make_plan(self, entry, args)
+        elif None not in key and not any(t.kind == 'array' for t in key) and dict not in map(type, args) and not self._hidden:
+            self._plans[tuple(map(type, real))] = self._py   # these types always run as Python
         if entry is PYTHON:
-            return self._py(*args)
+            return self._py(*real)
         return self._run(entry, args)
+
+    def _with_globals(self, args):
+        """The arguments, and after them the globals the function reads, as they are now."""
+        if self._hidden is None:
+            self._find_globals()
+        if not self._hidden:
+            return args
+        g = self._fn.__globals__
+        return args + tuple(g.get(n, _MISSING) for n in self._hidden)
+
+    def _find_globals(self):
+        """A number, tuple, array or dict at module level is one more input: it's read at each call and passed like the others, so
+        loops can use it, a new value needs no recompile, and a new type is a new signature. Anything else stays a name."""
+        self._hidden = []
+        tree = self._tree
+        if tree is None:
+            return
+        local = _lift.local_names(tree)
+        loads = set()
+        for st in tree.body:
+            loads |= _lift._split(st)[0]
+        called = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        g = self._fn.__globals__
+        self._hidden = sorted(n for n in loads - local - called if n in g and (_arg_type(g[n]) is not None or type(g[n]) is dict))
+        if self._hidden:
+            self._ctree = copy.deepcopy(tree)
+            self._ctree.args.args = self._ctree.args.args + [ast.copy_location(ast.arg(n), tree) for n in self._hidden]
+            self._dict_keys = _dict_keys(self._ctree)
+
+    def _real(self, args):
+        """The caller's arguments, without the globals added to them."""
+        return args[:len(args) - len(self._hidden)] if self._hidden else args
 
     def _slow(self, args):
         """A call a plan turned down: an int past 64 bits, an array of another shape of type."""
+        real = args
+        args = self._with_globals(args)
         key = self._key(args)
         entry = self._cache.get(key)
         if entry is None:
             entry = self._specialize(key, args)
         if entry is PYTHON:
-            return self._py(*args)
+            return self._py(*real)
         if self._replans and dict in map(type, args):    # writing p['s'] can change what the plan checks for
             self._replans -= 1
             self._plans[tuple(map(type, args))] = _make_plan(self, entry, args)
@@ -470,7 +521,7 @@ class Function:
             outer = _running.get(me)
             _running[me] = (self, entry is not PYTHON, t)
         try:
-            return self._py(*args) if entry is PYTHON else self._run(entry, args)
+            return self._py(*self._real(args)) if entry is PYTHON else self._run(entry, args)
         finally:
             s[2 if entry is PYTHON else 1] += time.perf_counter() - t
             if _running is not None:
@@ -504,7 +555,7 @@ class Function:
             entry = self._cache.get(key)
             if entry is not None:
                 return entry
-            sig = ', '.join(_describe(x, t) for x, t in zip(args, key))
+            sig = ', '.join(_describe(x, t) for x, t in zip(self._real(args), key))
             t0 = time.perf_counter()
             try:
                 entry = self._compile(key, args)
@@ -565,7 +616,7 @@ class Function:
             if t is None:
                 raise Unsupported(None, f'an argument of type {_describe(x, t)} is not compiled')
         counts = self._counting or _counts is True or bool(_counts and self._owner in _counts)
-        c = Compiler(self._tree, list(key), self._fn.__globals__, self._filename, self._first - 1,
+        c = Compiler(self._ctree or self._tree, list(key), self._fn.__globals__, self._filename, self._first - 1,
                      self._boundscheck, self._parity, counts)
         source = c.generate()
         cimo = _get_cimo()
@@ -626,7 +677,7 @@ class Function:
         io = bytearray(40 + 16 * ret_pairs(entry.ret) + 16 * len(entry.outs))
         status = entry.kernel(*cargs, io)
         if status == RERUN and entry.rerun:
-            return self._py(*args)
+            return self._py(*self._real(args))
         for i, key, at, ot in entry.outs:
             args[i][key] = self._box(io, at, at + 8, ot)
         if status:

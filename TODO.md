@@ -28,8 +28,9 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
    with `base` built from Python ints that don't change in the loop. Not yet: steps other than 1 (RoPE's
    `range(0, dim, 2)` in `bench/llm.py`), a start that isn't a literal or `len()`, numpy int bases, and outer
    loops, where a second copy of everything inside costs more than it wins.
-3. **Store-to-load forwarding:** `y[i]` written then `y[i - 1]` read next iteration; keeping it in
-   a register gives `ema` 2.39 ns against 3.07 (cimo doesn't do it).
+3. **Store-to-load forwarding, what's left:** `y[i - 1]` comes from a temporary when `y[i] = ...` is the
+   loop's only array store and runs every iteration. Not yet: `y[i - 2]`, 2-D rows (`m[r, j - 1]`), and loops
+   with other stores, which need a runtime test that the arrays don't overlap.
 4. **Loop lifting (M4):** compile the loops that fit inside a function that doesn't, and let Python run the rest,
    which makes "partly compiled" real. The risk is matching Python when a loop raises partway: every variable
    must hold what it would in plain Python. Build it in small steps with differential tests from the start. It

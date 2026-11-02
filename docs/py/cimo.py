@@ -766,6 +766,20 @@ def _i_bitfield(a, mn, ops):
     base = 0x53000000 if mn == 'ubfx' else 0x13000000
     return (base | _sf(rd) | (w == 64) << 22 | lsb << 16 | (lsb + width - 1) << 10 | rn[1] << 5
             | rd[1])
+def _i_bfm(a, mn, ops):
+    if len(ops) != 4:
+        raise AssemblerError('%s needs 4 operands' % mn)
+    rd, rn = _reg(ops[0]), _reg(ops[1])
+    _same(rd, rn)
+    w = 64 if rd[0] == 'x' else 32
+    lsb, width = _imm(ops[2], True), _imm(ops[3], True)
+    if not (0 <= lsb < w and 1 <= width <= w - lsb):
+        raise AssemblerError('bad bit field in %s' % mn)
+    if mn == 'bfi':
+        immr, imms = -lsb % w, width - 1
+    else:
+        immr, imms = lsb, lsb + width - 1
+    return 0x33000000 | _sf(rd) | (w == 64) << 22 | immr << 16 | imms << 10 | rn[1] << 5 | rd[1]
 def _i_ubfiz(a, mn, ops):
     if len(ops) != 4:
         raise AssemblerError('ubfiz needs 4 operands')
@@ -794,6 +808,20 @@ def _i_dp2(a, mn, ops):
     rd, rn, rm = _reg(ops[0]), _reg(ops[1]), _reg(ops[2])
     _same(rd, rn, rm)
     return base | _sf(rd) | rm[1] << 16 | rn[1] << 5 | rd[1]
+_WIDEMUL = {'smaddl': 0x9b200000, 'smsubl': 0x9b208000, 'umaddl': 0x9ba00000, 'umsubl': 0x9ba08000}
+def _i_widemul(a, mn, ops):
+    rd, rn, rm = _reg(ops[0], 'x'), _reg(ops[1], 'w'), _reg(ops[2], 'w')
+    if mn in ('smull', 'umull'):
+        if len(ops) != 3:
+            raise AssemblerError('%s needs 3 operands' % mn)
+        ra = 31
+        base = _WIDEMUL['smaddl' if mn == 'smull' else 'umaddl']
+    else:
+        if len(ops) != 4:
+            raise AssemblerError('%s needs 4 operands' % mn)
+        ra = _reg(ops[3], 'x')[1]
+        base = _WIDEMUL[mn]
+    return base | rm[1] << 16 | ra << 10 | rn[1] << 5 | rd[1]
 def _i_madd(a, mn, ops):
     if len(ops) != 4:
         raise AssemblerError('%s needs 4 operands' % mn)
@@ -1120,6 +1148,22 @@ def _i_mulh(a, mn, ops):
         raise AssemblerError('%s needs 3 operands' % mn)
     rd, rn, rm = [_reg(o, 'x') for o in ops]
     return (0x9bc07c00 if mn == 'umulh' else 0x9b407c00) | rm[1] << 16 | rn[1] << 5 | rd[1]
+def _i_ccmp(a, mn, ops):
+    if len(ops) != 4:
+        raise AssemblerError('ccmp needs 4 operands')
+    rn = _reg(ops[0])
+    nzcv = _imm(ops[2], True)
+    c = _COND.get(ops[3].strip().lower())
+    if c is None or not 0 <= nzcv <= 15:
+        raise AssemblerError('bad ccmp operands')
+    if _isreg(ops[1]):
+        rm = _reg(ops[1])
+        _same(rn, rm)
+        return 0x7a400000 | _sf(rn) | rm[1] << 16 | c << 12 | rn[1] << 5 | nzcv
+    n = _imm(ops[1], True)
+    if not 0 <= n <= 31:
+        raise AssemblerError('ccmp immediate out of range')
+    return 0x7a400800 | _sf(rn) | n << 16 | c << 12 | rn[1] << 5 | nzcv
 def _i_tbz(a, mn, ops):
     if len(ops) != 3:
         raise AssemblerError('%s needs 3 operands' % mn)
@@ -1190,11 +1234,13 @@ _INSNS = {
     'cmp': _i_cmp, 'cmn': _i_cmp, 'neg': _i_neg,
     'and': _i_logic, 'orr': _i_logic, 'eor': _i_logic, 'ands': _i_logic,
     'bic': _i_logic, 'orn': _i_logic, 'eon': _i_logic, 'ubfx': _i_bitfield, 'sbfx': _i_bitfield,
-    'ror': _i_ror, 'ubfiz': _i_ubfiz,
+    'ror': _i_ror, 'ubfiz': _i_ubfiz, 'bfi': _i_bfm, 'bfxil': _i_bfm,
     'lsl': _i_shift, 'lsr': _i_shift, 'asr': _i_shift,
     'mul': _i_dp2, 'sdiv': _i_dp2, 'udiv': _i_dp2, 'madd': _i_madd, 'msub': _i_madd,
+    'smull': _i_widemul, 'umull': _i_widemul, 'smaddl': _i_widemul, 'smsubl': _i_widemul,
+    'umaddl': _i_widemul, 'umsubl': _i_widemul,
     'cbz': _i_cbz, 'cbnz': _i_cbz, 'csel': _i_csel, 'fcsel': _i_csel,
-    'csinc': _i_csel, 'csinv': _i_csel, 'csneg': _i_csel, 'tbz': _i_tbz, 'tbnz': _i_tbz, 'tst': _i_tst,
+    'csinc': _i_csel, 'csinv': _i_csel, 'csneg': _i_csel, 'tbz': _i_tbz, 'tbnz': _i_tbz, 'tst': _i_tst, 'ccmp': _i_ccmp,
     'smulh': _i_mulh, 'umulh': _i_mulh,
     'sxtb': _i_ext, 'sxth': _i_ext, 'sxtw': _i_ext, 'uxtb': _i_ext, 'uxth': _i_ext,
     'mov': _i_mov, 'movk': _i_movk, 'movz': _i_movk, 'movn': _i_movk, 'cset': _i_cset,
@@ -2475,7 +2521,9 @@ from ..defs import (R, RTmp, RCon, RSlot, RMem, CBits, CAddr, SGlo, SThr, SExt, 
                     Ocall, Oacmp, Oacmn, Oafcmp, Onop, Oaddr, Osalloc, Odbgloc, Oafmadd,
                     Oafmsub, Oafnmadd, Oafnmsub)
 from ..defs import bitsd, bitsf
-from ..util import die, isreg, str_
+from ..util import die, isreg, str_, intern
+from ..defs import Con, Mem
+from ..util import vgrow
 from ..emit import emitfnlnk, emitdbgloc, elf_emitfnfin
 from .regs import R0, R18, IP1, FP, LR, SP, V0, V30
 from .targ import arm64_rclob
@@ -2579,9 +2627,14 @@ omap = [
     (Oultof, Ka, "ucvtf %=, %L0"),
     (Ocall, Kw, "blr %L0"),
     (D.Oafnmul, Ka, "fnmul %=, %0, %1"),
+    (D.Oasmull, Kl, "smull %=, %W0, %W1"),
+    (D.Oaumull, Kl, "umull %=, %W0, %W1"),
     (D.Osmulh, Kl, "smulh %=, %0, %1"),
     (D.Oumulh, Kl, "umulh %=, %0, %1"),
     (Oacmp, Ki, "cmp %0, %1"),
+    (D.Oaadds, Ki, "adds %=, %0, %1"),
+    (D.Oasubs, Ki, "subs %=, %0, %1"),
+    (D.Oaands, Ki, "ands %=, %0, %1"),
     (Oacmn, Ki, "cmn %0, %1"),
     (Oafcmp, Ka, "fcmpe %0, %1"),
     (D.Ofsqrt, Ka, "fsqrt %=, %0"),
@@ -2605,6 +2658,8 @@ omap = [
 ]
 V31 = 0x1fffffff
 _FMA = {Oafmadd: "fmadd", Oafmsub: "fmsub", Oafnmadd: "fnmadd", Oafnmsub: "fnmsub"}
+_LOGICOPS = frozenset((Oand, Oor, Oxor, D.Oaands))
+_POSTINDEX, _PREINDEX = -1, -2
 def _zr(r, k):
     if rtype(r) == RCon:
         return "wzr" if k == Kw else "xzr"
@@ -2720,7 +2775,11 @@ def emitf(s, i, e):
                 pc = e.fn.con[rval(r)]
                 n = pc.i & M64
                 assert pc.type == CBits
-                if n >> 24:
+                if _ext.isel and i.op in _LOGICOPS:
+                    n &= 0xffffffff if k == Kw else M64
+                    assert _logimm(n, k)
+                    f.write("#%d" % n)
+                elif n >> 24:
                     assert _logimm(n, k)
                     f.write("#%d" % n)
                 elif n & 0xfff000:
@@ -2745,7 +2804,11 @@ def emitf(s, i, e):
             elif t == RMem:
                 pm = e.fn.mem[rval(r)]
                 assert isreg(pm.base)
-                if not req(pm.index, R):
+                if pm.scale == _POSTINDEX:
+                    f.write("[%s], %d" % (rname(rval(pm.base), Kl), pm.offset.i))
+                elif pm.scale == _PREINDEX:
+                    f.write("[%s, %d]!" % (rname(rval(pm.base), Kl), pm.offset.i))
+                elif not req(pm.index, R):
                     shift, ext = pm.scale & 15, pm.scale >> 4
                     b = rname(rval(pm.base), Kl)
                     x = rname(rval(pm.index), Kw if ext else Kl)
@@ -2936,9 +2999,10 @@ def emitins(i, e):
     elif op == D.Oamadd or op == D.Oamsub:
         m = e.fn.mem[rval(i.arg[1])]
         k = i.cls
-        e.f.write("\\t%s\\t%s, %s, %s, %s\\n" % ("madd" if op == D.Oamadd else "msub",
-                                               rname(rval(i.to), k), rname(rval(m.base), k),
-                                               rname(rval(m.index), k), _zr(i.arg[0], k)))
+        wide = m.scale
+        mn = {0: ("madd", "msub"), 1: ("smaddl", "smsubl"), 2: ("umaddl", "umsubl")}[wide][op != D.Oamadd]
+        e.f.write("\\t%s\\t%s, %s, %s, %s\\n" % (mn, rname(rval(i.to), k), rname(rval(m.base), Kw if wide else k),
+                                               rname(rval(m.index), Kw if wide else k), _zr(i.arg[0], k)))
     elif op == D.Oaalu:
         m = e.fn.mem[rval(i.arg[1])]
         k = i.cls
@@ -2954,6 +3018,22 @@ def emitins(i, e):
         c = e.fn.con[rval(i.arg[1])].i
         e.f.write("\\t%s\\t%s, %s, #%d, #%d\\n" % ("ubfx" if op == D.Oaubfx else "sbfx", rname(rval(i.to), k),
                                                  rname(rval(i.arg[0]), k), c & 255, c >> 8))
+    elif op == D.Oabfi:
+        k = i.cls
+        m = e.fn.mem[rval(i.arg[1])]
+        to, a, b = rval(i.to), rval(i.arg[0]), rval(m.base)
+        if b == to and a != to:
+            e.f.write("\\tmov\\t%s, %s\\n" % (rname(IP1, k), rname(b, k)))
+            b = IP1
+        if a != to:
+            e.f.write("\\tmov\\t%s, %s\\n" % (rname(to, k), rname(a, k)))
+        lsb, width = m.offset.i & 255, m.offset.i >> 8
+        if m.scale:
+            e.f.write("\\tbfxil\\t%s, %s, #%d, #%d\\n" % (rname(to, k), rname(b, k), m.scale, width))
+        elif lsb:
+            e.f.write("\\tbfi\\t%s, %s, #%d, #%d\\n" % (rname(to, k), rname(b, k), lsb, width))
+        else:
+            e.f.write("\\tbfxil\\t%s, %s, #0, #%d\\n" % (rname(to, k), rname(b, k), width))
     elif op == D.Oaror:
         k = i.cls
         e.f.write("\\tror\\t%s, %s, #%d\\n" % (rname(rval(i.to), k), rname(rval(i.arg[0]), k),
@@ -2975,7 +3055,13 @@ def emitins(i, e):
         else:
             mn = ("csel", "csinc", "csinv", "csneg")[m.scale & 15]
         e.f.write("\\t%s\\t%s, %s, %s, %s\\n" % (mn, rname(rval(i.to), k), _zr(i.arg[0], k),
-                                               rname(rval(m.base), k), c))
+                                               _zr(m.base, k), c))
+    elif op == D.Oaccmp:
+        m = e.fn.mem[rval(i.arg[1])]
+        k = i.cls
+        b = rname(rval(m.base), k) if isreg(m.base) else "#%d" % m.offset.i
+        e.f.write("\\tccmp\\t%s, %s, #%d, %s\\n" % (rname(rval(i.arg[0]), k), b, m.scale & 15,
+                                                  ctoa[(m.scale >> 4) & 255][m.scale >> 12]))
     elif op == D.Oaubfiz:
         k = i.cls
         c = e.fn.con[rval(i.arg[1])].i
@@ -3014,10 +3100,10 @@ def _paddr(r, e):
         return FP, slot(r, e)
     if t == RMem:
         m = e.fn.mem[rval(r)]
-        if req(m.index, R) and m.offset.type in (CBits, D.CUndef):
+        if req(m.index, R) and m.offset.type in (CBits, D.CUndef) and m.scale >= 0:
             return rval(m.base), (m.offset.i if m.offset.type == CBits else 0)
     return None
-def emitpair(i1, i2, e):
+def emitpair(i1, i2, e, after=()):
     from .pair import kind, inrange, SIZE
     k1 = kind(i1)
     if not k1 or k1 != kind(i2):
@@ -3041,6 +3127,19 @@ def emitpair(i1, i2, e):
         r1, r2, a1 = r2, r1, a2
     k = _PK[k1[1]]
     base = "x29" if a1[0] == FP else rname(a1[0], Kl)
+    c = None
+    if _ext.isel and a1[1] == 0 and after and a1[0] != FP and a1[0] != SP and rval(r1) != a1[0] and rval(r2) != a1[0]:
+        for j in after:
+            if j.op == Ocall:
+                break
+            if _refers(j, a1[0], e):
+                c = _incby(j, a1[0], e, sz)
+                if c is not None:
+                    j.set(Ins(Onop))
+                break
+    if c is not None:
+        e.f.write("\\t%s\\t%s, %s, [%s], %d\\n" % ("ldp" if ld else "stp", rname(rval(r1), k), rname(rval(r2), k), base, c))
+        return 1
     off = (", %d" % a1[1]) if a1[1] else ""
     e.f.write("\\t%s\\t%s, %s, [%s%s]\\n" % ("ldp" if ld else "stp", rname(rval(r1), k),
                                            rname(rval(r2), k), base, off))
@@ -3049,7 +3148,7 @@ def emitinsl(ins, e):
     k = 0
     n = len(ins)
     while k < n:
-        if _ext.ldp and not e.fn.hasvolatile and k + 1 < n and emitpair(ins[k], ins[k + 1], e):
+        if _ext.ldp and not e.fn.hasvolatile and k + 1 < n and emitpair(ins[k], ins[k + 1], e, ins[k + 2:k + 10]):
             k += 2
             continue
         emitins(ins[k], e)
@@ -3093,7 +3192,8 @@ def emitcondjmp(b, jt, s1, s2, e, cz=None):
     return 0
 def _cbz(ins, jt, e):
     c = jt - Jjf
-    if not _ext.isel or (c != Cieq and c != Cine):
+    sign = c == Cislt or c == Cisge
+    if not _ext.isel or (c != Cieq and c != Cine and not (sign and e.tbzok)):
         return ins, None
     n = len(ins)
     while n > 0 and ins[n - 1].op == Onop:
@@ -3103,6 +3203,11 @@ def _cbz(ins, jt, e):
     i = ins[n - 1]
     pc = e.fn.con[rval(i.arg[1])]
     if pc.type != CBits:
+        return ins, None
+    if sign:
+        if i.op == Oacmp and pc.i == 0:
+            at = "%s, #%d, " % (rname(rval(i.arg[0]), i.cls), 63 if i.cls == Kl else 31)
+            return ins[:n - 1], ("tbz", "tbnz", at) if c == Cislt else ("tbnz", "tbz", at)
         return ins, None
     if i.op == Oacmp and pc.i == 0:
         return ins[:n - 1], ("cbz", "cbnz", "%s, " % rname(rval(i.arg[0]), i.cls))
@@ -3114,6 +3219,140 @@ def _cbz(ins, jt, e):
                 bit += 1
             return ins[:n - 1], ("tbz", "tbnz", "%s, #%d, " % (rname(rval(i.arg[0]), i.cls), bit))
     return ins, None
+def _refers(i, r, e):
+    t = D.TMP(r)
+    if req(i.to, t):
+        return True
+    for a in i.arg:
+        if req(a, t):
+            return True
+        if rtype(a) == RMem:
+            m = e.fn.mem[rval(a)]
+            if req(m.base, t) or req(m.index, t):
+                return True
+    return False
+def _incby(i, r, e, pair=0):
+    if i.op not in (Oadd, Osub) or i.cls != Kl or not req(i.to, D.TMP(r)) or not req(i.arg[0], D.TMP(r)) \\
+            or rtype(i.arg[1]) != RCon or e.fn.con[rval(i.arg[1])].type != CBits:
+        return None
+    c = e.fn.con[rval(i.arg[1])].i
+    c = c if i.op == Oadd else -c
+    if pair:
+        return c if c % pair == 0 and -64 <= c // pair <= 63 else None
+    return c if -256 <= c <= 255 else None
+def _indexed(i, r, c, how, e):
+    m = Mem()
+    e.fn.nmem += 1
+    vgrow(e.fn.mem, e.fn.nmem)
+    e.fn.mem[e.fn.nmem - 1] = m
+    m.base = D.TMP(r)
+    m.scale = how
+    m.offset.type = CBits
+    m.offset.i = c
+    i.arg[0 if isload(i.op) else 1] = D.MEM(e.fn.nmem - 1)
+def _access(i, e):
+    if not (isload(i.op) or isstore(i.op)):
+        return None
+    a = i.arg[0 if isload(i.op) else 1]
+    if rtype(a) == RTmp:
+        r, off = rval(a), 0
+    elif rtype(a) == RMem and req(e.fn.mem[rval(a)].index, R) and e.fn.mem[rval(a)].offset.type in (CBits, D.CUndef) \\
+            and e.fn.mem[rval(a)].scale >= 0 and isreg(e.fn.mem[rval(a)].base):
+        m = e.fn.mem[rval(a)]
+        r, off = rval(m.base), (m.offset.i if m.offset.type == CBits else 0)
+    else:
+        return None
+    data = i.to if isload(i.op) else i.arg[0]
+    if r == SP or r == FP or not isreg(a if rtype(a) == RTmp else e.fn.mem[rval(a)].base) or req(data, D.TMP(r)) \\
+            or (rtype(data) != RCon and not isreg(data)):
+        return None
+    return r, off
+def _writeback(e):
+    b = e.fn.start
+    while b:
+        ins = [i for i in b.ins[:b.nins] if i.op not in (Onop, D.Odbgloc)]
+        for n, i in enumerate(ins):
+            if i.op == Onop:
+                continue
+            acc = _access(i, e)
+            if acc is not None:
+                r, off = acc
+                for j in ins[n + 1:n + 9]:
+                    if j.op == Ocall:
+                        break
+                    if _refers(j, r, e):
+                        c = _incby(j, r, e)
+                        if c is not None and off == 0:
+                            _indexed(i, r, c, _POSTINDEX, e)
+                            j.set(Ins(Onop))
+                        elif c is not None and c == off:
+                            _indexed(i, r, c, _PREINDEX, e)
+                            j.set(Ins(Onop))
+                        break
+            elif i.op in (Oadd, Osub) and isreg(i.to):
+                r = rval(i.to)
+                c = _incby(i, r, e)
+                if c is None or r == SP or r == FP:
+                    continue
+                for j in ins[n + 1:n + 9]:
+                    if j.op == Ocall:
+                        break
+                    if _refers(j, r, e):
+                        acc = _access(j, e)
+                        if acc == (r, 0):
+                            _indexed(j, r, c, _PREINDEX, e)
+                            i.set(Ins(Onop))
+                        break
+        b = b.link
+_SAFEFLAGS = {Onop, Ocopy, Oadd, Osub, Oand, Oor, Oxor, Osar, Oshr, Oshl, Omul, D.Oaubfx, D.Oasbfx, D.Oaubfiz,
+              D.Oaalu, D.Oamadd, D.Oamsub, D.Odbgloc}
+def _flagsfrom(e):
+    b = e.fn.start
+    while b:
+        ins = [i for i in b.ins[:b.nins] if i.op not in (Onop, D.Odbgloc)]
+        for n, i in enumerate(ins):
+            if i.op != Oacmp or not isreg(i.arg[0]) or rtype(i.arg[1]) != RCon:
+                continue
+            pc = e.fn.con[rval(i.arg[1])]
+            if pc.type != CBits or pc.i != 0:
+                continue
+            readers = []
+            for j in ins[n + 1:]:
+                if Oflag <= j.op < Oflag + NCmp:
+                    readers.append(j.op - Oflag)
+                elif j.op == D.Oacsel:
+                    readers.append(e.fn.mem[rval(j.arg[1])].offset.i)
+                elif j.op not in _SAFEFLAGS and not isload(j.op) and not isstore(j.op):
+                    if j.op in (Oacmp, Oacmn, D.Oatst, Oafcmp):
+                        break
+                    readers = None
+                    break
+            else:
+                jt = b.jmp.type
+                if Jjf <= jt <= Jjf + NCmp - 1:
+                    readers.append(jt - Jjf)
+                    if len(readers) == 1 and readers[0] in (Cieq, Cine, Cislt, Cisge):
+                        readers = None
+            if not readers:
+                continue
+            for j in reversed(ins[:n]):
+                if j.op == Onop:
+                    continue
+                if req(j.to, i.arg[0]):
+                    if j.cls == i.cls and j.op in (Oadd, Osub, Oand) and isreg(j.arg[0]):
+                        wide = {Cieq, Cine}
+                        if j.op == Oand:
+                            wide |= {Cislt, Cisge, Cisgt, Cisle}
+                        if all(c in wide for c in readers):
+                            j.op = {Oadd: D.Oaadds, Osub: D.Oasubs, Oand: D.Oaands}[j.op]
+                            i.op = Onop
+                    break
+                if j.op not in _SAFEFLAGS and not isload(j.op) and not isstore(j.op):
+                    break
+                a = j.arg[0 if isload(j.op) else 1] if isload(j.op) or isstore(j.op) else R
+                if rtype(a) == RMem and e.fn.mem[rval(a)].scale < 0 and req(e.fn.mem[rval(a)].base, i.arg[0]):
+                    break
+        b = b.link
 def _dropflags(e):
     b = e.fn.start
     while b:
@@ -3127,6 +3366,131 @@ def _dropflags(e):
                     and _cbz(p.ins[:p.nins], p.jmp.type, e)[1] is None:
                 first.op = Onop
         b = b.link
+JT_MINCASES = 16
+JT_MINDENSITY = 0.1
+JT_MAXSIZE = 4096
+VT_MINCASES = 4
+VT_MAXSIZE = 256
+_njt = 0
+def _switchnode(fn, b, reg, k, lo, hi, cases, leaves, nodes):
+    if lo == hi:
+        cases[lo] = b
+        return True
+    live = [i for i in b.ins[:b.nins] if i.op not in (Onop, D.Odbgloc)]
+    i = live[-1] if live else None
+    isnode = (b.npred == 1 and len(live) == 1 and i.op == Oacmp and req(i.arg[0], reg) and i.cls == k
+              and rtype(i.arg[1]) == RCon and e_con(fn, i.arg[1]) is not None
+              and b.jmp.type in (Jjf + Cieq, Jjf + Cine))
+    if not isnode:
+        leaves.add(b)
+        return True
+    c = e_con(fn, i.arg[1])
+    if not lo <= c <= hi or c in cases:
+        return False
+    eq, ne = (b.s1, b.s2) if b.jmp.type == Jjf + Cieq else (b.s2, b.s1)
+    cases[c] = eq
+    nodes.add(b)
+    if ne.npred == 1 and not any(x.op not in (Onop, D.Odbgloc) for x in ne.ins[:ne.nins]) \\
+            and ne.jmp.type == Jjf + Ciult:
+        nodes.add(ne)
+        return (_switchnode(fn, ne.s1, reg, k, lo, c - 1, cases, leaves, nodes)
+                and _switchnode(fn, ne.s2, reg, k, c + 1, hi, cases, leaves, nodes))
+    return _switchnode(fn, ne, reg, k, lo, hi, cases, leaves, nodes)
+def _constcase(c):
+    live = [x for x in c.ins[:c.nins] if x.op not in (Onop, D.Odbgloc)]
+    if len(live) != 1 or live[0].op != Ocopy or not isreg(live[0].to) or c.jmp.type != Jjmp \\
+            or rtype(live[0].arg[0]) != RCon or KBASE(live[0].cls) != 0:
+        return None
+    return live[0].to, live[0].cls, live[0].arg[0], c.s1
+def _valuetable(fn, cases, d):
+    size = max(cases) + 1
+    if len(cases) < VT_MINCASES or size > VT_MAXSIZE or len(cases) * 10 < size * 4:
+        return None
+    shapes = {v: _constcase(c) for v, c in cases.items()}
+    first = next(iter(shapes.values()))
+    if first is None:
+        return None
+    to, k, _, join = first
+    for s in shapes.values():
+        if s is None or not req(s[0], to) or s[1] != k or s[3] is not join:
+            return None
+    def bits(r):
+        c = fn.con[rval(r)]
+        return c.i if c.type == CBits else None
+    values = {v: bits(s[2]) for v, s in shapes.items()}
+    if None in values.values():
+        return None
+    dv = None
+    ds = _constcase(d)
+    if ds is not None and req(ds[0], to) and ds[1] == k and ds[3] is join:
+        dv = bits(ds[2])
+    if dv is None and len(cases) != size:
+        return None
+    mask = (1 << (64 if k == Kl else 32)) - 1
+    gone = {c for c in cases.values() if sum(1 for x in cases.values() if x is c) == c.npred}
+    return to, k, [values.get(v, dv) & mask for v in range(size)], join, gone
+def e_con(fn, r):
+    c = fn.con[rval(r)]
+    return c.i if c.type == CBits and c.i >= 0 else None
+def _jumptables(e):
+    fn = e.fn
+    tables = {}
+    dead = set()
+    b = fn.start
+    while b:
+        n = b.nins
+        while n > 0 and b.ins[n - 1].op in (Onop, D.Odbgloc):
+            n -= 1
+        i = b.ins[n - 1] if n else None
+        if b not in dead and i is not None and i.op == Oacmp and isreg(i.arg[0]) and rtype(i.arg[1]) == RCon \\
+                and e_con(fn, i.arg[1]) is not None and b.jmp.type in (Jjf + Cieq, Jjf + Cine):
+            cases, leaves, nodes = {}, set(), set()
+            top = (1 << (64 if i.cls == Kl else 32)) - 1
+            c = e_con(fn, i.arg[1])
+            eq, ne = (b.s1, b.s2) if b.jmp.type == Jjf + Cieq else (b.s2, b.s1)
+            cases[c] = eq
+            ok = True
+            if ne.npred == 1 and not any(x.op not in (Onop, D.Odbgloc) for x in ne.ins[:ne.nins]) \\
+                    and ne.jmp.type == Jjf + Ciult:
+                nodes.add(ne)
+                ok = (_switchnode(fn, ne.s1, i.arg[0], i.cls, 0, c - 1, cases, leaves, nodes)
+                      and _switchnode(fn, ne.s2, i.arg[0], i.cls, c + 1, top, cases, leaves, nodes))
+            else:
+                ok = _switchnode(fn, ne, i.arg[0], i.cls, 0, top, cases, leaves, nodes)
+            vt = _valuetable(fn, cases, next(iter(leaves))) if ok and len(leaves) == 1 else None
+            if vt is not None:
+                tables[b] = (n - 1, i.arg[0], i.cls, [next(iter(leaves)), vt[3]], next(iter(leaves)), vt)
+                dead |= nodes | vt[4]
+            elif ok and len(leaves) == 1 and len(cases) >= JT_MINCASES:
+                size = max(cases) + 1
+                if size <= JT_MAXSIZE and len(cases) >= JT_MINDENSITY * size and size - 1 <= 4095:
+                    d = next(iter(leaves))
+                    tables[b] = (n - 1, i.arg[0], i.cls, [cases.get(v, d) for v in range(size)], d, None)
+                    dead |= nodes
+        b = b.link
+    return tables, dead
+def _emitjumptable(root, jt, e):
+    global _njt
+    T = D.T
+    _, reg, k, table, default, values = jt
+    _njt += 1
+    name = "\\"%sjt%d\\"" % (T.asloc, _njt)
+    r = rname(rval(reg), k)
+    e.f.write("\\tcmp\\t%s, #%d\\n" % (r, (len(values[2]) if values is not None else len(table)) - 1))
+    e.f.write("\\tb.hi\\t%s%d\\n" % (T.asloc, _id0 + default.id))
+    c = Con(CAddr)
+    c.sym.id = intern(name)
+    loadaddr(c, "x17", e)
+    if values is not None:
+        to, cls, data, join, _ = values
+        sh = 3 if cls == Kl else 2
+        e.f.write("\\tldr\\t%s, [x17, %s]\\n" % (rname(rval(to), cls), "%s, uxtw #%d" % (r, sh) if k == Kw
+                                                else "%s, lsl #%d" % (r, sh)))
+        e.f.write("\\tb\\t%s%d\\n" % (T.asloc, _id0 + join.id))
+        return name, data, 8 if cls == Kl else 4
+    e.f.write("\\tldr\\tx17, [x17, %s]\\n" % ("%s, uxtw #3" % r if k == Kw else "%s, lsl #3" % r))
+    e.f.write("\\tbr\\tx17\\n")
+    return name, table, 0
 def _siblingcall(b, e):
     fn = e.fn
     if not _ext.isel or fn.slot or fn.vararg or fn.dynalloc:
@@ -3230,14 +3594,31 @@ def arm64_emitfn(fn, out):
             nins += b.nins + 1
             b = b.link
         e.tbzok = nins < 1500
+        _writeback(e)
+        _flagsfrom(e)
         _dropflags(e)
+        tables, deadblocks = _jumptables(e)
+        for jt in tables.values():
+            dlbl = set(dlbl) | set(jt[3]) | {jt[4]}
     else:
         e.tbzok = False
+        tables, deadblocks = {}, ()
+    emitted = []
     lbl = 0
     b = e.fn.start
     while b:
+        if b in deadblocks:
+            lbl = 1
+            b = b.link
+            continue
         if lbl or b.npred > 1 or b in dlbl:
             e.f.write("%s%d:\\n" % (T.asloc, _id0 + b.id))
+        if b in tables:
+            emitinsl(b.ins[:tables[b][0]], e)
+            emitted.append(_emitjumptable(b, tables[b], e))
+            lbl = 1
+            b = b.link
+            continue
         jt = b.jmp.type
         body, cz = b.ins[:b.nins], None
         sib = _siblingcall(b, e)
@@ -3326,6 +3707,15 @@ def arm64_emitfn(fn, out):
             else:
                 lbl = 0
         b = b.link
+    for name, table, valsize in emitted:
+        e.f.write(".section __DATA,__const\\n" if T.apple else ".section .rodata\\n")
+        e.f.write(".p2align 3\\n%s:\\n" % name)
+        for t in table:
+            if valsize:
+                e.f.write("\\t%s\\t%d\\n" % (".quad" if valsize == 8 else ".int", t))
+            else:
+                e.f.write("\\t.quad\\t%s%d\\n" % (T.asloc, _id0 + t.id))
+        e.f.write(".text\\n")
     _id0 += e.fn.nblk
     if not T.apple:
         elf_emitfnfin(fn.name, out)
@@ -3345,7 +3735,7 @@ from ..defs import (R, RTmp, RCon, NIns, M64, Ins, Con, Mem, CBits, CAddr, SExt,
 from ..util import (err, newtmp, newcon, getcon, chuse, emit, emiti, idup, intern, iscmp,
                     cmpop, salloc, argcls, vgrow)
 from ..parse import printfn
-from ..defs import Tmp0, Oextsw, Oextuw, Osar, Oshr, Cieq, Cine, Kd
+from ..defs import Tmp0, Oextsw, Oextuw, Oextub, Oextuh, Osar, Oshr, Cieq, Cine, Kd, req
 from .regs import R0
 from .. import ext as _ext
 (Iother, Iplo12, Iphi12, Iplo24, Inlo12, Inhi12, Inlo24) = range(7)
@@ -3714,6 +4104,18 @@ def selfma(i, fn):
     fixarg(bc, 0, k, 0, fn)
     fixarg(bc, 1, k, 0, fn)
     m.base, m.index = bc
+def _widening(di, fn):
+    if di.cls != Kl:
+        return None
+    e0, e1 = _only(di.arg[0], fn), _only(di.arg[1], fn)
+    if e0 is None or e1 is None or e0[1].op != e1[1].op or e0[1].op not in (Oextsw, Oextuw) \\
+            or not _plain(e0[1].arg[0], fn) or not _plain(e1[1].arg[0], fn):
+        return None
+    x, y = e0[1].arg[0], e1[1].arg[0]
+    kind = 1 if e0[1].op == Oextsw else 2
+    e0[1].set(Ins(Onop))
+    e1[1].set(Ins(Onop))
+    return kind, x, y
 def selmadd(i, fn):
     for n in ((1, 0) if i.op == Oadd else (1,)):
         m = i.arg[n]
@@ -3726,12 +4128,14 @@ def selmadd(i, fn):
         di = found[1]
         if any(rtype(a) == RCon and log2p(fn.con[rval(a)].i) >= 0 for a in di.arg):
             continue
-        ab = list(di.arg)
+        wide = _widening(di, fn)
+        ab = list(di.arg) if wide is None else [wide[1], wide[2]]
         di.set(Ins(Onop))
         x = Mem()
         fn.nmem += 1
         vgrow(fn.mem, fn.nmem)
         fn.mem[fn.nmem - 1] = x
+        x.scale = 0 if wide is None else wide[0]
         emit(D.Oamadd if i.op == Oadd else D.Oamsub, i.cls, i.to, c, MEM(fn.nmem - 1))
         iarg = D.insb[D.curi].arg
         fixarg(iarg, 0, i.cls, 0, fn)
@@ -3817,6 +4221,83 @@ def selalu(i, fn):
             _aalu(i, a, ALU[i.op], how, n, x, fn)
             return True
     return False
+_DEF32 = frozenset((Oadd, Osub, Oneg, Omul, Oand, Oor, Oxor, Oshl, Oshr, Osar, Oextub, Oextuh, D.Oextsb, D.Oextsh,
+                    D.Oloadub, D.Oloadsb, D.Oloaduh, D.Oloadsh, D.Oloadsw, D.Oloaduw, Oload))
+def _insertfield(r, lsb, width, k, w, fn):
+    d = _only(r, fn)
+    low = (1 << width) - 1
+    d = d[1] if d is not None else None
+    if d is None or (d.cls != k and d.op not in (Oextub, Oextuh)):
+        return None
+    full = (1 << w) - 1
+    if d.op == Oshl and _conbits(d.arg[1], fn) == lsb and lsb and _plain(d.arg[0], fn):
+        if lsb + width == w:
+            return d.arg[0], 0, [d]
+        inner = _only(d.arg[0], fn)
+        inner = inner[1] if inner is not None else None
+        if inner is None:
+            return None
+        if inner.op == Oand and inner.cls == k and (_conbits(inner.arg[1], fn) or 0) & full == low \\
+                and _plain(inner.arg[0], fn):
+            return inner.arg[0], 0, [d, inner]
+        if (inner.op == Oextub and width == 8 or inner.op == Oextuh and width == 16) and _plain(inner.arg[0], fn):
+            return inner.arg[0], 0, [d, inner]
+        return None
+    if d.op == Oand and (_conbits(d.arg[1], fn) or 0) & full == low << lsb and _plain(d.arg[0], fn):
+        inner = _only(d.arg[0], fn)
+        inner = inner[1] if inner is not None else None
+        if inner is not None and inner.cls == k and _plain(inner.arg[0], fn):
+            if inner.op == Oshl and _conbits(inner.arg[1], fn) == lsb and lsb:
+                return inner.arg[0], 0, [d, inner]
+            s = _conbits(inner.arg[1], fn)
+            if inner.op in (Oshr, Osar) and not lsb and s is not None and 0 < s and s + width <= w:
+                return inner.arg[0], s, [d, inner]
+        return (d.arg[0], 0, [d]) if not lsb else None
+    if not lsb and (d.op == Oextub and width == 8 or d.op == Oextuh and width == 16) and _plain(d.arg[0], fn):
+        return d.arg[0], 0, [d]
+    if not lsb and d.op == Oshr and _conbits(d.arg[1], fn) == w - width and _plain(d.arg[0], fn):
+        return d.arg[0], w - width, [d]
+    return None
+def selbfi(i, fn):
+    k = i.cls
+    w = 64 if k == Kl else 32
+    for l, r in ((i.arg[0], i.arg[1]), (i.arg[1], i.arg[0])):
+        found = _only(l, fn)
+        if found is None or found[1].op != Oand or found[1].cls != k or not _plain(found[1].arg[0], fn):
+            continue
+        keep = _conbits(found[1].arg[1], fn)
+        if keep is None:
+            continue
+        field = ~keep & ((1 << w) - 1)
+        if not field:
+            continue
+        lsb = 0
+        while not field >> lsb & 1:
+            lsb += 1
+        field >>= lsb
+        if field & (field + 1):
+            continue
+        width = 0
+        while field >> width:
+            width += 1
+        got = _insertfield(r, lsb, width, k, w, fn)
+        if got is None:
+            continue
+        b, blsb, dead = got
+        a = found[1].arg[0]
+        for d in dead + [found[1]]:
+            d.set(Ins(Onop))
+        m = Mem()
+        fn.nmem += 1
+        vgrow(fn.mem, fn.nmem)
+        fn.mem[fn.nmem - 1] = m
+        m.base = b
+        m.scale = blsb
+        m.offset.type = CBits
+        m.offset.i = lsb | width << 8
+        emit(D.Oabfi, k, i.to, a, MEM(fn.nmem - 1))
+        return True
+    return False
 def selbits(i, fn):
     k = i.cls
     w = 64 if k == Kl else 32
@@ -3841,6 +4322,16 @@ def selbits(i, fn):
         found[1].set(Ins(Onop))
         emit(D.Oaubfx, k, i.to, x, getcon(lsb | width << 8, fn))
         return True
+    if i.op == Oshr and k == Kw:
+        b = _conbits(i.arg[1], fn)
+        found = _only(i.arg[0], fn)
+        if b is not None and found is not None and found[1].op in (Oextub, Oextuh) and _plain(found[1].arg[0], fn):
+            bits = 8 if found[1].op == Oextub else 16
+            if 0 < b < bits:
+                x = found[1].arg[0]
+                found[1].set(Ins(Onop))
+                emit(D.Oaubfx, k, i.to, x, getcon(b | (bits - b) << 8, fn))
+                return True
     if i.op in (Osar, Oshr):
         b = _conbits(i.arg[1], fn)
         found = _only(i.arg[0], fn)
@@ -3855,6 +4346,8 @@ def selbits(i, fn):
         emit(D.Oasbfx if i.op == Osar else D.Oaubfx, k, i.to, x, getcon((b - a) | (w - b) << 8, fn))
         return True
     if i.op == Oor:
+        if selbfi(i, fn):
+            return True
         for l, r in ((i.arg[0], i.arg[1]), (i.arg[1], i.arg[0])):
             fl, fr = _only(l, fn), _only(r, fn)
             if fl is None or fr is None or fl[1].op != Oshl or fr[1].op != Oshr \\
@@ -3908,6 +4401,8 @@ def selmulcon(i, fn):
     while not (n >> tz) & 1:
         tz += 1
     m = n >> tz
+    if m == 1:
+        return False
     up, down = log2p(m - 1), log2p(m + 1)
     if up <= 0 and down <= 0:
         return False
@@ -4035,6 +4530,11 @@ def _cselform(a, b, k, fn):
             di.set(Ins(Onop))
             chuse(y, +1, fn)
             return y, y, kind, inv
+    m = 0xffffffff if k == Kw else M64
+    if _conbits(b, fn) == 0 and (_conbits(a, fn) or 0) & m == m:
+        return CON_Z, CON_Z, CSINV, 1
+    if _conbits(a, fn) == 0 and (_conbits(b, fn) or 0) & m == m:
+        return CON_Z, CON_Z, CSINV, 0
     if _conbits(b, fn) == 0:
         return CON_Z, a, CSEL, 1
     return a, b, CSEL, 0
@@ -4058,7 +4558,8 @@ def selcsel(i, fn):
     if _conbits(a, fn) != 0 or KBASE(k) == 1:
         fixarg(iarg, 0, k, 0, fn)
     b = [b0]
-    fixarg(b, 0, k, 0, fn)
+    if _conbits(b0, fn) != 0 or KBASE(k) == 1:
+        fixarg(b, 0, k, 0, fn)
     x.base = b[0]
     if cm:
         ck, cc = cm
@@ -4068,9 +4569,13 @@ def selcsel(i, fn):
         if selcmp(args, ck, fn):
             cc = cmpop(cc)
     else:
-        cc = Cine
-        chuse(c, +1, fn)
-        selcmp([c, CON_Z], Kw, fn)
+        cc = None
+        if cd is not None and cd[1].op in (Oand, Oor) and cd[1].cls == Kw and fn.tmp[rval(c)].nuse == 1:
+            cc = _ccmp(selblk, cd[1], fn, keep=True)
+        if cc is None:
+            cc = Cine
+            chuse(c, +1, fn)
+            selcmp([c, CON_Z], Kw, fn)
     x.offset.i = cc
 def callable(r, fn):
     if rtype(r) == RTmp:
@@ -4116,6 +4621,13 @@ def sel(i, fn):
             found = _defin(c, selpos)
             if found is not None and iscmp(found[1].op):
                 _sweep(c, found[0], fn)
+            elif found is not None and found[1].op in (Oand, Oor) and fn.tmp[rval(c)].nuse == 0:
+                parts = list(found[1].arg)
+                _sweep(c, found[0], fn)
+                for r in parts:
+                    d = _defin(r, found[0]) if rtype(r) == RTmp else None
+                    if d is not None and iscmp(d[1].op):
+                        _sweep(r, d[0], fn)
         return
     if i.op == Ofma0:
         return
@@ -4125,10 +4637,23 @@ def sel(i, fn):
             return
         if i.op == Oadd and KBASE(i.cls) == 0 and selcincadd(i, fn):
             return
-        if i.op == Omul and KBASE(i.cls) == 0 and selmulcon(i, fn):
-            return
+        if i.op == Omul and KBASE(i.cls) == 0:
+            if selmulcon(i, fn):
+                return
+            wide = _widening(i, fn)
+            if wide is not None:
+                emit(D.Oasmull if wide[0] == 1 else D.Oaumull, Kl, i.to, wide[1], wide[2])
+                return
         if i.op == Oshl and KBASE(i.cls) == 0 and selubfiz(i, fn):
             return
+        if i.op in (Oand, Oor) and i.cls == Kw:
+            emit(Oflag, Kw, i.to, R, R)
+            flag = D.insb[D.curi]
+            cc = _ccmp(selblk, i, fn)
+            if cc is not None:
+                flag.op += cc
+                return
+            D.curi += 1
         if i.op in ALU and KBASE(i.cls) == 0:
             if selbits(i, fn) or selalu(i, fn):
                 return
@@ -4139,6 +4664,10 @@ def sel(i, fn):
         elif i.op in _EXTLOAD and KBASE(i.cls) == 0 and (i.cls == Kl or i.op not in (Oextsw, Oextuw)) \\
                 and selextload(i, fn):
             return
+        if i.op == Oextuw and i.cls == Kl and _plain(i.arg[0], fn):
+            found = _defin(i.arg[0], selpos)
+            if found is not None and found[1].cls == Kw and found[1].op in _DEF32:
+                i.op = Ocopy
         if isstore(i.op) and _conbits(i.arg[0], fn) == 0:
             if i.op == Ostores:
                 i.op = Ostorew
@@ -4166,7 +4695,9 @@ def sel(i, fn):
                 immarg = True
         elif i.op in (Oand, Oor, Oxor):
             n = c.i
-            if i.cls == Kl and ((n >> 24) or (n & ~0xfff) == 0) \\
+            if _ext.isel:
+                immarg = bool(arm64_logimm(n, i.cls))
+            elif i.cls == Kl and ((n >> 24) or (n & ~0xfff) == 0) \\
                     and arm64_logimm(n, Kl):
                 immarg = True
         elif i.op == Omul:
@@ -4192,6 +4723,65 @@ def sel(i, fn):
     iarg = D.insb[D.curi].arg
     fixarg(iarg, 0, argcls(i, 0), 0, fn)
     fixarg(iarg, 1, argcls(i, 1), 0, fn)
+_FALSEFLAGS = {D.Cieq: 0, D.Cine: 4, D.Cisge: 8, D.Cislt: 0, D.Cisgt: 4, D.Cisle: 0,
+               D.Ciuge: 0, D.Ciult: 2, D.Ciugt: 0, D.Ciule: 2}
+_NZCVTRUE = {D.Cieq: 4, D.Cine: 0, D.Cisge: 0, D.Cislt: 8, D.Cisgt: 0, D.Cisle: 4,
+             D.Ciuge: 2, D.Ciult: 0, D.Ciugt: 2, D.Ciule: 4}
+def _ccmp(b, ir, fn, keep=False):
+    op = ir.op
+    def cmpdef(r):
+        if not _plain(r, fn) or fn.tmp[rval(r)].nuse != 1:
+            return None
+        for n in range(b.nins):
+            if b.ins[n].to == r:
+                return b.ins[n] if iscmp(b.ins[n].op) else None
+        return None
+    d0, d1 = cmpdef(ir.arg[0]), cmpdef(ir.arg[1])
+    if d0 is None or d1 is None:
+        return None
+    c0, c1 = iscmp(d0.op), iscmp(d1.op)
+    if KBASE(c1[0]) != 0:
+        d0, d1, c0, c1 = d1, d0, c1, c0
+    if KBASE(c1[0]) != 0:
+        return None
+    k, cc1 = c1
+    a, y = d1.arg
+    if rtype(a) == RCon:
+        a, y = y, a
+        cc1 = cmpop(cc1)
+    if not _plain(a, fn):
+        return None
+    n = _conbits(y, fn)
+    if n is not None and not 0 <= (n & M64 if k == Kl else n & 0xffffffff) <= 31:
+        n = None
+    if n is None and not _plain(y, fn):
+        return None
+    m = Mem()
+    fn.nmem += 1
+    vgrow(fn.mem, fn.nmem)
+    fn.mem[fn.nmem - 1] = m
+    m.offset.type = CBits
+    if n is not None:
+        m.base = R
+        m.offset.i = n & 31
+    else:
+        m.base = y
+    args0 = list(d0.arg)
+    cc0 = c0[1]
+    emit(D.Oaccmp, k, R, a, MEM(fn.nmem - 1))
+    if selcmp(args0, c0[0], fn):
+        cc0 = cmpop(cc0)
+    if op == Oand:
+        m.scale = _FALSEFLAGS[cc1] | cc0 << 4
+    else:
+        m.scale = _NZCVTRUE[cc1] | cc0 << 4 | 1 << 12
+    if keep:
+        for r in list(d0.arg) + list(d1.arg):
+            chuse(r, +1, fn)
+    else:
+        d0.set(Ins(Onop))
+        d1.set(Ins(Onop))
+    return cc1
 def _tstjump(b, r, k, cc, fn):
     if not _plain(r, fn) or fn.tmp[rval(r)].nuse != 1:
         return False
@@ -4232,6 +4822,12 @@ def seljmp(b, fn):
             break
     cm = iscmp(ir.op) if ir is not None and use == 1 else None
     if _ext.isel and ir is not None and use == 1:
+        if ir.op in (Oand, Oor) and ir.cls == Kw:
+            cc = _ccmp(b, ir, fn)
+            if cc is not None:
+                ir.set(Ins(Onop))
+                b.jmp.type = Jjf + cc
+                return
         if ir.op == Oand and ir.cls == Kw and _tstjump(b, r, Kw, Cine, fn):
             return
         if cm and cm[1] in (Cieq, Cine) and KBASE(cm[0]) == 0 and _conbits(ir.arg[1], fn) == 0 \\
@@ -4247,6 +4843,35 @@ def seljmp(b, fn):
     else:
         selcmp([r, CON_Z], Kw, fn)
         b.jmp.type = Jjfine
+def _reads(i, r, fn):
+    for a in i.arg:
+        if req(a, r):
+            return True
+        if rtype(a) == D.RMem and (req(fn.mem[rval(a)].base, r) or req(fn.mem[rval(a)].index, r)):
+            return True
+    return False
+def sinkinc(fn):
+    b = fn.start
+    while b:
+        n = b.nins - 2
+        while n >= 0:
+            i = b.ins[n]
+            c = _conbits(i.arg[1], fn) if i.op in (Oadd, Osub) and i.cls == Kl else None
+            if c is None or not -256 <= c <= 255 or not _plain(i.arg[0], fn) or not _plain(i.to, fn):
+                n -= 1
+                continue
+            p, q = i.arg[0], i.to
+            last = None
+            for m in range(n + 1, b.nins):
+                j = b.ins[m]
+                if _reads(j, q, fn):
+                    break
+                if D.isload(j.op) and req(j.arg[0], p) or D.isstore(j.op) and req(j.arg[1], p):
+                    last = m
+            if last is not None:
+                b.ins[n:last + 1] = b.ins[n + 1:last + 1] + [b.ins[n]]
+            n -= 1
+        b = b.link
 def arm64_isel(fn):
     global nfcon, selblk, selpos
     b = fn.start
@@ -4297,6 +4922,8 @@ def arm64_isel(fn):
         if b is fn.start:
             break
         b = b.link
+    if _ext.isel:
+        sinkinc(fn)
     if _ext.ldp and not fn.hasvolatile:
         from .pair import schedule
         schedule(fn)
@@ -5201,9 +5828,13 @@ from .defs import KBASE
 from .cfg import dom
 from .gcm import pinned
 from .gvn import replaceuses
-from .util import newtmp, getcon
+from .util import newtmp, getcon, chuse, iscmp
+from .ssa import filluse
 _DIVOPS = (D.Odiv, D.Orem, D.Oudiv, D.Ourem)
 _MULS = (D.Omul, D.Osmulh, D.Oumulh)
+_LOGIC = (D.Oand, D.Oor, D.Oxor)
+MAXHOISTED = 16
+_ARITH = (D.Oadd, D.Osub) + _LOGIC
 def nload(fn):
     n = 0
     b = fn.start
@@ -5357,30 +5988,418 @@ def _bigcon(c):
     inv = sum(1 for k in range(0, 64, 16) if (~n >> k) & 0xffff)
     return min(parts, inv) > 1
 def hoistcons(fn):
+    from .arm64.isel import arm64_logimm
     regs = {}
     for b in fn.rpo[1:fn.nblk]:
         if b.loop <= 1:
             continue
         for i in b.ins[:b.nins]:
-            if i.op not in _MULS or KBASE(i.cls) != 0:
+            if D.isload(i.op) or D.isstore(i.op) or i.op == D.Oadd:
+                for n in range(2):
+                    r = i.arg[n]
+                    if D.rtype(r) != D.RCon:
+                        continue
+                    c = fn.con[r & D.VMASK]
+                    if c.type == D.CAddr and c.sym.type in (D.SGlo, D.SExt) and (r, D.Kl) not in regs \\
+                            and len(regs) < MAXHOISTED:
+                        regs[(r, D.Kl)] = newtmp('con', D.Kl, fn)
+                    if (r, D.Kl) in regs and c.type == D.CAddr:
+                        i.arg[n] = regs[(r, D.Kl)]
+            if KBASE(i.cls) != 0 or not (i.op in _MULS or i.op in _ARITH or D.Ocmpw <= i.op <= D.Ocmpw1
+                                         or D.Ocmpl <= i.op <= D.Ocmpl1):
                 continue
             for n in range(2):
                 r = i.arg[n]
                 if D.rtype(r) != D.RCon:
                     continue
                 c = fn.con[r & D.VMASK]
-                if c.type != D.CBits or not _bigcon(c):
+                if c.type != D.CBits or not _bigcon(c) or (i.op in _LOGIC and arm64_logimm(c.i, i.cls)):
                     continue
-                k = (r, i.cls)
+                cc = iscmp(i.op)
+                k = (r, cc[0] if cc else i.cls)
                 if k not in regs:
-                    regs[k] = newtmp('con', i.cls, fn)
+                    regs[k] = newtmp('con', k[1], fn)
                 i.arg[n] = regs[k]
     if not regs:
         return False
+    for b in fn.rpo[1:fn.nblk]:
+        if b.loop > 1:
+            continue
+        for i in b.ins[:b.nins]:
+            if D.isload(i.op) or D.isstore(i.op) or i.op == D.Oadd:
+                for n in range(2):
+                    r = i.arg[n]
+                    if D.rtype(r) == D.RCon and (r, D.Kl) in regs and fn.con[r & D.VMASK].type == D.CAddr:
+                        i.arg[n] = regs[(r, D.Kl)]
     st = fn.start
     st.ins = st.ins[:st.nins] + [D.Ins(D.Ocopy, k, t, r, D.R) for (r, k), t in regs.items()]
     st.nins = len(st.ins)
     return True
+def _adddef(fn, r, k):
+    if D.rtype(r) != D.RTmp or (r & D.VMASK) < D.Tmp0:
+        return None
+    t = fn.tmp[r & D.VMASK]
+    d = t.def_
+    if d is None or d.cls != k or t.nuse != 1 or (d.op != D.Oadd and not (
+            d.op == D.Osub and D.rtype(d.arg[1]) == D.RCon)):
+        return None
+    return d
+def _conof(fn, r):
+    if D.rtype(r) == D.RCon and fn.con[r & D.VMASK].type == D.CBits:
+        return fn.con[r & D.VMASK].i
+    return None
+def _sum(fn, r, k, leaves, depth=0):
+    c = _conof(fn, r)
+    if c is not None:
+        return c
+    d = _adddef(fn, r, k) if depth < 8 else None
+    if d is None:
+        leaves.append(r)
+        return 0
+    if d.op == D.Osub:
+        return _sum(fn, d.arg[0], k, leaves, depth + 1) - _conof(fn, d.arg[1])
+    return _sum(fn, d.arg[0], k, leaves, depth + 1) + _sum(fn, d.arg[1], k, leaves, depth + 1)
+def _distribute(fn, i, k, out):
+    d = []
+    for r in i.arg:
+        x = fn.tmp[r & D.VMASK].def_ if D.rtype(r) == D.RTmp and (r & D.VMASK) >= D.Tmp0 else None
+        if x is None or x.op != D.Omul or x.cls != k or fn.tmp[r & D.VMASK].nuse != 1:
+            return False
+        d.append(x)
+    for p in (0, 1):
+        for q in (0, 1):
+            if d[0].arg[p] == d[1].arg[q] and D.rtype(d[0].arg[p]) == D.RTmp:
+                u, v = d[0].arg[p ^ 1], d[1].arg[q ^ 1]
+                if D.rtype(u) == D.RCon and D.rtype(v) == D.RCon:
+                    return False
+                t = newtmp('ra', k, fn)
+                x = D.Ins(i.op, k, t, u, v)
+                out.append(x)
+                fn.tmp[t & D.VMASK].def_ = x
+                fn.tmp[t & D.VMASK].nuse = 1
+                i.op, i.arg[0], i.arg[1] = D.Omul, d[0].arg[p], t
+                return True
+    return False
+def ranges(fn):
+    changed = False
+    for b in fn.rpo[:fn.nblk]:
+        if not any(i.op in (D.Oand, D.Oor) and i.cls == D.Kw for i in b.ins[:b.nins]):
+            continue
+        out = []
+        for i in b.ins[:b.nins]:
+            got = _range(fn, i) if i.op in (D.Oand, D.Oor) and i.cls == D.Kw else None
+            if got is not None:
+                out += got
+                changed = True
+            else:
+                out.append(i)
+        b.ins = out
+        b.nins = len(out)
+    return changed
+def _bound(fn, r):
+    if D.rtype(r) != D.RTmp or (r & D.VMASK) < D.Tmp0 or fn.tmp[r & D.VMASK].nuse != 1:
+        return None
+    d = fn.tmp[r & D.VMASK].def_
+    cm = iscmp(d.op) if d is not None else None
+    if cm is None or KBASE(cm[0]) != 0:
+        return None
+    c = _conof(fn, d.arg[1])
+    if c is None or D.rtype(d.arg[0]) != D.RTmp:
+        return None
+    return d.arg[0], cm[0], cm[1], c
+def _range(fn, i):
+    a, c = _bound(fn, i.arg[0]), _bound(fn, i.arg[1])
+    if a is None or c is None or a[0] != c[0] or a[1] != c[1]:
+        return None
+    x, k = a[0], a[1]
+    w = 64 if k == D.Kl else 32
+    full = (1 << w) - 1
+    if i.op == D.Oor and a[2] == D.Cieq and c[2] == D.Cieq:
+        lo, hi = sorted((a[3] & full, c[3] & full))
+        if hi == lo + 1:
+            return _inrange(fn, i, x, k, lo, hi, False, D.Ciule)
+        m = lo ^ hi
+        if m & (m - 1) == 0 and m:
+            t = newtmp('rg', k, fn)
+            return [D.Ins(D.Oor, k, t, x, getcon(m, fn)), D.Ins(_cmpop(k, D.Cieq), D.Kw, i.to, t, getcon(hi | m, fn))]
+        return None
+    if a[2] not in _BOUNDS or c[2] not in _BOUNDS or (a[2] in _SIGNED) != (c[2] in _SIGNED):
+        return None
+    signed = a[2] in _SIGNED
+    lo = hi = None
+    for cc, n in ((a[2], a[3]), (c[2], c[3])):
+        n = _sign(n, w) if signed else n & full
+        low, by = _BOUNDS[cc][i.op == D.Oor]
+        if low:
+            lo = n + by
+        else:
+            hi = n + by
+    if lo is None or hi is None or lo > hi:
+        return None
+    if (signed and not (-(1 << (w - 1)) <= lo and hi < 1 << (w - 1))) or (not signed and not (0 <= lo and hi <= full)):
+        return None
+    return _inrange(fn, i, x, k, lo, hi, i.op == D.Oor, D.Ciule)
+def _sign(v, w):
+    v &= (1 << w) - 1
+    return v - (1 << w) if v >> (w - 1) else v
+_BOUNDS = {D.Cisge: ((True, 0), (False, -1)), D.Cisgt: ((True, 1), (False, 0)),
+           D.Cisle: ((False, 0), (True, 1)), D.Cislt: ((False, -1), (True, 0)),
+           D.Ciuge: ((True, 0), (False, -1)), D.Ciugt: ((True, 1), (False, 0)),
+           D.Ciule: ((False, 0), (True, 1)), D.Ciult: ((False, -1), (True, 0))}
+_SIGNED = frozenset((D.Cisge, D.Cisgt, D.Cisle, D.Cislt))
+def _cmpop(k, cc):
+    return (D.Ocmpw if k == D.Kw else D.Ocmpl) + cc
+def _inrange(fn, i, x, k, lo, hi, out, cc):
+    w = 64 if k == D.Kl else 32
+    full = (1 << w) - 1
+    t = newtmp('rg', k, fn)
+    op = _cmpop(k, D.Ciugt if out else cc)
+    return [D.Ins(D.Osub, k, t, x, getcon(D.s64(lo & full), fn)),
+            D.Ins(op, D.Kw, i.to, t, getcon(D.s64((hi - lo) & full), fn))]
+def reassoc(fn):
+    changed = False
+    for b in fn.rpo[:fn.nblk]:
+        if not any(i.op in (D.Oadd, D.Omul, D.Oshl) and KBASE(i.cls) == 0 for i in b.ins[:b.nins]):
+            continue
+        out = []
+        for i in b.ins[:b.nins]:
+            k = i.cls
+            if KBASE(k) == 0 and i.op in (D.Omul, D.Oshl):
+                n = _conof(fn, i.arg[1])
+                d = _adddef(fn, i.arg[0], k)
+                c = _conof(fn, d.arg[1]) if d is not None else None
+                if n is not None and c is not None:
+                    if i.op == D.Oshl:
+                        n = 1 << (n & (63 if k == D.Kl else 31))
+                    if d.op == D.Osub:
+                        c = -c
+                    t = newtmp('ra', k, fn)
+                    x = D.Ins(i.op, k, t, d.arg[0], i.arg[1])
+                    out.append(x)
+                    fn.tmp[t & D.VMASK].def_ = x
+                    fn.tmp[t & D.VMASK].nuse = 1
+                    i.op = D.Oadd
+                    i.arg[0] = t
+                    i.arg[1] = getcon(D.s64(c * n), fn)
+                    changed = True
+            elif KBASE(k) == 0 and i.op in (D.Oadd, D.Osub) and _distribute(fn, i, k, out):
+                changed = True
+            elif KBASE(k) == 0 and i.op == D.Oadd:
+                nested = _adddef(fn, i.arg[0], k) or _adddef(fn, i.arg[1], k)
+                if nested is not None:
+                    leaves = []
+                    c = _sum(fn, i.arg[0], k, leaves) + _sum(fn, i.arg[1], k, leaves)
+                    leaves.sort()
+                    if len(leaves) >= 2 or c:
+                        r = leaves[0] if leaves else None
+                        for l in leaves[1:-1] if not c else leaves[1:]:
+                            t = newtmp('ra', k, fn)
+                            x = D.Ins(D.Oadd, k, t, r, l)
+                            out.append(x)
+                            fn.tmp[t & D.VMASK].def_ = x
+                            fn.tmp[t & D.VMASK].nuse = 1
+                            r = t
+                        if r is not None:
+                            i.arg[0] = r
+                            i.arg[1] = getcon(D.s64(c), fn) if c else leaves[-1]
+                            changed = True
+            out.append(i)
+        b.ins = out
+        b.nins = len(out)
+    return changed
+_BYTEDEAD = {D.Oor, D.Oshl, D.Oshr, D.Oand, D.Oadd, D.Oextub, D.Oextuh, D.Oextuw, D.Oextsw, D.Oloadub, D.Oloaduh, D.Oloadsw,
+             D.Oloaduw, D.Oload, D.Ocopy}
+def _byteof(fn, r, n, st):
+    st[0] -= 1
+    if st[0] < 0:
+        return None
+    if D.rtype(r) == D.RCon:
+        c = fn.con[D.rval(r)]
+        if c.type != D.CBits:
+            return None
+        return [0 if not c.i >> (8 * j) & 255 else None for j in range(n)]
+    if D.rtype(r) != D.RTmp or D.rval(r) < D.Tmp0:
+        return None
+    t = fn.tmp[D.rval(r)]
+    d = t.def_
+    width = 8 if t.cls == D.Kl else 4
+    leaf = [('v', r, j) if j < width else None for j in range(n)]
+    if d is None:
+        return leaf
+    op = d.op
+    if op == D.Ocopy:
+        return _byteof(fn, d.arg[0], n, st)
+    if op == D.Oor:
+        a = _byteof(fn, d.arg[0], n, st)
+        c = _byteof(fn, d.arg[1], n, st)
+        if a is None or c is None:
+            return leaf
+        out = []
+        for x, y in zip(a, c):
+            if x == 0:
+                out.append(y)
+            elif y == 0:
+                out.append(x)
+            else:
+                out.append(None)
+        return out
+    if op in (D.Oshl, D.Oshr) and D.rtype(d.arg[1]) == D.RCon:
+        s = _conof(fn, d.arg[1])
+        if s is None or s % 8 or not 0 <= s < width * 8:
+            return leaf
+        s //= 8
+        a = _byteof(fn, d.arg[0], width, st)
+        if a is None:
+            return leaf
+        if op == D.Oshl:
+            out = [0] * s + a[:width - s]
+        else:
+            out = a[s:] + [0] * s
+        return (out + [None] * n)[:n]
+    if op == D.Oand and _conof(fn, d.arg[1]) is not None:
+        m = _conof(fn, d.arg[1])
+        a = _byteof(fn, d.arg[0], width, st)
+        if a is None or any((m >> (8 * j) & 255) not in (0, 255) for j in range(width)):
+            return leaf
+        return ([x if m >> (8 * j) & 255 else 0 for j, x in enumerate(a)] + [None] * n)[:n]
+    if op in (D.Oextub, D.Oextuh, D.Oextuw, D.Oextsw):
+        src = {D.Oextub: 1, D.Oextuh: 2}.get(op, 4)
+        a = _byteof(fn, d.arg[0], src, st)
+        if a is None or (op == D.Oextsw and a[3] != 0):
+            return leaf
+        return ([a[j] if j < src else 0 for j in range(8)])[:n]
+    if (op in (D.Oloadub, D.Oloaduh, D.Oloaduw, D.Oload) or op == D.Oloadsw and d.cls == D.Kw) and KBASE(d.cls) == 0:
+        size = {D.Oloadub: 1, D.Oloaduh: 2, D.Oloaduw: 4, D.Oloadsw: 4}.get(op, width)
+        base, off = _baseoff(fn, d.arg[0])
+        if base is None:
+            return leaf
+        return ([('m', base, off + j, d, off) if j < size else 0 for j in range(8)])[:n]
+    return leaf
+def _baseoff(fn, r):
+    leaves = []
+    off = 0
+    todo = [r]
+    while todo:
+        x = todo.pop()
+        if D.rtype(x) == D.RCon:
+            c = fn.con[D.rval(x)]
+            if c.type == D.CBits:
+                off += c.i
+            elif c.type == D.CAddr and c.sym.type in (D.SGlo, D.SExt):
+                off += c.i
+                leaves.append(('s', c.sym.id))
+            else:
+                return None, 0
+        elif D.rtype(x) == D.RTmp and D.rval(x) >= D.Tmp0:
+            d = fn.tmp[D.rval(x)].def_
+            if d is not None and d.op == D.Oadd and d.cls == D.Kl and len(leaves) + len(todo) < 8:
+                todo += [d.arg[0], d.arg[1]]
+            else:
+                leaves.append(('t', D.rval(x)))
+        else:
+            return None, 0
+    return tuple(sorted(leaves)), off
+def _combineor(fn, b, n):
+    i = b.ins[n]
+    k = i.cls
+    size = 8 if k == D.Kl else 4
+    src = _byteof(fn, i.to, size, [64])
+    if src is None or None in src:
+        return None
+    w = size
+    while w and src[w - 1] == 0:
+        w -= 1
+    if w not in (2, 4, 8) or 0 in src[:w]:
+        return None
+    kinds = {s[0] for s in src[:w]}
+    if kinds == {'v'}:
+        x = src[0][1]
+        if any(s[1] != x or s[2] != w - 1 - j for j, s in enumerate(src[:w])):
+            return None
+        if w == 2 and k == D.Kw:
+            return n, [(D.Obswap16, D.Kw, i.to, x)]
+        if w == size and fn.tmp[D.rval(x)].cls == k:
+            return n, [(D.Obswap, k, i.to, x)]
+        return None
+    if kinds != {'m'} or len({id(s[3]) for s in src[:w]}) < 2 or any(s[1] != src[0][1] for s in src[:w]):
+        return None
+    lo = min(s[2] for s in src[:w])
+    if all(s[2] == lo + j for j, s in enumerate(src[:w])):
+        swap = False
+    elif all(s[2] == lo + w - 1 - j for j, s in enumerate(src[:w])):
+        swap = True
+    else:
+        return None
+    first = next(s for s in src[:w] if s[2] == lo)
+    addr, ahead = first[3].arg[0], lo - first[4]
+    pos = {}
+    for j, x in enumerate(b.ins[:n]):
+        pos[id(x)] = j
+    if any(id(s[3]) not in pos for s in src[:w]):
+        return None
+    at = [pos[id(s[3])] for s in src[:w]]
+    for x in b.ins[min(at):max(at)]:
+        if D.isstore(x.op) or x.op in (D.Ocall, D.Oblit0, D.Oblit1) or D.isvstore(x.op) or D.isvload(x.op):
+            return None
+    last = max(at) + 1
+    pre = []
+    if ahead:
+        a = newtmp('lb', D.Kl, fn)
+        pre = [(D.Oadd, D.Kl, a, addr, getcon(ahead, fn))]
+        addr = a
+    load = {2: D.Oloaduh, 4: D.Oload if k == D.Kw else D.Oloaduw, 8: D.Oload}[w]
+    if not swap:
+        return last, pre + [(load, k, i.to, addr)]
+    if w == size:
+        t = newtmp('lb', k, fn)
+        return last, pre + [(load, k, t, addr), (D.Obswap, k, i.to, t)]
+    t = newtmp('lb', D.Kw, fn)
+    if w == 2 and k == D.Kw:
+        return last, pre + [(D.Oloaduh, D.Kw, t, addr), (D.Obswap16, D.Kw, i.to, t)]
+    if w == 4:
+        u = newtmp('lb', D.Kw, fn)
+        return last, pre + [(D.Oload, D.Kw, t, addr), (D.Obswap, D.Kw, u, t), (D.Oextuw, D.Kl, i.to, u)]
+    return None
+def bytepatterns(fn):
+    changed = False
+    for b in fn.rpo[:fn.nblk]:
+        n = b.nins - 1
+        while n >= 0:
+            i = b.ins[n]
+            if i.op != D.Oor or KBASE(i.cls) != 0 or D.rtype(i.to) != D.RTmp:
+                n -= 1
+                continue
+            got = _combineor(fn, b, n)
+            if got is None:
+                n -= 1
+                continue
+            at, new = got
+            ins = [D.Ins(*x) if len(x) == 5 else D.Ins(x[0], x[1], x[2], x[3], D.R) for x in new]
+            b.ins = b.ins[:b.nins]
+            if at == n:
+                b.ins[n:n + 1] = ins
+            else:
+                t = newtmp('lb', i.cls, fn)
+                for x in ins:
+                    if x.to == i.to:
+                        x.to = t
+                i.op, i.arg[0], i.arg[1] = D.Ocopy, t, D.R
+                b.ins[at:at] = ins
+            for x in ins:
+                fn.tmp[D.rval(x.to)].def_ = x
+            b.nins = len(b.ins)
+            changed = True
+            n = (n if at == n else at) - 1
+    if changed:
+        filluse(fn)
+        for b in reversed(fn.rpo[:fn.nblk]):
+            for i in reversed(b.ins[:b.nins]):
+                if i.op in _BYTEDEAD and D.rtype(i.to) == D.RTmp and fn.tmp[D.rval(i.to)].nuse == 0:
+                    for a in i.arg:
+                        if D.rtype(a) == D.RTmp:
+                            chuse(a, -1, fn)
+                    i.set(D.Ins(D.Onop))
+    return changed
 ''',
 'backend/defs.py': '''\
 import struct
@@ -5636,7 +6655,14 @@ _OPS += [('aalu', ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 
          ('afnmul', ((Ke, Ke, Ks, Kd), (Ke, Ke, Ks, Kd)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
          ('afcon', ((Kx, Kx, Kx, Kx), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
          ('aubfiz', ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-         ('atst', ((Kw, Kl, Ke, Ke), (Kw, Kl, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]
+         ('accmp', ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('atst', ((Kw, Kl, Ke, Ke), (Kw, Kl, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('asmull', ((Ke, Kw, Ke, Ke), (Ke, Kw, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('aumull', ((Ke, Kw, Ke, Ke), (Ke, Kw, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('abfi', ((Kw, Kl, Ke, Ke), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('aadds', ((Kw, Kl, Ke, Ke), (Kw, Kl, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('asubs', ((Kw, Kl, Ke, Ke), (Kw, Kl, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+         ('aands', ((Kw, Kl, Ke, Ke), (Kw, Kl, Ke, Ke)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]
 _OPS += [('acsel', ((Kw, Kl, Ks, Kd), (Kx, Kx, Kx, Kx)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]
 class Op:
     __slots__ = ('name', 'argcls', 'canfold', 'hasid', 'idval', 'commutes', 'assoc',
@@ -7198,6 +8224,9 @@ def gvn(fn):
         b = b.link
     gvntbln = nins + nins // 2
     gvntbl = [None] * gvntbln
+    if _ext.cse:
+        from .simplify import startfn
+        startfn(fn)
     gvndivs = {}
     gvnselects = {}
     gvnjmps = {}
@@ -7315,7 +8344,7 @@ def ifconvert(fn):
 ''',
 'backend/inline.py': '''\
 from . import defs as D
-from .defs import R, Kw, RTmp, RCon, Tmp0, CAddr, CON_Z, rtype, rval
+from .defs import R, Kw, Kl, RTmp, RCon, Tmp0, CAddr, CON_Z, rtype, rval
 from .util import newtmp, newcon, str_
 from . import cfg
 _RETURNS_TWICE = frozenset(('setjmp', '_setjmp', '__setjmp', 'sigsetjmp', '__sigsetjmp',
@@ -7705,11 +8734,292 @@ def _callees(fn):
                     out.append(s)
         b = b.link
     return out
-def expand_all(fns, limit):
+_LIBM = """sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh exp exp2 expm1 log log2 log10 log1p
+    pow sqrt cbrt hypot fmod remainder floor ceil trunc round rint nearbyint fabs copysign fmin fmax fdim fma
+    erf erfc tgamma ldexp scalbn logb""".split()
+_LIBM = frozenset(_LIBM + [n + 'f' for n in _LIBM])
+_READONLY = frozenset("""strlen strnlen strcmp strncmp strcasecmp strncasecmp strchr strrchr strstr strspn strcspn
+    strpbrk memcmp memchr abs labs llabs isalpha isdigit isalnum isspace isupper islower toupper tolower""".split())
+ONCE_LIMIT = 800
+def _symrefs(fn):
+    out = {}
+    def ref(r, n):
+        if rtype(r) == RCon:
+            c = fn.con[rval(r)]
+            if c.type == CAddr:
+                out[c.sym.id] = out.get(c.sym.id, 0) + n
+    b = fn.start
+    while b:
+        p = b.phi
+        while p:
+            for a in p.arg[:p.narg]:
+                ref(a, 1000)
+            p = p.link
+        ref(b.jmp.arg, 1000)
+        for i in b.ins:
+            if i.op == D.Ocall:
+                ref(i.arg[0], 1)
+                ref(i.arg[1], 1000)
+            else:
+                ref(i.arg[0], 1000)
+                ref(i.arg[1], 1000)
+        b = b.link
+    return out
+def _writesmemory(fn, nowrite):
+    own = set()
+    b = fn.start
+    while b:
+        for i in b.ins:
+            o = i.op
+            if D.isalloc(o):
+                own.add(i.to)
+            elif o == D.Oadd and i.arg[0] in own and rtype(i.arg[1]) == RCon:
+                own.add(i.to)
+            elif D.isstore(o):
+                if i.arg[1] not in own:
+                    return True
+            elif D.isvload(o) or D.isvstore(o) or o in (D.Oblit0, D.Oblit1, D.Ovastart, D.Ovaarg, D.Osalloc):
+                return True
+            elif o == D.Ocall:
+                r = i.arg[0]
+                c = fn.con[rval(r)] if rtype(r) == RCon else None
+                if c is None or c.type != CAddr or c.i != 0 or c.sym.id not in nowrite:
+                    return True
+        b = b.link
+    return False
+def _unquote(s):
+    if isinstance(s, (bytes, bytearray)):
+        s = bytes(s).decode('latin-1')
+    if len(s) < 2 or s[0] != '"' or s[-1] != '"':
+        return None
+    out = bytearray()
+    i = 1
+    n = len(s) - 1
+    while i < n:
+        c = s[i]
+        if c != '\\\\':
+            out.append(ord(c))
+            i += 1
+            continue
+        i += 1
+        if i < n and s[i] in '01234567':
+            j = i
+            while j < n and j < i + 3 and s[j] in '01234567':
+                j += 1
+            out.append(int(s[i:j], 8) & 255)
+            i = j
+        elif i < n and s[i] in '\\\\"':
+            out.append(ord(s[i]))
+            i += 1
+        else:
+            return None
+    return out
+def recorddata(items, d):
+    if d.type == D.DStart:
+        bad = d.lnk.export or d.lnk.thread or d.lnk.common or d.lnk.sec
+        items[d.name] = None if bad else bytearray()
+        items['#cur'] = d.name
+        return
+    if d.type == D.DEnd:
+        return
+    cur = items.get('#cur')
+    b = items.get(cur)
+    if b is None:
+        return
+    if d.isref:
+        items[cur] = None
+    elif d.type == D.DZ:
+        b += bytes(d.num)
+    elif d.isstr:
+        v = _unquote(d.str)
+        if v is None:
+            items[cur] = None
+        else:
+            b += v
+    else:
+        n = {D.DB: 1, D.DH: 2, D.DW: 4, D.DL: 8}[d.type]
+        b += (d.num & ((1 << (8 * n)) - 1)).to_bytes(n, 'little')
+def constglobals(fns, items, datarefs):
+    from . import simplify
     from .util import intern
+    names = {n: b for n, b in items.items() if b is not None and n != '#cur' and n not in datarefs}
+    bad = set()
+    for fn in fns:
+        addtmp = {}
+        useful = {}
+        def sym(r):
+            if rtype(r) != RCon:
+                return None
+            c = fn.con[rval(r)]
+            return c.sym.id if c.type == CAddr else None
+        b = fn.start
+        while b:
+            p = b.phi
+            while p:
+                for a in p.arg[:p.narg]:
+                    if sym(a) is not None:
+                        bad.add(sym(a))
+                    if a in addtmp or rtype(a) == RTmp:
+                        useful.setdefault(a, []).append(None)
+                p = p.link
+            if sym(b.jmp.arg) is not None:
+                bad.add(sym(b.jmp.arg))
+            if rtype(b.jmp.arg) == RTmp:
+                useful.setdefault(b.jmp.arg, []).append(None)
+            for i in b.ins:
+                for n in (0, 1):
+                    a = i.arg[n]
+                    s = sym(a)
+                    if s is not None:
+                        if D.isload(i.op) and n == 0:
+                            continue
+                        if i.op == D.Oadd and i.cls == Kl:
+                            addtmp[i.to] = s
+                            continue
+                        if i.op == D.Ocall and n == 0:
+                            continue
+                        bad.add(s)
+                    elif rtype(a) == RTmp:
+                        useful.setdefault(a, []).append(n == 0 and D.isload(i.op))
+                if i.to in addtmp and i.op != D.Oadd:
+                    bad.add(addtmp[i.to])
+            b = b.link
+        for t, s in addtmp.items():
+            if not all(useful.get(t, [])):
+                bad.add(s)
+    simplify.CONSTANTS = {intern(n): bytes(b) for n, b in names.items() if intern(n) not in bad}
+def _plaincalls(fn):
+    b = fn.start
+    while b:
+        args = []
+        for n, i in enumerate(b.ins):
+            if D.isarg(i.op):
+                args.append(i)
+            elif i.op == D.Ocall:
+                yield b, n, i, args
+                args = []
+            elif i.op not in (D.Onop, D.Odbgloc):
+                args = []
+        b = b.link
+def _params(fn):
+    out = []
+    b = fn.start
+    while b:
+        for i in b.ins:
+            if i.op == D.Ovastart or (D.ispar(i.op) and i.op != D.Opar):
+                return None
+            if i.op == D.Opar:
+                out.append(i)
+        b = b.link
+    return out
+def _deadparam(fn, par, uses, slots):
+    n = uses.get(par.to, 0)
+    if n == 0:
+        return [par]
+    if n != 1:
+        return None
+    b = fn.start
+    while b:
+        for i in b.ins:
+            if D.isstore(i.op) and i.arg[0] == par.to:
+                return [par, i] if i.arg[1] in slots and uses.get(i.arg[1], 0) == 1 else None
+        b = b.link
+    return None
+def ipo(fns, datarefs):
+    from .util import getcon, intern
+    byid = {intern(fn.name): fn for fn in fns}
+    refs = {}
+    for fn in fns:
+        for s, n in _symrefs(fn).items():
+            refs[s] = refs.get(s, 0) + n
+    data = {intern(n) for n in datarefs}
+    calls = {}
+    for fn in fns:
+        for b, n, i, args in _plaincalls(fn):
+            r = i.arg[0]
+            c = fn.con[rval(r)] if rtype(r) == RCon else None
+            if c is not None and c.type == CAddr and c.i == 0 and c.sym.id in byid:
+                calls.setdefault(c.sym.id, []).append((fn, b, i, args))
+    for s, fn in byid.items():
+        sites = calls.get(s)
+        if fn.lnk.export or s in data or not sites or refs.get(s, 0) != len(sites):
+            continue
+        pars = _params(fn)
+        if pars is None or fn.vararg or any(len(a) != len(pars) or any(x.op != D.Oarg for x in a) for _, _, _, a in sites):
+            continue
+        uses = {}
+        slots = set()
+        b = fn.start
+        while b:
+            p = b.phi
+            while p:
+                for a in p.arg[:p.narg]:
+                    uses[a] = uses.get(a, 0) + 1
+                p = p.link
+            for i in b.ins:
+                if D.isalloc(i.op):
+                    slots.add(i.to)
+                for a in i.arg:
+                    uses[a] = uses.get(a, 0) + 1
+            uses[b.jmp.arg] = uses.get(b.jmp.arg, 0) + 1
+            b = b.link
+        gone = []
+        for n, par in enumerate(pars):
+            dead = _deadparam(fn, par, uses, slots)
+            if dead is not None:
+                for i in dead:
+                    i.set(D.Ins(D.Onop))
+                gone.append(n)
+                continue
+            vals = set()
+            for f, _, _, a in sites:
+                r = a[n].arg[0]
+                c = f.con[rval(r)] if rtype(r) == RCon else None
+                vals.add(c.i if c is not None and c.type == D.CBits else None)
+            if len(vals) == 1 and None not in vals and D.KBASE(par.cls) == 0:
+                par.op, par.arg[0], par.arg[1] = D.Ocopy, getcon(vals.pop(), fn), R
+                gone.append(n)
+        for f, cb, _, a in sites:
+            for n in gone:
+                a[n].set(D.Ins(D.Onop))
+            cb.ins = [x for x in cb.ins if x.op != D.Onop]
+            cb.nins = len(cb.ins)
+        s0 = fn.start
+        s0.ins = [x for x in s0.ins if D.ispar(x.op)] + [x for x in s0.ins if not D.ispar(x.op) and x.op != D.Onop]
+        s0.nins = len(s0.ins)
+        v = None
+        b = fn.start
+        any_ret = False
+        while b:
+            t = b.jmp.type
+            if D.isret(t):
+                any_ret = True
+                r = b.jmp.arg
+                c = fn.con[rval(r)] if rtype(r) == RCon else None
+                if t not in (D.Jretw, D.Jretl) or c is None or c.type != D.CBits or (v is not None and v != c.i):
+                    v = None
+                    break
+                v = c.i
+            b = b.link
+        if v is None or not any_ret:
+            continue
+        for f, cb, call, _ in sites:
+            if call.to != R and D.KBASE(call.cls) == 0:
+                at = next(k for k, x in enumerate(cb.ins) if x is call)
+                cb.ins[at + 1:at + 1] = [D.Ins(D.Ocopy, call.cls, call.to, getcon(v, f), R)]
+                cb.nins = len(cb.ins)
+                call.to = R
+def expand_all(fns, limit, datarefs=()):
+    from .util import intern
+    from . import load
     for fn in fns:
         selftail(fn)
     byid = {intern(fn.name): fn for fn in fns}
+    refs = {}
+    for fn in fns:
+        for s, n in _symrefs(fn).items():
+            refs[s] = refs.get(s, 0) + n
+    data = {intern(n) for n in datarefs}
     order = []
     state = {}
     for root in fns:
@@ -7729,11 +9039,26 @@ def expand_all(fns, limit):
                 stack.pop()
                 order.append(fn)
     bodies = {}
+    nomem = {intern(n) for n in _LIBM | _READONLY if intern(n) not in byid}
     for fn in order:
         expand(fn, bodies)
-        body = snapshot(fn, limit)
+        s = intern(fn.name)
+        once = not fn.lnk.export and refs.get(s, 0) == 1 and s not in data
+        body = snapshot(fn, ONCE_LIMIT if once else limit)
         if body is not None:
-            bodies[intern(fn.name)] = body
+            bodies[s] = body
+        if not _writesmemory(fn, nomem):
+            nomem.add(s)
+    load.nomemcalls = frozenset(nomem)
+    work = [fn for fn in fns if fn.lnk.export or intern(fn.name) in data]
+    live = {intern(fn.name) for fn in work}
+    while work:
+        fn = work.pop()
+        for s in _symrefs(fn):
+            if s in byid and s not in live:
+                live.add(s)
+                work.append(byid[s])
+    return [fn for fn in fns if intern(fn.name) in live]
 ''',
 'backend/live.py': '''\
 import sys
@@ -7930,6 +9255,13 @@ def storesz(s):
     if op == Ostorel or op == Ostored:
         return 8
     die("unreachable")
+nomemcalls = frozenset()
+def _nomem(call):
+    r = call.arg[0]
+    if not nomemcalls or rtype(r) != RCon:
+        return False
+    c = curf.con[rval(r)]
+    return c.type == CAddr and c.i == 0 and c.sym.id in nomemcalls
 def iins(cls, op, a0, a1, l):
     global inum
     ist = _newlog()
@@ -8033,7 +9365,7 @@ def def_(sl, msk, b, i, il):
     while i > 0:
         i -= 1
         ins = b.ins[i]
-        if killsl(ins.to, sl) or (ins.op == Ocall and escapes(sl.ref, curf)):
+        if killsl(ins.to, sl) or (ins.op == Ocall and not _nomem(ins) and escapes(sl.ref, curf)):
             return Load()
         if ins.op in (Ovaarg, Ovastart) and \\
                 alias(sl.ref, sl.off, sl.sz, ins.arg[0], 32, curf)[0] != NoAlias:
@@ -8277,8 +9609,16 @@ class _Driver:
         self.outf = outf
         self.dbg = dbg
         self.pending = []
+        self.datarefs = set()
+        self.dataitems = {}
     def data(self, d):
         from .emit import emitdat
+        if d.isref:
+            self.datarefs.add(d.ref_name)
+        from . import ext as _x
+        if _x.inline:
+            from . import inline
+            inline.recorddata(self.dataitems, d)
         if self.dbg:
             return
         if D.T.name == 'wasm':
@@ -8301,8 +9641,10 @@ class _Driver:
         fns, self.pending = self.pending, []
         if not fns:
             return
-        inline.expand_all(fns, ext.inline)
-        for fn in fns:
+        inline.constglobals(fns, self.dataitems, self.datarefs)
+        live = inline.expand_all(fns, ext.inline, self.datarefs)
+        inline.ipo(live, self.datarefs)
+        for fn in live:
             self.compile(fn)
     @staticmethod
     def _cleanup(fn, cfg, ssa, gvn, gcm):
@@ -8314,6 +9656,11 @@ class _Driver:
         cfg.filldom(fn)
         gcm.gcm(fn)
         ssa.filluse(fn)
+        ssa.ssacheck(fn)
+    @staticmethod
+    def _cleanup_fill(fn, cfg, ssa):
+        ssa.filluse(fn)
+        cfg.filldom(fn)
         ssa.ssacheck(fn)
     def compile(self, fn):
         T = D.T
@@ -8329,6 +9676,11 @@ class _Driver:
         T.abi0(fn)
         cfg.fillcfg(fn)
         ssa.filluse(fn)
+        from . import ext as _x
+        if _x.cse:
+            from . import sroa
+            if sroa.sroa(fn):
+                ssa.filluse(fn)
         mem.promote(fn)
         ssa.filluse(fn)
         ssa.ssa(fn)
@@ -8354,16 +9706,40 @@ class _Driver:
         if ext.cse:
             loads = cse.nload(fn)
             cfg.filldom(fn)
+            from . import scalar, thread
+            if scalar.sccp(fn):
+                cfg.fillcfg(fn)
+                self._cleanup_fill(fn, cfg, ssa)
+            if scalar.adce(fn):
+                self._cleanup_fill(fn, cfg, ssa)
+            threaded = thread.run(fn)
             merged = cse.domcse(fn)
+            merged = cse.reassoc(fn) or merged
+            merged = cse.ranges(fn) or merged
+            ssa.filluse(fn)
             if T.name.startswith('arm64'):
                 merged = cse.divconst(fn) or merged
                 merged = cse.divrem(fn) or merged
+                merged = cse.bytepatterns(fn) or merged
             ssa.filluse(fn)
             alias.fillalias(fn)
             load.loadopt(fn)
             ssa.filluse(fn)
             ssa.ssacheck(fn)
-            if merged or cse.nload(fn) != loads:
+            from . import memopt
+            cfg.fillcfg(fn)
+            ssa.filluse(fn)
+            moved = memopt.hoist(fn)
+            moved = memopt.sink(fn) or moved
+            moved = memopt.dse(fn) or moved
+            moved = memopt.merge(fn) or moved
+            cfg.fillloop(fn)
+            ssa.filluse(fn)
+            moved = memopt.pre(fn) or moved
+            if moved:
+                ssa.filluse(fn)
+                ssa.ssacheck(fn)
+            if merged or threaded or moved or cse.nload(fn) != loads:
                 cfg.filldom(fn)
                 self._cleanup(fn, cfg, ssa, gvn, gcm)
         from .. import middle
@@ -8371,6 +9747,8 @@ class _Driver:
             cfg.filldom(fn)
             if middle.run(fn):
                 self._cleanup(fn, cfg, ssa, gvn, gcm)
+                if ext.cse and T.name.startswith('arm64') and cse.bytepatterns(fn):
+                    self._cleanup(fn, cfg, ssa, gvn, gcm)
         if ext.cse and T.name.startswith('arm64'):
             cfg.fillloop(fn)
             if cse.hoistcons(fn):
@@ -8512,7 +9890,37 @@ def _insidx(b, i):
         if b.ins[k] is i:
             return k
     raise AssertionError("instruction not in block")
+def _readbeforestore(fn, t, blocks):
+    stores = [u for u in t.use[:t.nuse] if isstore(u.u.op)]
+    if len(stores) != 1:
+        if any(u.bid != stores[0].bid for u in t.use[:t.nuse]):
+            return False
+        b = next(x for x in fn.rpo[:fn.nblk] if x.id == stores[0].bid)
+        for x in b.ins[:b.nins]:
+            for u in t.use[:t.nuse]:
+                if x is u.u:
+                    return not isstore(x.op)
+        return False
+    from .cfg import dom
+    if not blocks:
+        from .cfg import filldom
+        filldom(fn)
+        blocks.update((b.id, b) for b in fn.rpo[:fn.nblk])
+    sb = blocks[stores[0].bid]
+    for u in t.use[:t.nuse]:
+        if u is stores[0]:
+            continue
+        if u.bid == stores[0].bid:
+            for x in sb.ins[:sb.nins]:
+                if x is stores[0].u:
+                    break
+                if x is u.u:
+                    return True
+        elif not dom(sb, blocks[u.bid]):
+            return True
+    return False
 def promote(fn):
+    blocks = {}
     b = fn.start
     for i in b.ins[:b.nins]:
         if Oalloc > i.op or i.op > Oalloc1:
@@ -8524,6 +9932,7 @@ def promote(fn):
         k = -1
         s = -1
         skip = False
+        _to = i.to
         for u in t.use[:t.nuse]:
             if u.type != UIns:
                 skip = True
@@ -8544,8 +9953,15 @@ def promote(fn):
             break
         if skip:
             continue
+        early = _readbeforestore(fn, t, blocks) if k != -1 else False
         _nop(i)
         t.ndef -= 1
+        if early:
+            i.op = Ocopy
+            i.cls = k
+            i.to = _to
+            i.arg[0] = CON_Z
+            t.ndef += 1
         for u in t.use[:t.nuse]:
             l = u.u
             if isstore(l.op):
@@ -8864,6 +10280,281 @@ def coalesce(fn):
             err_.write(" ]\\n")
         err_.write("\\tsums %u/%u/%u (killed/fused/total)\\n\\n" % (freed, fused, total))
         printfn(fn, sys.stderr)
+''',
+'backend/memopt.py': '''\
+from . import defs as D
+from .defs import R, RTmp, RCon, CBits, Kw, Kl, Ks, Kd, rtype, rval
+from .gvn import replaceuses
+from .util import newtmp, getcon
+_STORESIZE = {D.Ostoreb: 1, D.Ostoreh: 2, D.Ostorew: 4, D.Ostorel: 8, D.Ostores: 4, D.Ostored: 8}
+_STORECLS = {D.Ostoreb: Kw, D.Ostoreh: Kw, D.Ostorew: Kw, D.Ostorel: Kl, D.Ostores: Ks, D.Ostored: Kd}
+_INTSTORE = {1: D.Ostoreb, 2: D.Ostoreh, 4: D.Ostorew, 8: D.Ostorel}
+def _live(b):
+    return [i for i in b.ins[:b.nins] if i.op not in (D.Onop, D.Odbgloc)]
+def _arms(h):
+    if h.jmp.type != D.Jjnz or h.s1 is h.s2:
+        return None
+    a, b = h.s1, h.s2
+    if a.npred != 1 or b.npred != 1 or a.phi is not None or b.phi is not None:
+        return None
+    return a, b
+def hoist(fn):
+    changed = False
+    for h in fn.rpo[:fn.nblk]:
+        arms = _arms(h)
+        if arms is None:
+            continue
+        a, b = arms
+        while True:
+            la, lb = _live(a), _live(b)
+            if not la or not lb:
+                break
+            x, y = la[0], lb[0]
+            if not D.isload(x.op) or x.op != y.op or x.cls != y.cls or x.arg[0] != y.arg[0]:
+                break
+            r = x.arg[0]
+            if rtype(r) == RTmp and fn.tmp[rval(r)].bid in (a.id, b.id):
+                break
+            replaceuses(fn, y.to, x.to)
+            b.ins = [i for i in b.ins[:b.nins] if i is not y]
+            b.nins = len(b.ins)
+            a.ins = [i for i in a.ins[:a.nins] if i is not x]
+            a.nins = len(a.ins)
+            h.ins = h.ins[:h.nins] + [x]
+            h.nins = len(h.ins)
+            fn.tmp[rval(x.to)].bid = h.id
+            changed = True
+    return changed
+def sink(fn):
+    changed = False
+    for h in fn.rpo[:fn.nblk]:
+        arms = _arms(h)
+        if arms is None:
+            continue
+        a, b = arms
+        if a.jmp.type != D.Jjmp or b.jmp.type != D.Jjmp or a.s1 is not b.s1 or a.s1.npred != 2:
+            continue
+        j = a.s1
+        la, lb = _live(a), _live(b)
+        if not la or not lb:
+            continue
+        x, y = la[-1], lb[-1]
+        if not D.isstore(x.op) or x.op != y.op or x.arg[1] != y.arg[1]:
+            continue
+        r = x.arg[1]
+        if rtype(r) == RTmp and fn.tmp[rval(r)].bid in (a.id, b.id):
+            continue
+        k = _STORECLS[x.op]
+        if x.arg[0] == y.arg[0]:
+            v = x.arg[0]
+        else:
+            v = newtmp('sk', k, fn)
+            p = D.Phi()
+            p.to = v
+            p.cls = k
+            p.arg = [x.arg[0], y.arg[0]]
+            p.blk = [a, b]
+            p.narg = 2
+            p.link = j.phi
+            j.phi = p
+        a.ins = [i for i in a.ins[:a.nins] if i is not x]
+        a.nins = len(a.ins)
+        b.ins = [i for i in b.ins[:b.nins] if i is not y]
+        b.nins = len(b.ins)
+        j.ins = [D.Ins(x.op, x.cls, R, v, r)] + j.ins[:j.nins]
+        j.nins = len(j.ins)
+        changed = True
+    return changed
+def _reads(i):
+    o = i.op
+    if D.isload(o) or o in (D.Ocall, D.Oblit0, D.Oblit1, D.Ovastart, D.Ovaarg) or D.isvload(o) or D.isvstore(o):
+        return True
+    return o in (D.Ogetsp, D.Osetsp, D.Osalloc) or D.isalloc(o)
+def _overwritten(b, r, n, depth):
+    if b.jmp.type not in (D.Jjmp, D.Jjnz) or depth == 0:
+        return False
+    for s in (b.s1, b.s2):
+        if s is None:
+            continue
+        if s.id <= b.id:
+            return False
+        for i in s.ins[:s.nins]:
+            if _reads(i):
+                return False
+            if D.isstore(i.op) and i.arg[1] == r and _STORESIZE[i.op] >= n:
+                break
+        else:
+            if not _overwritten(s, r, n, depth - 1):
+                return False
+    return True
+def dse(fn):
+    changed = False
+    b = fn.start
+    while b:
+        killed = {}
+        out = []
+        ins = b.ins[:b.nins]
+        drop = False
+        clean = True
+        for i in reversed(ins):
+            if _reads(i):
+                killed = {}
+                clean = False
+            elif D.isstore(i.op):
+                n = _STORESIZE[i.op]
+                r = i.arg[1]
+                if killed.get(r, 0) >= n or (clean and _overwritten(b, r, n, 4)):
+                    drop = True
+                    continue
+                killed[r] = max(killed.get(r, 0), n)
+            out.append(i)
+        if drop:
+            out.reverse()
+            b.ins = out
+            b.nins = len(out)
+            changed = True
+        b = b.link
+    return changed
+def _baseoff(fn, r):
+    if rtype(r) == RTmp:
+        d = fn.tmp[rval(r)].def_
+        if d is not None and d.op == D.Oadd and d.cls == Kl and rtype(d.arg[1]) == RCon:
+            c = fn.con[rval(d.arg[1])]
+            if c.type == CBits:
+                return d.arg[0], c.i
+    return r, 0
+MERGESPAN = 128
+def merge(fn):
+    changed = False
+    intstores = frozenset(_INTSTORE.values())
+    b = fn.start
+    while b:
+        ins = b.ins[:b.nins]
+        out = []
+        n = 0
+        did = False
+        while n < len(ins):
+            i = ins[n]
+            if i.op not in intstores or rtype(i.arg[0]) != RCon or fn.con[rval(i.arg[0])].type != CBits:
+                out.append(i)
+                n += 1
+                continue
+            run = []
+            k = n
+            end = n
+            while k < len(ins) and k - n < MERGESPAN:
+                x = ins[k]
+                if x.op in intstores and rtype(x.arg[0]) == RCon and fn.con[rval(x.arg[0])].type == CBits:
+                    run.append(x)
+                    k += 1
+                    end = k
+                    continue
+                if D.isstore(x.op) or _reads(x) or x.to == R and x.op not in (D.Onop, D.Odbgloc):
+                    break
+                k += 1
+            k = end
+            stores = set(map(id, run))
+            between = [x for x in ins[n:end] if id(x) not in stores]
+            if len(run) < 2:
+                out.append(i)
+                n += 1
+                continue
+            bases = [_baseoff(fn, x.arg[1]) for x in run]
+            base = bases[0][0]
+            if any(p[0] != base for p in bases):
+                out.append(i)
+                n += 1
+                continue
+            spans = sorted((p[1], _STORESIZE[x.op], fn.con[rval(x.arg[0])].i) for p, x in zip(bases, run))
+            if any(spans[m][0] + spans[m][1] != spans[m + 1][0] for m in range(len(spans) - 1)):
+                out.append(i)
+                n += 1
+                continue
+            start = spans[0][0]
+            total = spans[-1][0] + spans[-1][1] - start
+            value = 0
+            for off, size, v in spans:
+                value |= (v & ((1 << (8 * size)) - 1)) << (8 * (off - start))
+            rest = total
+            byoff = {p[1]: x.arg[1] for p, x in zip(bases, run)}
+            ok = True
+            pieces = []
+            off = start
+            while rest:
+                size = 8 if rest >= 8 else 4 if rest >= 4 else 2 if rest >= 2 else 1
+                if off not in byoff:
+                    ok = False
+                if not ok:
+                    break
+                pieces.append((off, size))
+                off += size
+                rest -= size
+            if not ok or len(pieces) >= len(run):
+                out.append(i)
+                n += 1
+                continue
+            out += between
+            for off, size in pieces:
+                v = (value >> (8 * (off - start))) & ((1 << (8 * size)) - 1)
+                out.append(D.Ins(_INTSTORE[size], Kw, R, getcon(D.s64(v), fn), byoff[off]))
+            did = True
+            n = k
+        if did:
+            b.ins = out
+            b.nins = len(out)
+            changed = True
+        b = b.link
+    return changed
+_CLOBBER = frozenset((D.Ocall, D.Oblit0, D.Oblit1, D.Ovastart, D.Ovaarg))
+_STOREOF = {Kw: D.Ostorew, Kl: D.Ostorel, Ks: D.Ostores, Kd: D.Ostored}
+def _available(p, r, op, cls):
+    whole = op == D.Oload or (cls == Kw and op in (D.Oloadsw, D.Oloaduw))
+    for i in reversed(p.ins[:p.nins]):
+        if i.op == op and i.cls == cls and i.arg[0] == r:
+            return i.to
+        if D.isstore(i.op):
+            return i.arg[0] if i.arg[1] == r and whole and i.op == _STOREOF[cls] else None
+        if i.op in _CLOBBER or D.isvload(i.op) or D.isvstore(i.op):
+            return None
+    return None
+def pre(fn):
+    changed = False
+    for b in fn.rpo[:fn.nblk]:
+        if b.npred < 2 or b.loop > 1:
+            continue
+        preds = b.pred[:b.npred]
+        if len(set(preds)) != len(preds) or any(p.loop > b.loop for p in preds):
+            continue
+        for i in b.ins[:b.nins]:
+            if D.isstore(i.op) or i.op in _CLOBBER or D.isvload(i.op) or D.isvstore(i.op):
+                break
+            if not D.isload(i.op) or rtype(i.arg[0]) == D.RSlot:
+                continue
+            r = i.arg[0]
+            if rtype(r) == D.RTmp and fn.tmp[rval(r)].bid == b.id:
+                continue
+            vals = [_available(p, r, i.op, i.cls) for p in preds]
+            missing = [p for p, v in zip(preds, vals) if v is None]
+            if len(missing) != 1 or len(preds) == 1:
+                continue
+            m = missing[0]
+            if m.jmp.type != D.Jjmp:
+                continue
+            t = newtmp('pre', i.cls, fn)
+            m.ins = m.ins[:m.nins] + [D.Ins(i.op, i.cls, t, r, R)]
+            m.nins = len(m.ins)
+            fn.tmp[rval(t)].bid = m.id
+            p = D.Phi()
+            p.to = i.to
+            p.cls = i.cls
+            p.arg = [t if v is None else v for v in vals]
+            p.blk = list(preds)
+            p.narg = len(preds)
+            p.link = b.phi
+            b.phi = p
+            i.set(D.Ins(D.Onop))
+            changed = True
+    return changed
 ''',
 'backend/parse.py': '''\
 import math
@@ -10531,6 +12222,338 @@ def rega(fn):
         err.write("\\n> After register allocation:\\n")
         printfn(fn, err)
 ''',
+'backend/scalar.py': '''\
+from . import defs as D
+from .defs import R, RCon, RTmp, CBits, Jjmp, Jjnz, KBASE, optab, rtype, rval
+from .fold import foldref
+from .gcm import pinned
+from .gvn import replaceuses
+from .util import iscmp
+_BOT = -1
+def sccp(fn):
+    if not any(_constphi(fn, b) for b in fn.rpo[:fn.nblk]):
+        return False
+    val = {}
+    run = {fn.start}
+    edge = set()
+    def get(r):
+        if rtype(r) == RCon:
+            return r if fn.con[rval(r)].type == CBits else _BOT
+        if rtype(r) != RTmp:
+            return _BOT
+        return val.get(rval(r))
+    def put(to, v):
+        n = rval(to)
+        old = val.get(n)
+        if old == _BOT or v is None or old == v:
+            return False
+        if old is not None and v != _BOT and fn.con[rval(old)].i == fn.con[rval(v)].i:
+            return False
+        val[n] = v if old is None else _BOT
+        return True
+    changed = True
+    while changed:
+        changed = False
+        for b in fn.rpo[:fn.nblk]:
+            if b not in run:
+                continue
+            p = b.phi
+            while p:
+                v = None
+                if KBASE(p.cls) != 0:
+                    v = _BOT
+                else:
+                    for a, f in zip(p.arg, p.blk):
+                        if (f, b) not in edge:
+                            continue
+                        x = get(a)
+                        if x is None:
+                            continue
+                        if x == _BOT or (v is not None and fn.con[rval(v)].i != fn.con[rval(x)].i):
+                            v = _BOT
+                            break
+                        v = x
+                changed = put(p.to, v) or changed
+                p = p.link
+            for i in b.ins[:b.nins]:
+                if rtype(i.to) != RTmp:
+                    continue
+                if not optab[i.op].canfold or pinned(i) or KBASE(i.cls) != 0:
+                    v = _BOT
+                else:
+                    x = get(i.arg[0])
+                    y = D.CON_Z if i.arg[1] == R else get(i.arg[1])
+                    if x == _BOT or y == _BOT:
+                        v = _BOT
+                    elif x is None or y is None:
+                        v = None
+                    else:
+                        v = foldref(fn, D.Ins(i.op, i.cls, i.to, x, y if i.arg[1] != R else R))
+                        v = _BOT if v == R or fn.con[rval(v)].type != CBits else v
+                changed = put(i.to, v) or changed
+            j = b.jmp
+            if j.type == Jjmp:
+                out = [b.s1]
+            elif j.type == Jjnz:
+                c = get(j.arg)
+                if c is None:
+                    out = []
+                elif c == _BOT:
+                    out = [b.s1, b.s2]
+                else:
+                    out = [b.s1 if fn.con[rval(c)].i & 0xffffffff else b.s2]
+            else:
+                out = []
+            for t in out:
+                if (b, t) not in edge:
+                    edge.add((b, t))
+                    run.add(t)
+                    changed = True
+    any_ = False
+    for n, v in val.items():
+        if v != _BOT and fn.tmp[n].nuse:
+            replaceuses(fn, D.TMP(n), v)
+            any_ = True
+    for b in fn.rpo[:fn.nblk]:
+        if b in run and b.jmp.type == Jjnz:
+            c = get(b.jmp.arg)
+            if c is not None and c != _BOT:
+                t = b.s1 if fn.con[rval(c)].i & 0xffffffff else b.s2
+                b.jmp.type, b.jmp.arg = Jjmp, R
+                b.s1, b.s2 = t, None
+                any_ = True
+    return any_
+def _constphi(fn, b):
+    p = b.phi
+    while p:
+        if KBASE(p.cls) == 0 and any(rtype(a) == RCon for a in p.arg):
+            return True
+        p = p.link
+    return False
+def adce(fn):
+    changed = False
+    for _ in range(4):
+        if not _sweep(fn) and not _diamonds(fn) and not _deadloops(fn):
+            break
+        changed = True
+    return changed
+def _sweep(fn):
+    phis = {}
+    live = set()
+    todo = []
+    def need(r):
+        if rtype(r) == RTmp and rval(r) >= D.Tmp0 and rval(r) not in live:
+            live.add(rval(r))
+            todo.append(rval(r))
+    count = 0
+    for b in fn.rpo[:fn.nblk]:
+        p = b.phi
+        while p:
+            phis[rval(p.to)] = p
+            count += 1
+            p = p.link
+        for i in b.ins[:b.nins]:
+            if rtype(i.to) != RTmp or rval(i.to) < D.Tmp0 or (pinned(i) and not D.isload(i.op)):
+                need(i.arg[0])
+                need(i.arg[1])
+                if rtype(i.to) == RTmp:
+                    need(i.to)
+            else:
+                count += 1
+        need(b.jmp.arg)
+    while todo:
+        t = todo.pop()
+        p = phis.get(t)
+        if p is not None:
+            for a in p.arg:
+                need(a)
+            continue
+        d = fn.tmp[t].def_
+        if d is not None:
+            need(d.arg[0])
+            need(d.arg[1])
+    removed = False
+    for b in fn.rpo[:fn.nblk]:
+        p, last = b.phi, None
+        while p:
+            if rval(p.to) not in live:
+                removed = True
+                if last is None:
+                    b.phi = p.link
+                else:
+                    last.link = p.link
+            else:
+                last = p
+            p = p.link
+        for i in b.ins[:b.nins]:
+            if rtype(i.to) == RTmp and rval(i.to) >= D.Tmp0 and rval(i.to) not in live \\
+                    and (not pinned(i) or D.isload(i.op)):
+                i.set(D.Ins(D.Onop))
+                removed = True
+    if removed:
+        from .ssa import filluse
+        filluse(fn)
+    return removed
+def _deadloops(fn):
+    from .cfg import dom, fillcfg, filldom
+    from .ssa import filluse
+    filldom(fn)
+    for h in fn.rpo[:fn.nblk]:
+        back = [p for p in h.pred[:h.npred] if dom(h, p)]
+        if not back:
+            continue
+        body = {h}
+        todo = list(back)
+        while todo and len(body) < 64:
+            b = todo.pop()
+            if b not in body:
+                body.add(b)
+                todo += b.pred[:b.npred]
+        if todo:
+            continue
+        ok = True
+        exit_ = None
+        tests = []
+        ids = set(x.id for x in body)
+        for b in body:
+            if any(pinned(i) and not D.isload(i.op) or (rtype(i.to) != RTmp and i.op not in (D.Onop, D.Odbgloc))
+                   for i in b.ins[:b.nins]) or b.jmp.type not in (Jjmp, Jjnz):
+                ok = False
+                break
+            for s in (b.s1, b.s2):
+                if s is not None and s not in body:
+                    if exit_ is not None and s is not exit_:
+                        ok = False
+                    exit_ = s
+                    tests.append(b)
+        if not ok or exit_ is None:
+            continue
+        phis = []
+        for b in body:
+            p = b.phi
+            while p:
+                phis.append(p)
+                p = p.link
+        if not any(_counted(fn, b.jmp.arg, phis) for b in tests):
+            continue
+        for b in body:
+            defs = [i.to for i in b.ins[:b.nins] if rtype(i.to) == RTmp]
+            p = b.phi
+            while p:
+                defs.append(p.to)
+                p = p.link
+            for d in defs:
+                t = fn.tmp[rval(d)]
+                if any(u.bid not in ids for u in t.use[:t.nuse]):
+                    ok = False
+                    break
+            if not ok:
+                break
+        if not ok:
+            continue
+        p = exit_.phi
+        while p:
+            vals = {a for a, f in zip(p.arg, p.blk) if f in body}
+            if len(vals) != 1:
+                ok = False
+                break
+            p = p.link
+        if not ok:
+            continue
+        p = exit_.phi
+        while p:
+            kept, seen = [], False
+            for a, f in zip(p.arg, p.blk):
+                if f in body:
+                    if seen:
+                        continue
+                    seen = True
+                    f = h
+                kept.append((a, f))
+            p.arg = [a for a, _ in kept]
+            p.blk = [f for _, f in kept]
+            p.narg = len(kept)
+            p = p.link
+        h.phi = None
+        h.ins = []
+        h.nins = 0
+        h.jmp.type, h.jmp.arg = Jjmp, R
+        h.s1, h.s2 = exit_, None
+        fillcfg(fn)
+        filluse(fn)
+        return True
+    return False
+def _counted(fn, r, phis):
+    if rtype(r) != RTmp or rval(r) < D.Tmp0 or fn.tmp[rval(r)].def_ is None:
+        return False
+    d = fn.tmp[rval(r)].def_
+    if iscmp(d.op) is None:
+        return False
+    for a in d.arg:
+        if rtype(a) != RTmp or rval(a) < D.Tmp0:
+            continue
+        x = fn.tmp[rval(a)].def_
+        if x is not None and x.op in (D.Oadd, D.Osub) and rtype(x.arg[1]) == RCon:
+            a = x.arg[0]
+        for p in phis:
+            if p.to == a:
+                for v in p.arg:
+                    y = fn.tmp[rval(v)].def_ if rtype(v) == RTmp else None
+                    if y is not None and y.op in (D.Oadd, D.Osub) and y.arg[0] == a and rtype(y.arg[1]) == RCon:
+                        return True
+    return False
+def _empty(b):
+    return b.phi is None and b.jmp.type == Jjmp and all(i.op in (D.Onop, D.Odbgloc) for i in b.ins[:b.nins])
+def _diamonds(fn):
+    any_ = False
+    for b in fn.rpo[:fn.nblk]:
+        if b.jmp.type != Jjnz or b.s1 is b.s2:
+            continue
+        s1, s2 = b.s1, b.s2
+        t1 = s1.s1 if _empty(s1) and s1.npred == 1 else s1
+        t2 = s2.s1 if _empty(s2) and s2.npred == 1 else s2
+        if t1 is not t2:
+            continue
+        same = True
+        p = t1.phi
+        while p:
+            v1 = v2 = None
+            for a, f in zip(p.arg, p.blk):
+                if f is (s1 if t1 is not s1 else b):
+                    v1 = a
+                if f is (s2 if t2 is not s2 else b):
+                    v2 = a
+            if v1 is None or v2 is None or v1 != v2:
+                same = False
+                break
+            p = p.link
+        if not same:
+            continue
+        p = t1.phi
+        while p:
+            pairs = [(a, b if f is s1 or f is s2 else f) for a, f in zip(p.arg, p.blk)]
+            seen = set()
+            kept = []
+            for a, f in pairs:
+                if f is b:
+                    if b in seen:
+                        continue
+                    seen.add(b)
+                kept.append((a, f))
+            p.arg = [a for a, _ in kept]
+            p.blk = [f for _, f in kept]
+            p.narg = len(kept)
+            p = p.link
+        b.jmp.type, b.jmp.arg = Jjmp, R
+        b.s1, b.s2 = t1, None
+        any_ = True
+    if any_:
+        from .cfg import fillcfg
+        from .ssa import filluse
+        fillcfg(fn)
+        filluse(fn)
+    return any_
+''',
 'backend/simpl.py': '''\
 from . import defs as D
 from .defs import (R, RCon, CBits, KBASE, Kl, Kw, M64, NIns, Ostorel, Ostorew, Ostoreh,
@@ -10628,9 +12651,11 @@ from .util import getcon, iscmp, cmpwlneg
 from .ssa import adduse
 _SIMPLE = frozenset((D.Oadd, D.Osub, D.Oneg, D.Omul, D.Odiv, D.Oudiv, D.Orem, D.Ourem, D.Oand, D.Oor,
                      D.Oxor, D.Oshl, D.Oshr, D.Osar, D.Oextsb, D.Oextub, D.Oextsh, D.Oextuh, D.Oextsw,
-                     D.Oextuw)) | frozenset(range(D.Ocmpw, D.Ocmpl1 + 1))
+                     D.Oextuw, D.Ofsqrt, D.Ofabs, D.Offloor, D.Ofceil, D.Oftrunc)) \\
+    | frozenset(range(D.Ocmpw, D.Ocmpl1 + 1))
 _ONE = {Ks: 0x3f800000, Kd: 0x3ff0000000000000}
-_ZEXT = {D.Oextub: 8, D.Oextuh: 16, D.Oextuw: 32, D.Oloadub: 8, D.Oloaduh: 16, D.Oloaduw: 32}
+_ZEXT = {D.Oextub: 8, D.Oextuh: 16, D.Oextuw: 32, D.Oloadub: 8, D.Oloaduh: 16, D.Oloaduw: 32,
+         D.Oparub: 8, D.Oparuh: 16}
 _SEXT = {D.Oextsb: 8, D.Oextsh: 16, D.Oextsw: 32, D.Oloadsb: 8, D.Oloadsh: 16}
 MAXDEPTH = 6
 def _mask(k):
@@ -10758,8 +12783,33 @@ def _isnot(fn, r, k):
     if d is not None and d.op == D.Oxor and d.cls == k and _con(fn, d.arg[1], k) == _mask(k):
         return d.arg[0]
     return None
+_MATH = frozenset((D.Ofsqrt, D.Ofabs, D.Offloor, D.Ofceil, D.Oftrunc))
+def _fold1(o, x):
+    import math
+    if not math.isfinite(x):
+        return None
+    if o == D.Ofsqrt:
+        return math.sqrt(x) if x >= 0 else None
+    if o == D.Ofabs:
+        return abs(x)
+    f = {D.Offloor: math.floor, D.Ofceil: math.ceil, D.Oftrunc: math.trunc}[o](x)
+    return math.copysign(float(f), x)
 def _float(fn, b, i):
     k = i.cls
+    if i.op in _MATH:
+        v = _con(fn, i.arg[0], Kl if k == Kd else Kw)
+        if v is None:
+            return R
+        x = D.bitsd(v) if k == Kd else D.bitsf(v)
+        y = _fold1(i.op, x)
+        if y is None:
+            return R
+        return getcon(D.dbits(y), fn) if k == Kd else getcon(D.fbits(D.f32(y)), fn)
+    if i.op == D.Omul:
+        two = {Ks: 0x40000000, Kd: 0x4000000000000000}[k]
+        if _con(fn, i.arg[1], Kl if k == Kd else Kw) == two:
+            _set(fn, b, i, D.Oadd, i.arg[0], i.arg[0])
+            return R
     if i.op == D.Oneg:
         d = _defn(fn, i.arg[0])
         if d is not None and d.op == D.Oneg and d.cls == k:
@@ -10771,13 +12821,38 @@ def _float(fn, b, i):
         if i.op == D.Omul and (_con(fn, i.arg[0], Kl) == one or (k == Ks and _con(fn, i.arg[0], Kw) == one)):
             return i.arg[1]
     return R
+CONSTANTS = {}
+_LOADS = {D.Oloadsb: (1, True), D.Oloadub: (1, False), D.Oloadsh: (2, True), D.Oloaduh: (2, False),
+          D.Oloadsw: (4, True), D.Oloaduw: (4, False)}
+def _constload(fn, i):
+    r = i.arg[0]
+    if not CONSTANTS or rtype(r) != RCon:
+        return R
+    c = fn.con[rval(r)]
+    data = CONSTANTS.get(c.sym.id) if c.type == D.CAddr else None
+    if data is None:
+        return R
+    n, signed = _LOADS.get(i.op, (8 if i.cls in (Kl, Kd) else 4, False))
+    if c.i < 0 or c.i + n > len(data):
+        return R
+    v = int.from_bytes(data[c.i:c.i + n], 'little', signed=signed)
+    return getcon(D.s64(v & _mask(Kl if i.cls in (Kl, Kd) else Kw)), fn)
 def simplify(fn, b, i):
     o = i.op
+    if D.isload(o):
+        return _constload(fn, i)
+    if o == D.Ocast:
+        d = _defn(fn, i.arg[0])
+        if d is not None and d.op == D.Ocast and rtype(d.arg[0]) == RTmp and fn.tmp[rval(d.arg[0])].cls == i.cls:
+            return d.arg[0]
+        return R
     if o not in _SIMPLE:
         return R
     k = i.cls
     if KBASE(k) != 0:
         return _float(fn, b, i)
+    if o in _MATH:
+        return R
     a, c = i.arg
     cm = iscmp(o)
     if cm is not None:
@@ -10855,6 +12930,10 @@ def simplify(fn, b, i):
     elif o in (D.Orem, D.Ourem):
         if n == 1:
             return getcon(0, fn)
+    elif o == D.Oshr and n == (63 if k == Kl else 31) and d0 is not None and d0.cls == k and d0.op == D.Osar \\
+            and _con(fn, d0.arg[1], k) == n:
+        _set(fn, b, i, D.Oshr, d0.arg[0], c)
+        return R
     elif o == D.Oshl:
         if n is not None and d0 is not None and d0.cls == k and d0.op in (D.Oshr, D.Osar) \\
                 and _con(fn, d0.arg[1], k) == n:
@@ -10900,19 +12979,34 @@ def simplify(fn, b, i):
 def _compare(fn, b, i, ck, cc):
     a, c = i.arg
     v = _foldcmp(fn, i, ck, cc)
+    if v is None:
+        v = decide(fn, b, ck, cc, a, c)
     if v is not None:
         return getcon(v, fn)
     if cc in (D.Cieq, D.Cine):
         d0, d1 = _defn(fn, a), _defn(fn, c)
         n = _con(fn, c, ck)
-        if n == 0 and d0 is not None and iscmp(d0.op) is not None and KBASE(iscmp(d0.op)[0]) == 0 \\
-                and d0.cls == ck:
+        if n == 0 and d0 is not None and d0.op in (D.Oextuw, D.Oextsw):
+            d2 = _defn(fn, d0.arg[0])
+            cm = iscmp(d2.op) if d2 is not None else None
+            if cm is not None and (cc == D.Cine or KBASE(cm[0]) == 0):
+                _set(fn, b, i, d2.op if cc == D.Cine else cmpwlneg(d2.op), d2.arg[0], d2.arg[1])
+                return R
+        if n == 0 and d0 is not None and iscmp(d0.op) is not None:
             if cc == D.Cine:
-                if i.cls == d0.cls:
+                if i.cls == d0.cls and ck == d0.cls:
                     return a
-            else:
+                _set(fn, b, i, d0.op, d0.arg[0], d0.arg[1])
+            elif KBASE(iscmp(d0.op)[0]) == 0:
                 _set(fn, b, i, cmpwlneg(d0.op), d0.arg[0], d0.arg[1])
             return R
+        if n == 0 and d0 is not None and d0.op in (D.Orem, D.Ourem) and d0.cls == ck \\
+                and fn.tmp[rval(a)].nuse == 1:
+            c0 = _con(fn, d0.arg[1], ck)
+            if c0 and c0 & (c0 - 1) == 0:
+                d0.op = D.Oand
+                d0.arg[1] = _ref(c0 - 1, ck, fn)
+                return R
         if d0 is not None and d0.op in (D.Oadd, D.Osub) and d0.cls == ck:
             c0 = _con(fn, d0.arg[1], ck)
             if c0 is not None:
@@ -10924,6 +13018,179 @@ def _compare(fn, b, i, ck, cc):
                     _set(fn, b, i, i.op, d0.arg[0], d1.arg[0])
                     return R
     return R
+_LT, _EQ, _GT = 1, 2, 4
+_SET = {D.Cieq: _EQ, D.Cine: _LT | _GT, D.Cisge: _EQ | _GT, D.Cisgt: _GT, D.Cisle: _LT | _EQ, D.Cislt: _LT,
+        D.Ciuge: _EQ | _GT, D.Ciugt: _GT, D.Ciule: _LT | _EQ, D.Ciult: _LT}
+_UNS = frozenset((D.Ciuge, D.Ciugt, D.Ciule, D.Ciult))
+_TOSIGNED = {D.Ciuge: D.Cisge, D.Ciugt: D.Cisgt, D.Ciule: D.Cisle, D.Ciult: D.Cislt}
+_MIRROR = {_LT: _GT, _GT: _LT, _EQ: _EQ, _LT | _EQ: _EQ | _GT, _EQ | _GT: _LT | _EQ, _LT | _GT: _LT | _GT}
+MAXWALK = 24
+def _facts(b):
+    cur = b
+    for _ in range(MAXWALK):
+        p = cur.idom
+        if p is None:
+            return
+        if cur.npred == 1 and p.jmp.type == D.Jjnz and p.s1 is not p.s2 and rtype(p.jmp.arg) == RTmp:
+            if p.s1 is cur:
+                yield p.jmp.arg, True
+            elif p.s2 is cur:
+                yield p.jmp.arg, False
+        cur = p
+def _fact(fn, c, sense, ck):
+    d = _defn(fn, c)
+    if d is None:
+        return None
+    cm = iscmp(d.op)
+    if cm is None or cm[0] != ck:
+        return None
+    s = _SET[cm[1]]
+    if not sense:
+        s = (_LT | _EQ | _GT) & ~s
+    return d.arg[0], s, d.arg[1], cm[1] in _UNS
+def _sval(v, w):
+    return v - (1 << w) if v >> (w - 1) else v
+def _narrow(lo, hi, s, n, uns, w):
+    smax = (1 << (w - 1)) - 1
+    if uns:
+        if n > smax or not (s & (_LT | _EQ)) or s & _GT:
+            return lo, hi
+        lo = max(lo, 0)
+        hi = min(hi, n if s & _EQ else n - 1)
+        return lo, hi
+    n = _sval(n, w)
+    if s == _EQ:
+        return max(lo, n), min(hi, n)
+    if s == _LT | _GT:
+        if n == lo:
+            lo += 1
+        if n == hi:
+            hi -= 1
+        return lo, hi
+    if s & _LT and not s & _GT:
+        hi = min(hi, n if s & _EQ else n - 1)
+    if s & _GT and not s & _LT:
+        lo = max(lo, n if s & _EQ else n + 1)
+    return lo, hi
+def srange(fn, b, r, ck, depth=0):
+    w = 64 if ck == Kl else 32
+    z, on = known(fn, r, ck)
+    lo, hi = _srange(z, on, w)
+    if rtype(r) != RTmp or depth >= 3:
+        return lo, hi
+    for c, sense in _facts(b):
+        f = _fact(fn, c, sense, ck)
+        if f is None:
+            continue
+        x, s, y, uns = f
+        if x == r and _con(fn, y, ck) is not None:
+            lo, hi = _narrow(lo, hi, s, _con(fn, y, ck), uns, w)
+        elif y == r and _con(fn, x, ck) is not None:
+            lo, hi = _narrow(lo, hi, _MIRROR[s], _con(fn, x, ck), uns, w)
+    d = _defn(fn, r)
+    if d is not None and d.cls == ck:
+        if d.op in (D.Oadd, D.Osub):
+            n = _con(fn, d.arg[1], ck)
+            if n is not None:
+                n = _sval(n, w)
+                if d.op == D.Osub:
+                    n = -n
+                lo1, hi1 = srange(fn, b, d.arg[0], ck, depth + 1)
+                lo1 += n
+                hi1 += n
+                if -(1 << (w - 1)) <= lo1 and hi1 < 1 << (w - 1):
+                    lo, hi = max(lo, lo1), min(hi, hi1)
+        elif d.op == D.Oextsw and ck == Kl:
+            lo1, hi1 = srange(fn, b, d.arg[0], Kw, depth + 1)
+            lo, hi = max(lo, lo1), min(hi, hi1)
+    elif d is None:
+        lo1 = _induction(fn, b, r, ck)
+        if lo1 is not None:
+            lo = max(lo, lo1)
+    return lo, hi
+def _strip(fn, r):
+    for _ in range(8):
+        d = _defn(fn, r)
+        if d is None or d.op != D.Ocopy:
+            return r
+        r = d.arg[0]
+    return r
+def _induction(fn, b, r, ck):
+    p = _PHI.get(rval(r))
+    if p is None or p.narg != 2 or p.cls != ck:
+        return None
+    for n in (0, 1):
+        init, nxt = _strip(fn, p.arg[n]), _strip(fn, p.arg[n ^ 1])
+        c = _con(fn, init, ck)
+        d = _defn(fn, nxt)
+        if c is None or d is None or d.op != D.Oadd or d.cls != ck or _strip(fn, d.arg[0]) != r \\
+                or _con(fn, d.arg[1], ck) != 1:
+            continue
+        for f, sense in _facts(fn.rpo[fn.tmp[rval(nxt)].bid]):
+            q = _fact(fn, f, sense, ck)
+            if q is None or q[3]:
+                continue
+            x, s, y, _ = q
+            if (_strip(fn, x) == r and s == _LT) or (_strip(fn, y) == r and s == _GT):
+                return _sval(c, 64 if ck == Kl else 32)
+    return None
+_PHI = {}
+def startfn(fn):
+    _PHI.clear()
+    b = fn.start
+    while b:
+        p = b.phi
+        while p:
+            _PHI[rval(p.to)] = p
+            p = p.link
+        b = b.link
+def decide(fn, b, ck, cc, a, c):
+    q = _SET[cc]
+    uns = cc in _UNS
+    w = 64 if ck == Kl else 32
+    la, ha = srange(fn, b, a, ck)
+    lc, hc = srange(fn, b, c, ck)
+    if uns and la >= 0 and lc >= 0:
+        uns = False
+    if not uns:
+        if q == _EQ or q == _LT | _GT:
+            if ha < lc or hc < la:
+                return int(q != _EQ)
+            if la == ha == lc == hc:
+                return int(q == _EQ)
+        else:
+            if q == _LT:
+                r = 1 if ha < lc else 0 if la >= hc else None
+            elif q == _LT | _EQ:
+                r = 1 if ha <= lc else 0 if la > hc else None
+            elif q == _GT:
+                r = 1 if la > hc else 0 if ha <= lc else None
+            else:
+                r = 1 if la >= hc else 0 if ha < lc else None
+            if r is not None:
+                return r
+    if rtype(a) != RTmp and rtype(c) != RTmp:
+        return None
+    equality = q == _EQ or q == _LT | _GT
+    for f, sense in _facts(b):
+        g = _fact(fn, f, sense, ck)
+        if g is None:
+            continue
+        x, s, y, fu = g
+        if x == c and y == a:
+            s = _MIRROR.get(s, s)
+        elif not (x == a and y == c):
+            continue
+        if not equality and fu != uns and s not in (_EQ, _LT | _GT):
+            if cc in _UNS and fu and not uns:
+                pass
+            else:
+                continue
+        if s & ~q == 0:
+            return 1
+        if s & q == 0:
+            return 0
+    return None
 ''',
 'backend/spill.py': '''\
 import sys
@@ -11281,6 +13548,143 @@ def spill(fn):
         err.write("\\n> After spilling:\\n")
         printfn(fn, err)
 ''',
+'backend/sroa.py': '''\
+from . import defs as D
+from .defs import R, RTmp, RCon, CBits, Kw, Kl, Ks, Kd, KBASE, rtype, rval, Oalloc, Oalloc1, Ocast, Oadd, Ocopy
+from .util import newtmp, getcon
+_LOADSIZE = {D.Oloadsb: 1, D.Oloadub: 1, D.Oloadsh: 2, D.Oloaduh: 2, D.Oloadsw: 4, D.Oloaduw: 4}
+_STORESIZE = {D.Ostoreb: 1, D.Ostoreh: 2, D.Ostorew: 4, D.Ostorel: 8, D.Ostores: 4, D.Ostored: 8}
+_STORECLS = {D.Ostoreb: Kw, D.Ostoreh: Kw, D.Ostorew: Kw, D.Ostorel: Kl, D.Ostores: Ks, D.Ostored: Kd}
+_STOREOF = {Kw: D.Ostorew, Kl: D.Ostorel, Ks: D.Ostores, Kd: D.Ostored}
+MAXSIZE = 256
+def _loadsize(i):
+    if i.op in _LOADSIZE:
+        return _LOADSIZE[i.op]
+    return 8 if i.cls in (Kl, Kd) else 4
+def sroa(fn):
+    roots = {}
+    for i in fn.start.ins[:fn.start.nins]:
+        if Oalloc <= i.op <= Oalloc1 and rtype(i.arg[0]) == RCon and rtype(i.to) == RTmp \\
+                and fn.tmp[rval(i.to)].ndef == 1:
+            size = fn.con[rval(i.arg[0])].i
+            if 0 < size <= MAXSIZE:
+                roots[i.to] = (size, i)
+    if not roots:
+        return False
+    at = {r: (r, 0) for r in roots}
+    adds = []
+    known = {}
+    def value(r):
+        if rtype(r) == RCon and fn.con[rval(r)].type == CBits:
+            return fn.con[rval(r)].i
+        return known.get(r)
+    for b in fn.rpo[:fn.nblk]:
+        for i in b.ins[:b.nins]:
+            if rtype(i.to) != RTmp or fn.tmp[rval(i.to)].ndef != 1:
+                continue
+            if i.op == Oadd and i.cls == Kl and (i.arg[0] in at or i.arg[1] in at):
+                x, y = i.arg
+                if y in at:
+                    x, y = y, x
+                c = value(y)
+                if c is not None:
+                    at[i.to] = (at[x][0], at[x][1] + c)
+                    adds.append(i)
+            elif i.op in (D.Oextsw, D.Oextuw, Ocopy) and value(i.arg[0]) is not None:
+                c = value(i.arg[0])
+                if i.op == D.Oextsw:
+                    c = (c & 0xffffffff ^ 0x80000000) - 0x80000000
+                elif i.op == D.Oextuw:
+                    c &= 0xffffffff
+                known[i.to] = c
+            elif i.op in (D.Omul, Oadd) and i.cls == Kl and value(i.arg[0]) is not None and value(i.arg[1]) is not None:
+                known[i.to] = value(i.arg[0]) * value(i.arg[1]) if i.op == D.Omul else value(i.arg[0]) + value(i.arg[1])
+    bad = set()
+    access = {r: {} for r in roots}
+    uses = []
+    for b in fn.rpo[:fn.nblk]:
+        p = b.phi
+        while p:
+            bad.update(at[a][0] for a in p.arg if a in at)
+            p = p.link
+        if b.jmp.arg in at:
+            bad.add(at[b.jmp.arg][0])
+        for i in b.ins[:b.nins]:
+            if Oalloc <= i.op <= Oalloc1:
+                continue
+            if i.op == Oadd and i.to in at:
+                continue
+            if D.isload(i.op) and i.arg[0] in at:
+                root, off = at[i.arg[0]]
+                size = _loadsize(i)
+            elif D.isstore(i.op) and i.arg[1] in at:
+                if i.arg[0] in at:
+                    bad.add(at[i.arg[0]][0])
+                root, off = at[i.arg[1]]
+                size = _STORESIZE[i.op]
+            else:
+                bad.update(at[a][0] for a in i.arg if a in at)
+                continue
+            if access[root].setdefault(off, size) != size or off < 0 or off + size > roots[root][0]:
+                bad.add(root)
+            uses.append((b, i, root, off))
+    for r, acc in access.items():
+        end = 0
+        for off in sorted(acc):
+            if off < end:
+                bad.add(r)
+            end = max(end, off + acc[off])
+        if len(acc) == 1 and 0 in acc and acc[0] == roots[r][0]:
+            bad.add(r)
+    good = {r for r in roots if r not in bad}
+    if not good:
+        return False
+    slots = {}
+    cast = {}
+    classes = {}
+    for b, i, root, off in uses:
+        if root in good and D.isstore(i.op):
+            classes.setdefault((root, off), _STORECLS[i.op])
+    newalloc = []
+    for root in good:
+        for off, size in sorted(access[root].items()):
+            t = newtmp('sr', Kl, fn)
+            slots[(root, off)] = t
+            newalloc.append(D.Ins(Oalloc if size <= 4 else Oalloc + 1, Kl, t, getcon(size, fn), R))
+    perblock = {}
+    for b, i, root, off in uses:
+        if root not in good:
+            continue
+        t = slots[(root, off)]
+        if D.isload(i.op):
+            i.arg[0] = t
+        else:
+            i.arg[1] = t
+            k = _STORECLS[i.op]
+            want = classes[(root, off)]
+            if k != want:
+                c = newtmp('sr', want, fn)
+                perblock.setdefault(id(b), (b, {}))[1][id(i)] = D.Ins(Ocast, want, c, i.arg[0], R)
+                i.op = _STOREOF[want]
+                i.arg[0] = c
+    for b, extra in perblock.values():
+        out = []
+        for i in b.ins[:b.nins]:
+            if id(i) in extra:
+                out.append(extra[id(i)])
+            out.append(i)
+        b.ins = out
+        b.nins = len(out)
+    for i in adds:
+        if at[i.to][0] in good:
+            i.set(D.Ins(D.Onop))
+    s = fn.start
+    for r in good:
+        roots[r][1].set(D.Ins(D.Onop))
+    s.ins = newalloc + s.ins[:s.nins]
+    s.nins = len(s.ins)
+    return True
+''',
 'backend/ssa.py': '''\
 import sys
 from . import defs as D
@@ -11582,6 +13986,246 @@ def ssacheck(fn):
                         if not sdom(b, bu):
                             fail()
         b = b.link
+''',
+'backend/thread.py': '''\
+from . import defs as D
+from .defs import RCon, RTmp, CBits, KBASE, Kw, Kl, UPhi, rtype, rval
+from .util import iscmp, phiarg, isconbits, newtmp, cmpwlneg
+from .simplify import _facts
+_CHEAP = frozenset((D.Oadd, D.Osub, D.Oand, D.Oor, D.Oxor, D.Oshl, D.Oshr, D.Osar, D.Oextsw, D.Oextuw, D.Ocopy))
+def _value(fn, q, b, v, k):
+    if rtype(v) == RCon:
+        c = isconbits(fn, v)
+        return None if c is None else bool(c & (0xffffffffffffffff if k == Kl else 0xffffffff))
+    if rtype(v) != RTmp:
+        return None
+    wide = k == Kl and fn.tmp[rval(v)].cls == Kl
+    if q.jmp.type == D.Jjnz and q.jmp.arg == v and q.s1 is not q.s2:
+        if q.s1 is b:
+            return True
+        return None if wide else False
+    for c, sense in _facts(q):
+        if c == v:
+            if not sense and wide:
+                return None
+            return sense
+    return None
+def _cond(fn, b):
+    r = b.jmp.arg
+    if rtype(r) != RTmp or fn.tmp[rval(r)].nuse != 1:
+        return None
+    ins = [i for i in b.ins[:b.nins] if i.op not in (D.Onop, D.Odbgloc)]
+    inv = False
+    k = Kw
+    if ins:
+        cm = iscmp(ins[0].op)
+        if len(ins) > 1 or ins[0].to != r or cm is None or cm[1] not in (D.Cieq, D.Cine) \\
+                or isconbits(fn, ins[0].arg[1]) != 0:
+            return None
+        inv = cm[1] == D.Cieq
+        k = cm[0]
+        r = ins[0].arg[0]
+        if rtype(r) != RTmp or fn.tmp[rval(r)].nuse != 1:
+            return None
+    p = b.phi
+    while p:
+        if p.to == r:
+            return p, inv, k
+        p = p.link
+    return None
+def _thread(fn, b):
+    if b.jmp.type != D.Jjnz or b.s1 is b.s2 or b.phi is None or b.s1 is b or b.s2 is b:
+        return False
+    if any(q.id >= b.id for q in b.pred[:b.npred]):
+        return False
+    c = _cond(fn, b)
+    if c is None:
+        return False
+    p, inv, k = c
+    phis = {}
+    x = b.phi
+    while x:
+        if x is not p:
+            for u in fn.tmp[rval(x.to)].use[:fn.tmp[rval(x.to)].nuse]:
+                if u.type != UPhi or u.bid not in (b.s1.id, b.s2.id):
+                    return False
+                if any(a == x.to and bp is not b for a, bp in zip(u.u.arg[:u.u.narg], u.u.blk)):
+                    return False
+            phis[x.to] = x
+        x = x.link
+    changed = False
+    for n in range(p.narg):
+        q, v = p.blk[n], p.arg[n]
+        if q.s1 is not b and q.s2 is not b:
+            continue
+        val = _value(fn, q, b, v, k)
+        if val is None:
+            continue
+        t = b.s1 if val != inv else b.s2
+        if t.id <= b.id or q.s1 is t or q.s2 is t:
+            continue
+        x = t.phi
+        while x:
+            a = phiarg(x, b)
+            if a in phis:
+                a = phiarg(phis[a], q)
+            x.arg.append(a)
+            x.blk.append(q)
+            x.narg += 1
+            x = x.link
+        if q.s1 is b:
+            q.s1 = t
+        if q.s2 is b:
+            q.s2 = t
+        changed = True
+    return changed
+def _combinable(fn, x, n):
+    ins = [i for i in x.ins[:x.nins] if i.op not in (D.Onop, D.Odbgloc)]
+    if x.phi is not None or x.npred != 1 or x.jmp.type != D.Jjnz or x.s1 is x.s2 or len(ins) > n:
+        return None
+    if not ins or ins[-1].to != x.jmp.arg or iscmp(ins[-1].op) is None:
+        return None
+    if KBASE(iscmp(ins[-1].op)[0]) != 0:
+        return None
+    if any(i.op not in _CHEAP and iscmp(i.op) is None for i in ins):
+        return None
+    if fn.tmp[rval(x.jmp.arg)].nuse != 1:
+        return None
+    return ins
+def _samephis(t, p, q):
+    x = t.phi
+    while x:
+        if phiarg(x, p) != phiarg(x, q):
+            return False
+        x = x.link
+    return True
+def _ifcombine(fn, h):
+    if h.jmp.type != D.Jjnz or h.s1 is h.s2 or rtype(h.jmp.arg) != RTmp:
+        return False
+    d = fn.tmp[rval(h.jmp.arg)].def_
+    if d is None or iscmp(d.op) is None or fn.tmp[rval(h.jmp.arg)].nuse != 1:
+        return False
+    for x, other, op in ((h.s1, h.s2, D.Oand), (h.s2, h.s1, D.Oor)):
+        ins = _combinable(fn, x, 1)
+        if ins is None or x is h:
+            continue
+        if h.loop > other.loop:
+            continue
+        y, n = (x.s1, x.s2) if op == D.Oand else (x.s2, x.s1)
+        if n is not other:
+            if y is not other:
+                continue
+            ins[-1].op = cmpwlneg(ins[-1].op)
+            x.s1, x.s2 = x.s2, x.s1
+            y, n = n, y
+        if y is x or y is other or not _samephis(other, h, x):
+            continue
+        r = newtmp('cb', Kw, fn)
+        h.ins = h.ins[:h.nins] + ins + [D.Ins(op, Kw, r, h.jmp.arg, x.jmp.arg)]
+        h.nins = len(h.ins)
+        for i in ins:
+            if i.to != D.R:
+                fn.tmp[rval(i.to)].bid = h.id
+        x.ins = []
+        x.nins = 0
+        x.jmp.type = D.Jhlt
+        x.jmp.arg = D.R
+        s1, s2 = (y, other) if op == D.Oand else (other, y)
+        for t in (y, other):
+            p = t.phi
+            while p:
+                p.blk = [h if b is x else b for b in p.blk] if t is y else p.blk
+                p = p.link
+        x.s1 = x.s2 = None
+        h.jmp.arg = r
+        h.s1, h.s2 = s1, s2
+        return True
+    return False
+def _deadphis(fn):
+    dead = False
+    for b in fn.rpo[:fn.nblk]:
+        kept = []
+        p = b.phi
+        while p:
+            if fn.tmp[rval(p.to)].nuse:
+                kept.append(p)
+            else:
+                dead = True
+            p = p.link
+        if dead:
+            for x, y in zip(kept, kept[1:] + [None]):
+                x.link = y
+            b.phi = kept[0] if kept else None
+    return dead
+def _rename(fn, old, new):
+    for b in fn.rpo[:fn.nblk]:
+        p = b.phi
+        while p:
+            p.arg = [new if a == old else a for a in p.arg]
+            p = p.link
+        for i in b.ins[:b.nins]:
+            if i.arg[0] == old:
+                i.arg[0] = new
+            if i.arg[1] == old:
+                i.arg[1] = new
+        if b.jmp.arg == old:
+            b.jmp.arg = new
+def _mergeline(fn):
+    merged = False
+    for b in fn.rpo[:fn.nblk]:
+        if b.s1 is None:
+            continue
+        while b.jmp.type == D.Jjmp and b.s1 is not b and b.s1 is not fn.start and b.s1.npred == 1:
+            s = b.s1
+            p = s.phi
+            while p:
+                _rename(fn, p.to, p.arg[0])
+                p = p.link
+            b.ins = b.ins[:b.nins] + s.ins[:s.nins]
+            b.nins = len(b.ins)
+            for i in s.ins[:s.nins]:
+                if i.to != D.R:
+                    fn.tmp[rval(i.to)].bid = b.id
+            b.jmp.type, b.jmp.arg = s.jmp.type, s.jmp.arg
+            b.s1, b.s2 = s.s1, s.s2
+            for t in (s.s1, s.s2):
+                p = t.phi if t else None
+                while p:
+                    p.blk = [b if x is s else x for x in p.blk]
+                    p = p.link
+            s.phi, s.ins, s.nins = None, [], 0
+            s.jmp.type, s.jmp.arg = D.Jhlt, D.R
+            s.s1 = s.s2 = None
+            merged = True
+    return merged
+def run(fn):
+    from . import cfg, ssa
+    any_ = False
+    cfg.fillloop(fn)
+    for _ in range(6):
+        cur = False
+        for b in list(fn.rpo[:fn.nblk]):
+            if _thread(fn, b):
+                cur = True
+        if not cur:
+            if _deadphis(fn):
+                ssa.filluse(fn)
+            if _mergeline(fn):
+                cur = True
+                cfg.fillcfg(fn)
+                ssa.filluse(fn)
+                cfg.filldom(fn)
+            for b in list(fn.rpo[:fn.nblk]):
+                if _ifcombine(fn, b):
+                    cur = True
+                    break
+        if not cur:
+            break
+        any_ = True
+        cfg.fillcfg(fn)
+        ssa.filluse(fn)
+        cfg.filldom(fn)
+    return any_
 ''',
 'backend/util.py': '''\
 from . import defs as D
@@ -19878,6 +22522,10 @@ def funcbranch(f, e, bt, bf):
             funcexpr(f, e)
             e = e.next
         return funcbranch(f, e, bt, bf)
+    v = _memcmpzero(f, e) if k == EXPRCALL else None
+    if v is not None:
+        funcjnz(f, v, TY.typeint, bt, bf)
+        return v
     v = funcexpr(f, e)
     funcjnz(f, v, e.type, bt, bf)
     return v
@@ -19956,6 +22604,111 @@ def funcfma(f, e):
     inst.arg2 = c
     f.end.insts.append(inst)
     return inst.res
+_INLINEMEM = 64
+_CHUNKS = ((8, ILOADL, ISTOREL, 'l'), (4, ILOADW, ISTOREW, 'w'), (2, ILOADUH, ISTOREH, 'w'),
+           (1, ILOADUB, ISTOREB, 'w'))
+def _stripcast(x):
+    while x.kind == EXPRCAST:
+        x = x.base
+    return x
+def _argcount(e):
+    n = 0
+    a = e.args
+    while a:
+        n += 1
+        a = a.next
+    return n
+def _chunks(n):
+    off = 0
+    for size, load, store, cls in _CHUNKS:
+        while n - off >= size:
+            yield off, size, load, store, cls
+            off += size
+def _memcmpzero(f, e):
+    if not builtins or e.kind != EXPRCALL:
+        return None
+    b = e.base
+    if not (b.kind == EXPRUNARY and b.op == TBAND and b.base.kind == EXPRIDENT):
+        return None
+    d = b.base.decl
+    name = d.asmname.lstrip('_') if d.asmname else d.name
+    if name != 'memcmp' or d.kind != DECLFUNC or d.linkage != LINKEXTERN or d.defined or _argcount(e) != 3:
+        return None
+    c = _stripcast(e.args.next.next)
+    if c.kind != EXPRCONST or not c.type.prop & PROPINT or not 0 <= c.u <= 32:
+        return None
+    x = funcexpr(f, e.args)
+    y = funcexpr(f, e.args.next)
+    diff = None
+    for off, size, load, store, cls in _chunks(c.u):
+        p = funcinst(f, IADD, 'l', x, mkintconst(off)) if off else x
+        q = funcinst(f, IADD, 'l', y, mkintconst(off)) if off else y
+        v = funcinst(f, IXOR, cls, funcinst(f, load, cls, p, None), funcinst(f, load, cls, q, None))
+        if cls == 'w':
+            v = funcinst(f, IEXTUW, 'l', v, None)
+        diff = v if diff is None else funcinst(f, IOR, 'l', diff, v)
+    if diff is None:
+        return mkintconst(0)
+    return funcinst(f, ICNEL, 'w', diff, mkintconst(0))
+def _libcall(f, e, name, d):
+    ft = d.type
+    nargs = _argcount(e)
+    if name in ('pow', 'powf') and nargs == 2:
+        t = TY.typedouble if name == 'pow' else TY.typefloat
+        y = _stripcast(e.args.next)
+        sign = 1.0
+        if y.kind == EXPRUNARY and y.op == TSUB:
+            y = _stripcast(y.base)
+            sign = -1.0
+        if ft.base is not t or ft.isvararg or y.kind != EXPRCONST or e.type is not t \\
+                or e.args.type is not t:
+            return None
+        cls = qbetype(t).base
+        p = sign * (y.f if y.type.prop & PROPFLOAT else float(y.i))
+        if p == 2.0:
+            x = funcexpr(f, e.args)
+            return funcinst(f, IMUL, cls, x, x)
+        if p == 1.0:
+            return funcexpr(f, e.args)
+        if p == -1.0:
+            one = mkfltconst(VALUE_DBLCONST if cls == 'd' else VALUE_FLTCONST, 1.0)
+            return funcinst(f, IDIV, cls, one, funcexpr(f, e.args))
+        return None
+    if name == 'strlen' and nargs == 1:
+        s = _stripcast(e.args)
+        if s.kind == EXPRUNARY and s.op == TBAND:
+            s = s.base
+        if s.kind != EXPRSTRING or s.type.base.size != 1 or e.type.size != 8:
+            return None
+        data = bytes(s.sdata)
+        n = data.find(0)
+        return mkintconst(len(data) if n < 0 else n)
+    if name == 'memcpy' and nargs == 3 and e.type.kind == TYPEPOINTER:
+        c = _stripcast(e.args.next.next)
+        if c.kind != EXPRCONST or not c.type.prop & PROPINT or not 0 <= c.u <= _INLINEMEM:
+            return None
+        dst = funcexpr(f, e.args)
+        src = funcexpr(f, e.args.next)
+        for off, size, load, store, cls in _chunks(c.u):
+            a = funcinst(f, IADD, 'l', src, mkintconst(off)) if off else src
+            v = funcinst(f, load, cls, a, None)
+            a = funcinst(f, IADD, 'l', dst, mkintconst(off)) if off else dst
+            funcinst(f, store, 0, v, a)
+        return dst
+    if name == 'memset' and nargs == 3 and e.type.kind == TYPEPOINTER:
+        c = _stripcast(e.args.next.next)
+        v = _stripcast(e.args.next)
+        if c.kind != EXPRCONST or v.kind != EXPRCONST or not c.type.prop & PROPINT \\
+                or not v.type.prop & PROPINT or not 0 <= c.u <= _INLINEMEM:
+            return None
+        dst = funcexpr(f, e.args)
+        byte = v.u & 0xff
+        for off, size, load, store, cls in _chunks(c.u):
+            a = funcinst(f, IADD, 'l', dst, mkintconst(off)) if off else dst
+            pat = int.from_bytes(bytes([byte]) * size, 'little')
+            funcinst(f, store, 0, mkintconst(pat), a)
+        return dst
+    return None
 def funcbuiltin(f, e):
     b = e.base
     if not (b.kind == EXPRUNARY and b.op == TBAND and b.base.kind == EXPRIDENT):
@@ -19967,9 +22720,14 @@ def funcbuiltin(f, e):
         op, cls = bit
         return funcinst(f, op, cls, convert(f, d.type.params.type, e.args.type,
                                             funcexpr(f, e.args)), None)
-    spec = _BUILTINS.get(d.asmname.lstrip('_') if d.asmname else d.name)
-    if spec is None or d.kind != DECLFUNC or d.linkage != LINKEXTERN:
+    name = d.asmname.lstrip('_') if d.asmname else d.name
+    spec = _BUILTINS.get(name)
+    if d.kind != DECLFUNC or d.linkage != LINKEXTERN:
         return None
+    if d.defined:
+        return None
+    if spec is None:
+        return _libcall(f, e, name, d)
     op, nargs, size = spec
     t = TY.typedouble if size == 8 else TY.typefloat
     ft = d.type
@@ -20109,6 +22867,12 @@ def funcexpr(f, e):
             v = funcfma(f, e)
             if v is not None:
                 return v
+        if (e.op == TEQL or e.op == TNEQ) and e.l.kind == EXPRCALL:
+            r = _stripcast(e.r)
+            if r.kind == EXPRCONST and r.type.prop & PROPINT and r.u == 0:
+                v = _memcmpzero(f, e.l)
+                if v is not None:
+                    return v if e.op == TNEQ else funcinst(f, ICEQW, 'w', v, mkintconst(0))
         l = funcexpr(f, e.l)
         r = funcexpr(f, e.r)
         t = e.l.type
@@ -25626,7 +28390,7 @@ import sys
 from ..backend import defs as D
 from ..backend.parse import printfn
 import cimo.middle as M
-from . import ir, loops, memdep, inner, jam, ifconv
+from . import ir, loops, memdep, inner, jam, ifconv, unswitch
 def _restrict_names(fn):
     info = M.params.get(fn.name) or []
     return set(name.lstrip('%') for name, r in info if r)
@@ -25672,8 +28436,10 @@ def optimize(fn):
     done = set()
     innermost = lambda lp: not lp.children
     nest2 = lambda lp: len(lp.children) == 1 and not lp.children[0].children
-    changed = _phase(fn, rnames, innermost,
-                     lambda fn, lp, rts: inner.transform(fn, lp, rts, done, 'full'), set())
+    unswitch._count.pop(fn.name, None)
+    changed = _phase(fn, rnames, innermost, lambda fn, lp, rts: unswitch.transform(fn, lp), set())
+    changed |= _phase(fn, rnames, innermost,
+                      lambda fn, lp, rts: inner.transform(fn, lp, rts, done, 'full'), set())
     if M.unroll > 1:
         jdone = set()
         changed |= _phase(fn, rnames, nest2,
@@ -25692,12 +28458,136 @@ def optimize(fn):
         printfn(fn, sys.stderr)
     return changed
 ''',
+'middle/unswitch.py': '''\
+from ..backend import defs as D
+from ..backend.defs import R, Ins, rval
+from . import ir
+import cimo.middle as M
+MAXINS = 50
+MAXPERFN = 8
+_count = {}
+def _condition(fn, lp):
+    ids = {b.id for b in lp.blocks}
+    for b in sorted(lp.blocks, key=lambda x: x.id):
+        if b.jmp.type != D.Jjnz or b.s1 is b.s2 or not ir.istmp(b.jmp.arg):
+            continue
+        t = fn.tmp[rval(b.jmp.arg)]
+        if t.def_ is None:
+            continue
+        if t.bid not in ids:
+            return b, None
+        d = t.def_
+        if d.op in ir.PURE_SAFE and all(not ir.istmp(a) or fn.tmp[rval(a)].bid not in ids for a in d.arg):
+            return b, d
+    return None
+def transform(fn, lp):
+    n = _count.get(fn.name, 0)
+    if n >= MAXPERFN or lp.children:
+        return False
+    if sum(len(ir.ins(b)) for b in lp.blocks) > MAXINS:
+        return False
+    if any(not ir.copyable(i) for b in lp.blocks for i in ir.ins(b)):
+        return False
+    c = _condition(fn, lp)
+    if c is None:
+        return False
+    c, hoist = c
+    exits = lp.exits()
+    targets = {e for _, e in exits}
+    if len(targets) != 1:
+        return False
+    E = targets.pop()
+    if any(p not in lp.blocks for p in E.pred[:E.npred]):
+        return False
+    H = lp.header
+    outs = lp.outside_preds()
+    if len(outs) != 1 or outs[0].jmp.type != D.Jjmp:
+        return False
+    P = outs[0]
+    env = {}
+    for b in lp.blocks:
+        for p in ir.phis(b):
+            env[rval(p.to)] = ir.newtmp('us', p.cls, fn)
+        for i in ir.ins(b):
+            if ir.istmp(i.to):
+                env[rval(i.to)] = ir.newtmp('us', i.cls, fn)
+    def m(r):
+        return env.get(rval(r), r) if ir.istmp(r) else r
+    order = sorted(lp.blocks, key=lambda x: x.id)
+    copy = {}
+    after = order[-1]
+    for b in order:
+        nb = ir.newblock(fn, after, 'us')
+        copy[b] = nb
+        after = nb
+    for b in order:
+        nb = copy[b]
+        ir.setins(nb, [Ins(i.op, i.cls, m(i.to), m(i.arg[0]), m(i.arg[1])) for i in ir.ins(b)])
+        for p in ir.phis(b):
+            ir.addphi(nb, p.cls, m(p.to), [(copy.get(x, x), m(a)) for x, a in zip(p.blk[:p.narg], p.arg[:p.narg])])
+        nb.jmp.type = b.jmp.type
+        nb.jmp.arg = m(b.jmp.arg)
+        nb.s1 = copy.get(b.s1, b.s1) if b.s1 else None
+        nb.s2 = copy.get(b.s2, b.s2) if b.s2 else None
+    inside = set(order) | set(copy.values())
+    uses = set()
+    for b in ir.blocks(fn):
+        if b in inside:
+            continue
+        refs = list(b.jmp.arg for _ in (0,))
+        for i in ir.ins(b):
+            refs += i.arg
+        for p in ir.phis(b):
+            for x, a in zip(p.blk[:p.narg], p.arg[:p.narg]):
+                if not (b is E and x in lp.blocks):
+                    refs.append(a)
+        uses.update(rval(r) for r in refs if ir.istmp(r) and rval(r) in env)
+    preds = [x for x, _ in exits]
+    for p in ir.phis(E):
+        for x in preds:
+            ir_arg = ir.phiargof(p, x)
+            p.blk.append(copy[x])
+            p.arg.append(m(ir_arg))
+            p.narg += 1
+    joined = {}
+    for t in uses:
+        r = D.TMP(t)
+        v = ir.newtmp('us', fn.tmp[t].cls, fn)
+        ir.addphi(E, fn.tmp[t].cls, v, [(x, r) for x in preds] + [(copy[x], m(r)) for x in preds])
+        joined[r] = v
+    if joined:
+        new = set(v for v in joined.values())
+        for b in ir.blocks(fn):
+            if b in inside:
+                continue
+            for i in ir.ins(b):
+                i.arg[0] = joined.get(i.arg[0], i.arg[0])
+                i.arg[1] = joined.get(i.arg[1], i.arg[1])
+            b.jmp.arg = joined.get(b.jmp.arg, b.jmp.arg)
+            for p in ir.phis(b):
+                if p.to in new:
+                    continue
+                for k in range(p.narg):
+                    if not (b is E and (p.blk[k] in inside)):
+                        p.arg[k] = joined.get(p.arg[k], p.arg[k])
+    cond = c.jmp.arg
+    if hoist is not None:
+        cond = ir.newtmp('us', hoist.cls, fn)
+        ir.setins(P, ir.ins(P) + [Ins(hoist.op, hoist.cls, cond, hoist.arg[0], hoist.arg[1])])
+    ir.setjnz(P, cond, H, copy[H])
+    s1, s2 = c.s1, c.s2
+    ir.setjmp(c, s1)
+    ir.setjmp(copy[c], copy.get(s2, s2))
+    _count[fn.name] = n + 1
+    M.count('unswitch')
+    return True
+''',
 'onefile-keys.json': '''\
 {
-"compiler": "0aaf3e70dd11d631a6d0",
-"runtime-arm64": "a0fb67e7471b31b9b9e1",
-"runtime-arm64_apple": "39deae5433dc1fc24d8d",
-"runtime-arm64_win": "ecdcd567ba652971b7c0"
+"compiler": "eaad4d8757ed41794334",
+"runtime-arm64": "3e707266948c4db61a20",
+"runtime-arm64_apple": "56c7bacad7780d712b2a",
+"runtime-arm64_win": "efe61714f250b956896f"
 }
 ''',
 'onefile.py': '''\

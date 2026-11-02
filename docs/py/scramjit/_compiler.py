@@ -249,6 +249,7 @@ class Compiler:
         self.gotchas = {}      # Python line -> a way this line can differ from Python
         self.hoisted_lines = set()   # Python lines whose checks live only in a versioned loop's slow copy
         self.slow_copy = 0     # inside that slow copy
+        self.forwards = {}     # array -> (loop variable, temp holding its element at var - 1)
         self.polls = sys.platform != 'emscripten'       # no signals to wait for in Pyodide
         self.uses_stop = False  # the kernel takes sj_stop, the Ctrl-C flag it checks (see open_counted)
         self.counted = {}      # depth of an open counted loop -> what closing it must emit
@@ -1242,10 +1243,59 @@ class Compiler:
 
     def unit_loop(self, s, var, ts, te, fact, short=False):
         ti = self.temp()
+        name = self.forwarded(s, var, fact)
+        if name:                               # the first y[i - 1] really is read from memory
+            t = self.temp()
+            self.emit(f'{self.env[name].elem.ctype} {t} = {te} > {ts} && {ts} - 1 < {self.extent(name, 0)} '
+                      f'? v_{name}[{ts} - 1] : 0;')
+            self.forwards[name] = (var, t)
         self.short_range = short
         self.open_counted('int64_t', ti, ts, te)
         self.emit(f'v_{var} = {ti};')
         self.loop_body(s, var, fact)
+        self.forwards.pop(name, None)
+
+    def forwarded(self, s, var, fact):
+        """The array y whose y[var - 1] this loop can read from a temporary instead of memory, because
+        the last iteration just stored it: the one array store in the loop is y[var] = ..., on every
+        iteration, and no array store means no other name for that memory can change it. y[var - 1] is
+        read only up to that store. The dtype holds exactly what the C value does. Otherwise None."""
+        if not fact or fact[0] is None:
+            return None
+        body = list(ast.walk(ast.Module(body=s.body, type_ignores=[])))
+        if any(isinstance(n, (ast.For, ast.While, ast.comprehension, ast.Continue)) for n in body):
+            return None
+        stores = [n for n in body if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store)]
+        if len(stores) != 1 or not isinstance(stores[0].value, ast.Name):
+            return None
+        target = stores[0]
+        name = target.value.id
+        t = self.env.get(name)
+        if t is None or t.kind != 'array' or t.ndim != 1 or t.elem.name not in ('np.float64', 'np.int64') \
+                or not (isinstance(target.slice, ast.Name) and target.slice.id == var):
+            return None
+        at = [k for k, b in enumerate(s.body) if isinstance(b, ast.Assign) and b.targets == [target]]
+        if not at:
+            return None                        # inside an if, or not a plain assignment
+
+        def reads(nodes):
+            return [n for b in nodes for n in ast.walk(b) if self.is_previous(n, name, var)]
+        if not reads(s.body[:at[0] + 1]) or reads(s.body[at[0] + 1:]):
+            return None
+        self.facts[var] = fact
+        try:
+            nonneg, inbounds = self.index_facts(name, reads(s.body)[0].slice, 0)
+        finally:
+            self.facts.pop(var, None)
+        return name if nonneg and (inbounds or not self.boundscheck) else None
+
+    def is_previous(self, e, name, var):
+        """Is e the element name[var - 1]?"""
+        return isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id == name \
+            and isinstance(e.slice, ast.BinOp) and isinstance(e.slice.op, ast.Sub) \
+            and isinstance(e.slice.left, ast.Name) and e.slice.left.id == var \
+            and isinstance(e.slice.right, ast.Constant) and type(e.slice.right.value) is int \
+            and e.slice.right.value == 1
 
     def loop_body(self, s, var, fact):
         if self.env[var].np == 'dyn':
@@ -1625,6 +1675,8 @@ class Compiler:
             self.emit(f'if ({cond}) SJ_FAIL({INT_BOUNDS_ERROR}, {self.line(target)}, {iv}, {NARROW_INT_DTYPES.index(dtype)});')
         val = self.hold(self.coerce(v[0], vt, et), et)
         self.emit(f'{arr}[{idx}] = {val};')
+        if name in self.forwards:
+            self.emit(f'{self.forwards[name][1]} = {val};')
         if self.env[name].kind == 'list' and et.np == 'dyn':
             self.emit(f'v_{name}__np[{idx}] = {flag};')
 
@@ -1865,8 +1917,10 @@ class Compiler:
                 and self.env[e.value.id].kind == 'tuple':
             return self.tuple_var(e.value.id)[self.tuple_index(e)]
         if isinstance(e, ast.Subscript):
-            arr, idx = self.element(e)
             name = e.value.id
+            if name in self.forwards and self.is_previous(e, name, self.forwards[name][0]):
+                return self.forwards[name][1], '1'
+            arr, idx = self.element(e)
             return self.hold(f'{arr}[{idx}]', self.env[name].elem), self.hold_flag(self.elem_flag(name, idx))
         if isinstance(e, ast.Call):
             return self.call(e)

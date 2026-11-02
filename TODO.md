@@ -33,8 +33,7 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 
 ## Line counts, what's left
 
-Turning them on from a notebook or the browser, which have no command line (`enable_counts` is private); a heatmap over the
-LLM demo's code; spills per line, once cimo can report them.
+Spills per line, once cimo can report them.
 
 ## Next
 

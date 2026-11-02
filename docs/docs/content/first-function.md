@@ -64,4 +64,5 @@ def ema(x, y, a: float):
 | `boundscheck` | `True` | Check every index and raise `IndexError` as Python does. `False` drops the checks in loops you have verified. |
 | `cache` | `True` | Keep compiled code on disk so other processes reuse it. Code is always cached in memory. |
 | `fallback` | `True` | Run what can't be compiled as Python, with a `FallbackWarning`. `False` raises `CompileError` instead; see [Fallback and errors](errors.md). |
+| `counts` | `False` | Count how often each line runs, for `f.line_counts()` and `f.preflight()`, in a notebook or anywhere without the command line. Slows the function; see [which lines ran most](profiling.md#which-lines-ran-most). |
 | `parity` | `True` | Results identical to CPython, bit for bit. `False` trades that for speed: float `/`, `//` and `%` by zero and `math` functions give `inf` and `nan` instead of raising, `math` functions use cimo's C library (last-bit differences), and int-float arithmetic and comparisons use plain double precision. |

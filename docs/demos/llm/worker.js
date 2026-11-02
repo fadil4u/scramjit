@@ -126,6 +126,18 @@ onmessage = async ({ data: m }) => {
       const files = (r.files || []).map(path => ({ path, data: py.FS.readFile(path) }));
       postMessage({ type: 'precompiled', id: m.id, seconds: r.seconds, error: r.error, files }, files.map(f => f.data.buffer));
     }
+    if (m.type === 'precompileHeat') {
+      await breathe();
+      const r = jsonOf(demo.precompile(m.code, true));
+      const files = (r.files || []).map(path => ({ path, data: py.FS.readFile(path) }));
+      postMessage({ type: 'heatFiles', code: m.code, error: r.error, files }, files.map(f => f.data.buffer));
+    }
+    if (m.type === 'heat') {
+      await breathe();
+      const r = jsonOf(demo.count_lines(m.code || '', m.on));
+      postMessage({ type: 'heat', code: m.code, on: m.on, ...r });
+      if (m.on && !r.error && !r.stale) await keepCompiled('counted\0' + m.code);
+    }
     if (m.type === 'adopt') for (const f of m.files) { py.FS.mkdirTree(f.path.slice(0, f.path.lastIndexOf('/'))); py.FS.writeFile(f.path, f.data); }
     if (m.type === 'compile') {
       await breathe();
@@ -140,5 +152,5 @@ onmessage = async ({ data: m }) => {
       postMessage({ type: 'wat', code: m.code, text: t });
     }
     if (m.type === 'gen') postMessage({ type: 'text', ...jsonOf(demo.step(m.ms)) });
-  } catch (err) { postMessage({ type: 'failed', compiler: m.type === 'bootCompiler' || m.type === 'precompile', error: err.message }); }
+  } catch (err) { postMessage({ type: 'failed', compiler: ['bootCompiler', 'precompile', 'precompileHeat'].includes(m.type), error: err.message }); }
 };

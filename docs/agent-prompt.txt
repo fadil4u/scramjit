@@ -27,6 +27,7 @@ Options, all default True: @scram(boundscheck=, cache=, fallback=, parity=)
 boundscheck=False: no index checks; out of bounds corrupts memory.
 cache=False: nothing written to disk.
 fallback=False: raise CompileError instead of running as Python.
+counts=True: count how often each line runs, for f.line_counts() and f.preflight(); slows the function, for a look rather than for production.
 parity=False: faster; inf/nan instead of ZeroDivisionError and math errors.
 Function members: f.preflight(), f.signatures, f.c(), f.__wrapped__ (the original).
 Annotations int, float, bool are enforced at the call (TypeError).

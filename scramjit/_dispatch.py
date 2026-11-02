@@ -229,6 +229,8 @@ def _make_plan(f, entry, args):
     path. It's generated because a call is where the time goes: what's known from the types is decided
     here, once. Anything it can't vouch for at call time (an int past 64 bits, an array of another
     dtype, dimension or layout, an empty one) goes to f._slow, so plans change only speed."""
+    if entry.counts is not None:
+        return f._slow_call
     env = {'kernel': entry.kernel, 'slow': f._slow, 'failed': f._failed, 'box': f._box, 'ret': entry.ret, 'pool': [],
            'addressof': ctypes.addressof, 'from_buffer': ctypes.c_char.from_buffer, 'bytearray': bytearray, 'memoryview': memoryview}
     names = [f'a{i}' for i in range(len(args))]
@@ -326,13 +328,14 @@ def _make_plan(f, entry, args):
 
 
 class Function:
-    def __init__(self, fn, boundscheck=True, cache=True, fallback=True, parity=True, _loop=None):
+    def __init__(self, fn, boundscheck=True, cache=True, fallback=True, parity=True, _loop=None, counts=False):
         functools.update_wrapper(self, fn)
         self._fn = fn
         self._py = fn             # what runs when a signature doesn't compile: fn, or fn with its loops lifted
         self._lifted = None       # the Functions of its lifted loops, once that has been tried
         self._loop = _loop        # a lifted loop: (its function's tree, the first line, the file)
         self._owner = fn.__name__ # the decorated function this is, or that this loop was lifted from
+        self._counting = counts   # @scram(counts=True)
         self._boundscheck = boundscheck
         self._fallback = fallback
         self._parity = parity
@@ -457,7 +460,9 @@ class Function:
                     _running[me] = outer
 
     def line_counts(self):
-        """Over all signatures and lifted loops: (line -> times it ran, line -> (kind, times its body ran))."""
+        """With counting on, over all signatures and lifted loops: (line -> times it ran, line -> (kind, times
+        its body ran)), kind being 'if' or 'loop'. Lines are the file's. A kernel adds to the counts with the GIL
+        released, so another thread can read them during a call."""
         runs, heads = {}, {}
         for f in [self] + self._all_loops():
             for entry in list(f._cache.values()):
@@ -526,7 +531,7 @@ class Function:
         self._lifted = []
 
         def native(python, tree, loop):
-            f = Function(python, self._boundscheck, self._use_disk, True, self._parity, (tree, self._first))
+            f = Function(python, self._boundscheck, self._use_disk, True, self._parity, (tree, self._first), self._counting)
             f._owner = self._owner
             return f
 
@@ -539,7 +544,7 @@ class Function:
         for x, t in zip(args, key):
             if t is None:
                 raise Unsupported(None, f'an argument of type {_describe(x, t)} is not compiled')
-        counts = _counts is True or bool(_counts and self._owner in _counts)
+        counts = self._counting or _counts is True or bool(_counts and self._owner in _counts)
         c = Compiler(self._tree, list(key), self._fn.__globals__, self._filename, self._first - 1,
                      self._boundscheck, self._parity, counts)
         source = c.generate()

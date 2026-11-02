@@ -26,6 +26,7 @@ let compiled = false, runningPlain = true, nudged = false, startedAt = 0, stage 
 let tokens = 0, recent = [], version = 0, span = null, pyRate = 0;
 let compiler = null, compilerUp = false, compilerDog, background = null, want = null, editTimer = null, typing = false, carryIntro = false, barOn = false;
 const known = new Set(), infos = new Map();
+let heatWanted = false, heatFor = null, heatAsked = null, heatDog, heatPainted = 0, heatLines = [];   // the heatmap
 let sharedWaiting = false;                             // the editor holds code from a link: nothing runs it until asked
 // A second Python uses memory; a machine that can't spare it compiles in the writing worker, pausing the story.
 const roomy = () => (navigator.deviceMemory || 8) >= 4 && (navigator.hardwareConcurrency || 4) >= 4 && !/Mobi/.test(navigator.userAgent);
@@ -81,6 +82,7 @@ function hung() {
   if (!booted) { say('Stopped'); return waitStops(); }
   say('Restarting');
   restarting = lastGood || original; known.clear();
+  heatFor = heatAsked = null; clearHeat();
   start();
 }
 function start() { worker = new Worker('worker.js'); worker.onmessage = onMessage; arm(BOOT_MS); worker.postMessage({ type: 'boot' }); }
@@ -94,6 +96,12 @@ function startCompiler() {
 function dropCompiler() { clearTimeout(compilerDog); if (compiler) compiler.terminate(); compiler = null; compilerUp = false; }
 function onCompiler({ data: m }) {
   if (m.type === 'compilerReady') { compilerUp = true; state({ compilerUp: m.seconds }); pump(); }
+  if (m.type === 'heatFiles') {
+    if (!heatWanted || m.code !== heatAsked) return;
+    if (m.error) return heatFailed(m.error);
+    worker.postMessage({ type: 'adopt', files: m.files }, m.files.map(f => f.data.buffer));
+    worker.postMessage({ type: 'heat', code: m.code, on: true });
+  }
   if (m.type === 'failed') {                           // no second worker: compile in the writing one
     const b = background;
     dropCompiler(); background = null;
@@ -144,6 +152,12 @@ function onMessage({ data: m }) {
     swapIn(restarting || (sharedWaiting ? original : editor.getValue()), '', false, undefined, compiled);
   }
   if (m.type === 'compiled') swapped(m);
+  if (m.type === 'heat' && m.on && m.code === heatAsked) {
+    clearTimeout(heatDog);
+    if (m.error) heatFailed(m.error);
+    else if (m.stale) heatAsked = null;                // swapped meanwhile: swapped() asks again
+    else { heatFor = m.code; note(''); say('Counting every line. The story runs a little slower while this is on.'); state({ heatOn: true }); }
+  }
   if (m.type === 'text') gotText(m);
   if (m.type === 'wat') {
     const v = infos.get(m.code);
@@ -224,6 +238,9 @@ function swapped(m) {
   previousGood = lastGood; lastGood = p.code;
   if (runningPlain === p.compiled) recent = [];
   runningPlain = !p.compiled;
+  heatFor = heatAsked = null; clearHeat();
+  $('heat').disabled = runningPlain;
+  if (heatWanted && p.compiled) startHeat();
   const fresh = !m.cached;
   if (p.compiled) {
     known.add(p.code);
@@ -348,6 +365,7 @@ function newSpan(markText) {
 function gotText(m) {
   if (!compiling) calm();
   asking = false;
+  if (m.lines) paintHeat(m.lines);
   if (m.text.length) {
     if (!firstToken) { firstToken = true; $('wait').hidden = true; state({ firstToken: true }); }
     write(m.text);
@@ -489,6 +507,63 @@ async function unpacked(text) {
 }
 function endShared() { sharedWaiting = false; $('shared').hidden = true; }
 function clearLink() { history.replaceState(null, '', location.pathname + location.search); }
+// ---- the heatmap: a second compiled copy that counts its lines takes over writing while this is on
+function startHeat() {
+  const code = lastGood;
+  if (!heatWanted || runningPlain || !code || heatAsked === code) return;
+  heatAsked = code;
+  note('compiling a copy that counts…', true);
+  clearTimeout(heatDog);
+  heatDog = setTimeout(() => heatFailed(`The copy that counts lines didn't compile in ${COMPILE_MS / 1000} s.`), COMPILE_MS);
+  if (compiler && compilerUp) compiler.postMessage({ type: 'precompileHeat', code });
+  else worker.postMessage({ type: 'heat', code, on: true });
+}
+function heatFailed(error) {
+  clearTimeout(heatDog);
+  setHeat(false);
+  showError(error);
+}
+function clearHeat() {
+  editor.operation(() => {
+    for (const [h, cls] of heatLines) editor.removeLineClass(h, 'background', cls);
+    heatLines = [];
+    editor.clearGutter('heat');
+  });
+}
+function setHeat(on) {
+  heatWanted = on;
+  $('heat').setAttribute('aria-pressed', on);
+  editor.setOption('gutters', on ? ['heat', 'CodeMirror-linenumbers'] : ['CodeMirror-linenumbers']);
+  if (on) { showStage('python'); return startHeat(); }
+  clearTimeout(heatDog);
+  heatFor = heatAsked = null;
+  clearHeat();
+  note('');
+  worker.postMessage({ type: 'heat', on: false });
+  say('Writing');
+}
+const shortCount = v => v >= 1e9 ? (v / 1e9).toFixed(1) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e4 ? Math.round(v / 1e3) + 'K' : String(v);
+function paintHeat(lines) {
+  const now = performance.now();
+  if (!heatWanted || now - heatPainted < 250 || heatFor !== editor.getValue()) return;
+  heatPainted = now;
+  const top = Math.max(1, ...Object.values(lines));
+  clearHeat();
+  editor.operation(() => {
+    for (const [line, v] of Object.entries(lines)) {
+      const h = editor.getLineHandle(+line - 1);
+      if (!h || !v) continue;
+      const cls = 'h' + Math.max(1, Math.ceil(5 * Math.sqrt(v / top)));
+      editor.addLineClass(h, 'background', cls);
+      heatLines.push([h, cls]);
+      const n = document.createElement('div');
+      n.className = 'heat-n'; n.textContent = shortCount(v);
+      editor.setGutterMarker(h, 'heat', n);
+    }
+  });
+  state({ heatTop: top, heatPaints: (window.demoState?.heatPaints || 0) + 1, heatHot: Object.entries(lines).sort((a, b) => b[1] - a[1]).slice(0, 3).map(x => +x[0]) });
+}
+$('heat').onclick = () => setHeat(!heatWanted);
 $('share').onclick = async () => {
   const code = editor.getValue();
   if (code === original) clearLink(); else history.replaceState(null, '', '#code=' + await packed(code));
@@ -530,6 +605,7 @@ editor = CodeMirror.fromTextArea($('code'), { mode: 'python', theme: 'sj', lineN
 viewer = CodeMirror($('panel'), { theme: 'sj', lineNumbers: true, readOnly: 'nocursor', mode: 'text/x-csrc', scrollbarStyle: null });
 // typing recompiles once it pauses, as in the home page's demos; presets and Reset ask for themselves
 editor.on('change', (cm, c) => {
+  if (heatLines.length) clearHeat();                   // the counts are for the code before this change
   clearTimeout(changedLines.t);
   changedLines.t = setTimeout(() => { changedLines(); showChips(); }, 120);
   if (c.origin === 'setValue' || c.origin === '+edit') return;
@@ -546,7 +622,7 @@ editor.on('change', (cm, c) => {
   editTimer = setTimeout(() => request(editor.getValue(), ''), TYPING_MS);
 });
 new ResizeObserver(() => { editor.refresh(); viewer.refresh(); }).observe($('pane'));   // the code panel is as tall as the story's
-window.demoApi = { editor, viewer, EDITS, setMode, showStage, get lastGood() { return lastGood; }, get stage() { return stage; } };
+window.demoApi = { get heatFor() { return heatFor; }, editor, viewer, EDITS, setMode, showStage, get lastGood() { return lastGood; }, get stage() { return stage; } };
 
 async function kept() { try { const c = await caches.open('scramjit-llm-1'); return !!(await c.match('https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin')); } catch { return false; } }
 (async () => {

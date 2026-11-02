@@ -242,6 +242,41 @@ def f(n: int):
         _dispatch._counts, _dispatch._profile = saved
 
 
+def test_the_decorator_option():
+    f = _CountedFromSource('''
+def f(x, n: int):
+    t = 0
+    for i in range(n):
+        if i % 4 == 0:
+            t += 1
+    return t
+''')
+    plain = f.__wrapped__
+    from scramjit import scram
+    g = scram(counts=True)(plain)
+    for _ in range(3):                           # the call after the first takes the fast path, which must count too
+        assert g(None or 0, 100) == plain(0, 100)
+    runs, heads = g.line_counts()
+    assert max(runs.values()) == 300 and ('if', 75) in heads.values()
+    assert 'sj_c' in g.c()
+
+
+def test_the_decorator_option_counts_lifted_loops():
+    f = _CountedFromSource('''
+def f(x):
+    d = {}
+    for i in range(len(x)):
+        x[i] = x[i] * 2.0
+    d['a'] = 1
+    return x[0]
+''')
+    from scramjit import scram
+    g = scram(counts=True)(f.__wrapped__)
+    with pytest.warns(Warning):
+        assert g(np.ones(30)) == 2.0
+    assert 30 in g.line_counts()[0].values()
+
+
 def test_not_counting_leaves_the_code_alone():
     f = _CountedFromSource(SOURCES['jumps'])
     assert f(np.zeros(3), 10) is not None

@@ -121,6 +121,8 @@ $ scramjit preflight examples/hot_lines.py:insertion_sort --counts --run example
 - Counts cover native code, including loops compiled on their own in a partly compiled function. Lines that run as Python have none.
 - Results don't change, and the compiled copies are cached apart from the normal ones.
 
+In a notebook or the browser, where there's no command line, use `@scram(counts=True)` on the function. `f.preflight()` then shows the column, and `f.line_counts()` returns the numbers: a dict of line to times run, and one of each `if` and loop's line to its kind and how often its body ran.
+
 Use the counts, not the times, from a run with `--counts`. Counting took from 3% to 45% more time on our benchmarks, the most in tight loops full of branches, so it changes which lines look expensive. Plain `--run` doesn't count anything.
 
 Two cases aren't exact. When a line raises, the lines after it in the same block read one too many. And threads running the same function at once can lose some counts, since counters are plain additions; their results are still right.

@@ -156,6 +156,7 @@ def compile_forward(code, compiled=True):
             fn, plain = None, _load(code)
         S.previous = S.fn, S.plain, S.use_plain
         S.fn, S.plain, S.use_plain = fn, plain, not compiled
+        S.code, S.counted = code, None
         return json.dumps({'seconds': time.perf_counter() - t, **out})
     except BaseException as e:  # a compile error, or the trial call failing
         return json.dumps({'error': _message(e)})
@@ -198,14 +199,14 @@ def _cached():
     return found
 
 
-def precompile(code):
+def precompile(code, counts=False):
     """For the worker with no weights: compiles against arrays of the right types and hands back the cache
     files, so the worker that's writing the story only has to load them. Empty shapes: nothing runs."""
     t = time.perf_counter()
     before = _cached()
     error = None
     try:
-        fn = scram(fallback=False)(_load(code))
+        fn = scram(fallback=False, counts=counts)(_load(code))
         fn(BOS, 0, 0, 0, 0, 6, 0, 0, *[np.zeros(1) for _ in range(23)])
     except BaseException as e:
         error = _message(e)
@@ -214,6 +215,24 @@ def precompile(code):
     if error and not files:
         return json.dumps({'error': error})
     return json.dumps({'seconds': time.perf_counter() - t, 'files': files})
+
+
+def count_lines(code, on):
+    """Writes with a copy of the running code that counts its lines, or goes back to the one that doesn't."""
+    if not on:
+        S.counted = None
+        return json.dumps({})
+    if code != getattr(S, 'code', None) or S.use_plain:
+        return json.dumps({'stale': True})
+    try:
+        fn = scram(fallback=False, counts=True)(S.plain)
+        keep = S.logits.copy()
+        fn(*_args(BOS, 0, [c.copy() for c in S.caches], [w.copy() for w in S.work]))
+        S.logits[:] = keep
+        S.counted = fn
+        return json.dumps({})
+    except BaseException as e:
+        return json.dumps({'error': _message(e)})
 
 
 def start(prompt):
@@ -229,7 +248,7 @@ def _begin():
 def step(ms):
     """Generates for about `ms`, at least one token. Returns the text and the time in forward passes."""
     out, seconds, n = [], 0.0, 0
-    fn = S.plain if S.use_plain else S.fn
+    fn = S.plain if S.use_plain else getattr(S, 'counted', None) or S.fn
     end = time.perf_counter() + ms / 1000
     try:
         while True:
@@ -256,8 +275,12 @@ def step(ms):
             if time.perf_counter() >= end:
                 break
     except BaseException as e:
+        S.counted = None
         if S.previous and S.previous[1]:
             S.fn, S.plain, S.use_plain = S.previous      # the edit failed further into the story than its trial call
         _begin()
         return json.dumps({'error': _message(e), 'text': out, 'tokens': n, 'seconds': seconds})
-    return json.dumps({'text': out, 'tokens': n, 'seconds': seconds})
+    done = {'text': out, 'tokens': n, 'seconds': seconds}
+    if fn is getattr(S, 'counted', None):
+        done['lines'] = fn.line_counts()[0]
+    return json.dumps(done)

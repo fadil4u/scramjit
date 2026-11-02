@@ -81,7 +81,7 @@ def saxpy(a: float, x, y):
         y[i] += a * x[i]
 ```
 
-The decorator is the whole user-facing API. Options (`boundscheck`, `cache`, `fallback`, `parity`)
+The decorator is the whole user-facing API. Options (`boundscheck`, `cache`, `fallback`, `parity`, `counts`)
 are keyword arguments to it. It is named `scram` (to scram: to go, fast) and imported as
 `from scramjit import scram`; a callable module (`@scramjit`) was rejected because mypy and Pyright
 report "module not callable" for every variant of the trick. The undecorated
@@ -367,7 +367,7 @@ went from 0.69 to 4.6 ns (6.6x), `edit_distance` 3.8x. With this (interleaved, b
 0.90 to 0.96, a random branch 0.70 to 0.90, `edit_distance` 1.26 to 1.82. So timing and counting are separate runs: counts are checked
 against a Python tracer, and don't time anything. A kernel adds to its counters with the GIL released, so a Python thread reads them mid-call
 (`tests/test_counts.py`); in Pyodide counts work but move only between calls. `--live` alone costs under 1% on calls of 12 µs. Only
-native code is counted, so this can't see into libraries scramjit doesn't compile. Spills per line would need them from cimo
+native code is counted, so this can't see into libraries scramjit doesn't compile. `@scram(counts=True)` and `f.line_counts()` do the same where there's no command line; the LLM demo's heatmap uses them, compiling the counted copy in its second worker, and writes 51 tok/s against 60 while it's on. Spills per line would need them from cimo
 (`cimo report` in its `TODO.md`).
 
 ## What scramjit needs from cimo

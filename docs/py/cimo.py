@@ -4155,6 +4155,39 @@ def _conbits(r, fn):
     if rtype(r) != RCon or fn.con[rval(r)].type != CBits:
         return None
     return fn.con[rval(r)].i
+def _loaded(r, fn):
+    d = _only(r, fn)
+    return d is not None and D.isload(d[1].op)
+_phifn = _phis = None
+def _accumulator(a, to, fn):
+    global _phifn, _phis
+    if _phifn is not fn:
+        _phifn = fn
+        _phis = {}
+        for b in fn.rpo[:fn.nblk]:
+            p = b.phi
+            while p:
+                _phis[p.to] = p
+                p = p.link
+    def walk(r, found):
+        todo = [r]
+        seen = set()
+        while todo and len(seen) < 32:
+            r = todo.pop()
+            if r in seen or rtype(r) != RTmp:
+                continue
+            seen.add(r)
+            if found(r):
+                return True
+            if r not in _phis:
+                d = fn.tmp[rval(r)].def_
+                if d is not None and d.op in _CHAINOPS:
+                    todo += d.arg[:2]
+        return False
+    def carried(r):
+        p = _phis.get(r)
+        return p is not None and any(walk(p.arg[n], lambda x: x == to) for n in range(p.narg))
+    return walk(a, carried)
 def _shifted(r, k, wantext, fn):
     found = _only(r, fn)
     if found is None:
@@ -4164,6 +4197,8 @@ def _shifted(r, k, wantext, fn):
         return None
     w = 64 if k == Kl else 32
     if wantext and k == Kl and di.op in (Oextsw, Oextuw):
+        if _loaded(di.arg[0], fn):
+            return None
         return di.arg[0], SH_SXTW if di.op == Oextsw else SH_UXTW, 0, di
     n = _conbits(di.arg[1], fn)
     if n is None:
@@ -4176,7 +4211,8 @@ def _shifted(r, k, wantext, fn):
         return None
     if wantext and k == Kl and how == SH_LSL and n <= 4:
         ex = _only(di.arg[0], fn)
-        if ex is not None and ex[1].op in (Oextsw, Oextuw) and _plain(ex[1].arg[0], fn):
+        if ex is not None and ex[1].op in (Oextsw, Oextuw) and _plain(ex[1].arg[0], fn) \\
+                and not _loaded(ex[1].arg[0], fn):
             e = ex[1]
             kind = SH_SXTW if e.op == Oextsw else SH_UXTW
             x = e.arg[0]
@@ -4214,13 +4250,14 @@ def selalu(i, fn):
                 found[1].set(Ins(Onop))
                 _aalu(i, a, ALU_NOT[i.op], SH_LSL, 0, x, fn)
                 return True
-        s = _shifted(b, k, i.op in (Oadd, Osub), fn) if selblk.loop <= 1 else None
+        s = _shifted(b, k, i.op in (Oadd, Osub), fn) if selblk.loop <= 1 or not _accumulator(a, i.to, fn) else None
         if s is not None:
             x, how, n, di = s
             di.set(Ins(Onop))
             _aalu(i, a, ALU[i.op], how, n, x, fn)
             return True
     return False
+_CHAINOPS = frozenset((Oadd, Osub, Oand, D.Oor, Oxor, D.Ocopy))
 _DEF32 = frozenset((Oadd, Osub, Oneg, Omul, Oand, Oor, Oxor, Oshl, Oshr, Osar, Oextub, Oextuh, D.Oextsb, D.Oextsh,
                     D.Oloadub, D.Oloadsb, D.Oloaduh, D.Oloadsh, D.Oloadsw, D.Oloaduw, Oload))
 def _insertfield(r, lsb, width, k, w, fn):
@@ -6753,20 +6790,24 @@ class BSet:
         self.nt = nt
         self.t = t
 class Ins:
-    __slots__ = ('op', 'cls', 'to', 'arg')
+    __slots__ = ('op', 'cls', 'to', 'arg', 'nsw')
     def __init__(self, op=0, cls=0, to=R, arg0=R, arg1=R):
         self.op = op
         self.cls = cls
         self.to = to
         self.arg = [arg0, arg1]
+        self.nsw = False
     def copy(self):
-        return Ins(self.op, self.cls, self.to, self.arg[0], self.arg[1])
+        i = Ins(self.op, self.cls, self.to, self.arg[0], self.arg[1])
+        i.nsw = self.nsw
+        return i
     def set(self, o):
         self.op = o.op
         self.cls = o.cls
         self.to = o.to
         self.arg[0] = o.arg[0]
         self.arg[1] = o.arg[1]
+        self.nsw = o.nsw
     def __repr__(self):
         return 'Ins(%s, %d, %#x, %#x, %#x)' % (optab[self.op].name, self.cls, self.to,
                                                self.arg[0], self.arg[1])
@@ -7224,12 +7265,13 @@ trap = False
 volatile = False
 vla = False
 cse = False
+nowrap = False
 isel = False
 bigcopy = None
 inline = 0
 stkchk = None
 disjoint = None
-ALL = {'fma': True, 'ldp': True, 'layout': True, 'math': True, 'trap': True, 'volatile': True, 'vla': True, 'cse': True, 'isel': True}
+ALL = {'fma': True, 'ldp': True, 'layout': True, 'math': True, 'trap': True, 'volatile': True, 'vla': True, 'cse': True, 'isel': True, 'nowrap': True}
 _NAMES = tuple(ALL) + ('stkchk', 'bigcopy', 'inline')
 def configure(**kw):
     g = globals()
@@ -7986,6 +8028,7 @@ def dedupins(fn, b, i):
     normins(fn, i)
     if i.op == Onop:
         return
+    was = (i.op, i.arg[0], i.arg[1]) if i.nsw else None
     if _ext.cse:
         from .simplify import simplify
         r = simplify(fn, b, i)
@@ -7999,6 +8042,8 @@ def dedupins(fn, b, i):
     assert i.op != Osel0
     assert i.to != R
     assoccon(fn, b, i)
+    if was is not None and was != (i.op, i.arg[0], i.arg[1]):
+        i.nsw = False
     r = C.copyref(fn, b, i)
     if r != R:
         killins(fn, i, r)
@@ -8009,6 +8054,7 @@ def dedupins(fn, b, i):
         return
     i1 = gvndup(i, 1)
     if i1:
+        i1.nsw = i1.nsw and i.nsw
         killins(fn, i, i1.to)
         return
 def cmpeqz(fn, r):
@@ -8496,6 +8542,7 @@ def _expand1(fn, b, k, j, body):
                 out.append(x)
                 continue
             x = D.Ins(o, i.cls, ref(i.to), ref(i.arg[0]), ref(i.arg[1]))
+            x.nsw = i.nsw
             if D.isalloc(o):
                 allocs.append(x)
             else:
@@ -9703,6 +9750,13 @@ class _Driver:
         ssa.filluse(fn)
         ssa.ssacheck(fn)
         from . import ext, cse
+        if ext.nowrap:
+            from . import nowrap
+            if nowrap.run(fn):
+                cfg.fillcfg(fn)
+                ssa.filluse(fn)
+                cfg.filldom(fn)
+                self._cleanup(fn, cfg, ssa, gvn, gcm)
         if ext.cse:
             loads = cse.nload(fn)
             cfg.filldom(fn)
@@ -10556,6 +10610,270 @@ def pre(fn):
             changed = True
     return changed
 ''',
+'backend/nowrap.py': '''\
+from . import defs as D
+from .defs import R, RTmp, RCon, CBits, Ins, Kw, Kl, Ocopy, Oadd, Osub, Omul, Odiv, Orem, Osar, Oextsw, rtype, rval, s32, s64
+from .defs import Cieq, Cine, Cisge, Cisgt, Cisle, Cislt
+from .cfg import dom
+from .util import getcon, iscmp, newtmp
+_SWAP = {Cieq: Cieq, Cine: Cine, Cisge: Cisle, Cisgt: Cislt, Cisle: Cisge, Cislt: Cisgt}
+_SIGNED = (Cisge, Cisgt, Cisle, Cislt)
+_MAXDEPTH = 6
+_MAXLEAVES = 3
+def _sval(k, v):
+    return s32(v & 0xffffffff) if k == Kw else s64(v)
+def _fits(k, v):
+    return -(1 << 31) <= v < (1 << 31) if k == Kw else -(1 << 63) <= v < (1 << 63)
+def _bits(fn, r, k):
+    if rtype(r) == RCon and fn.con[rval(r)].type == CBits:
+        return _sval(k, fn.con[rval(r)].i)
+    return None
+def _marked(fn, r, k):
+    if rtype(r) == RTmp:
+        d = fn.tmp[rval(r)].def_
+        if d is not None and d.nsw and d.cls == k:
+            return d
+    return None
+def _addcon(fn, r, k):
+    d = _marked(fn, r, k)
+    if d is not None and d.op in (Oadd, Osub):
+        c = _bits(fn, d.arg[1], k)
+        if c is not None and rtype(d.arg[0]) == RTmp and _fits(k, -c):
+            return d.arg[0], c if d.op == Oadd else -c
+    return r, 0
+def _mulcon(fn, r, k):
+    d = _marked(fn, r, k)
+    if d is not None and d.op == Omul:
+        c = _bits(fn, d.arg[1], k)
+        if c is not None and c != 0 and rtype(d.arg[0]) == RTmp:
+            return d.arg[0], c
+    return None
+def _holds(cc, a, b):
+    return {Cieq: a == b, Cine: a != b, Cisge: a >= b, Cisgt: a > b, Cisle: a <= b, Cislt: a < b}[cc]
+def _cmp(fn, i, k, cc):
+    a, b = i.arg
+    if rtype(a) == RCon and rtype(b) == RTmp and cc in _SWAP:
+        a, b, cc = b, a, _SWAP[cc]
+    if cc not in _SWAP:
+        return None
+    x, c1 = _addcon(fn, a, k)
+    y, c2 = _addcon(fn, b, k)
+    if x == y and (c1 or c2) and rtype(x) == RTmp:
+        return Ins(Ocopy, i.cls, i.to, getcon(int(_holds(cc, c1, c2)), fn), R)
+    if c1 and c1 == c2:
+        return cc, x, y
+    if cc in _SIGNED or c1:
+        kb = _bits(fn, b, k)
+        if kb is not None and c1 and _fits(k, kb - c1):
+            return cc, x, getcon(s64(_sval(k, kb - c1)), fn)
+    kb = _bits(fn, b, k)
+    d = _marked(fn, a, k)
+    if d is not None and d.op == Osub and _bits(fn, d.arg[1], k) is None and kb is not None:
+        if kb == 0 and (cc in _SIGNED or fn.tmp[rval(a)].nuse == 1):
+            return cc, d.arg[0], d.arg[1]
+        if kb == 1 and cc == Cislt:
+            return Cisle, d.arg[0], d.arg[1]
+        if kb == -1 and cc == Cisgt:
+            return Cisge, d.arg[0], d.arg[1]
+    m = _mulcon(fn, a, k)
+    if m is not None:
+        x, c = m
+        if kb == 0:
+            return (cc if c > 0 else _SWAP[cc]), x, b
+        my = _mulcon(fn, b, k)
+        if my is not None and my[1] == c:
+            return (cc if c > 0 else _SWAP[cc]), x, my[0]
+    return None
+def _div(fn, i):
+    m = _mulcon(fn, i.arg[0], i.cls)
+    if m is None:
+        return None
+    x, c = m
+    n = _bits(fn, i.arg[1], i.cls)
+    if n is None or n == 0:
+        return None
+    if i.op == Osar:
+        if not 0 < n < (32 if i.cls == Kw else 64):
+            return None
+        n = 1 << n
+    if c % n:
+        return None
+    if i.op == Orem:
+        return Ins(Ocopy, i.cls, i.to, getcon(0, fn), R)
+    q = c // n
+    if q == 1:
+        return Ins(Ocopy, i.cls, i.to, x, R)
+    return Ins(Omul, i.cls, i.to, x, getcon(s64(_sval(i.cls, q)), fn))
+def _folds(fn):
+    changed = False
+    for b in fn.rpo[:fn.nblk]:
+        for i in b.ins[:b.nins]:
+            if i.op in (Odiv, Orem, Osar):
+                new = _div(fn, i)
+                if new is not None:
+                    i.set(new)
+                    changed = True
+                continue
+            c = iscmp(i.op)
+            if c is None or c[0] not in (Kw, Kl):
+                continue
+            new = _cmp(fn, i, c[0], c[1])
+            if new is None:
+                continue
+            if isinstance(new, Ins):
+                i.set(new)
+            else:
+                cc, a, b1 = new
+                i.op = (D.Ocmpw if c[0] == Kw else D.Ocmpl) + cc
+                i.arg[0], i.arg[1] = a, b1
+            changed = True
+    return changed
+class _IV:
+    __slots__ = ('phi', 'head', 'next', 'def_', 'wide', 'widenext')
+    def __init__(self, phi, head, nxt, d):
+        self.phi, self.head, self.next, self.def_ = phi, head, nxt, d
+        self.wide = self.widenext = R
+def _ivs(fn):
+    ivs = {}
+    for h in fn.rpo[:fn.nblk]:
+        p = h.phi
+        while p:
+            if p.cls == Kw:
+                back = set(p.arg[n] for n in range(p.narg) if dom(h, p.blk[n]))
+                if len(back) == 1 and any(not dom(h, p.blk[n]) for n in range(p.narg)):
+                    nxt = back.pop()
+                    d = _marked(fn, nxt, Kw)
+                    if d is not None and d.op in (Oadd, Osub) and d.arg[0] == p.to and _bits(fn, d.arg[1], Kw) is not None:
+                        iv = _IV(p, h, nxt, d)
+                        ivs[p.to] = ivs[nxt] = iv
+            p = p.link
+    return ivs
+def _tree(fn, r, ivs, seen, depth=0):
+    if r in ivs:
+        seen.append(ivs[r])
+        return 0
+    if rtype(r) != RTmp:
+        return 0
+    d = _marked(fn, r, Kw)
+    if d is None or d.op not in (Oadd, Osub, Omul) or depth >= _MAXDEPTH:
+        return 1
+    n = 0
+    for a in d.arg[:2]:
+        m = _tree(fn, a, ivs, seen, depth + 1)
+        if m is None:
+            return None
+        n += m
+    return n if n <= _MAXLEAVES else None
+def _invariant(fn, r, h):
+    if rtype(r) == RCon:
+        return fn.con[rval(r)].type == CBits
+    if rtype(r) != RTmp:
+        return False
+    d = fn.rpo[fn.tmp[rval(r)].bid]
+    return d is not h and dom(d, h)
+def _widen(fn):
+    ivs = _ivs(fn)
+    if not ivs:
+        return False
+    live = {}
+    sites = []
+    for b in fn.rpo[:fn.nblk]:
+        for i in b.ins[:b.nins]:
+            if i.op == Oextsw and i.cls == Kl and rtype(i.arg[0]) == RTmp:
+                seen = []
+                if _tree(fn, i.arg[0], ivs, seen) is not None and seen:
+                    for iv in seen:
+                        live[iv.phi.to] = iv
+                    sites.append((b, i))
+    if not live:
+        return False
+    used = {}
+    for iv in live.values():
+        used[iv.phi.to] = used[iv.next] = iv
+        iv.wide = newtmp('wide', Kl, fn)
+        iv.widenext = newtmp('wide', Kl, fn)
+    before = {}
+    tails = {}
+    heads = {}
+    after = {}
+    wide = {}
+    for r, iv in used.items():
+        wide[r] = iv.wide if r == iv.phi.to else iv.widenext
+    def build(r, out):
+        if r in wide:
+            return wide[r]
+        if rtype(r) == RCon and fn.con[rval(r)].type == CBits:
+            return getcon(s32(fn.con[rval(r)].i & 0xffffffff), fn)
+        d = _marked(fn, r, Kw)
+        if rtype(r) == RTmp and d is not None and d.op in (Oadd, Osub, Omul):
+            a = build(d.arg[0], out)
+            c = build(d.arg[1], out)
+            t = newtmp('wide', Kl, fn)
+            out.append(Ins(d.op, Kl, t, a, c))
+            return t
+        t = newtmp('wide', Kl, fn)
+        out.append(Ins(Oextsw, Kl, t, r, R))
+        return t
+    for b in fn.rpo[:fn.nblk]:
+        for i in b.ins[:b.nins]:
+            c = iscmp(i.op)
+            if c is None or c[0] != Kw or c[1] not in _SWAP:
+                continue
+            a0, a1 = i.arg
+            for x, y in ((a0, a1), (a1, a0)):
+                if rtype(x) != RTmp:
+                    continue
+                seen = []
+                if _tree(fn, x, used, seen) is None or not seen:
+                    continue
+                if all(_invariant(fn, y, iv.head) for iv in seen) or y in used:
+                    out = before.setdefault(id(i), [])
+                    p0 = build(a0, out)
+                    p1 = build(a1, out)
+                    i.op = D.Ocmpl + c[1]
+                    i.arg[0], i.arg[1] = p0, p1
+                    break
+    for b, i in sites:
+        out = before.setdefault(id(i), [])
+        r = build(i.arg[0], out)
+        i.set(Ins(Ocopy, Kl, i.to, r, R))
+    for iv in live.values():
+        p = iv.phi
+        narrow = p.to
+        d = iv.def_
+        c = _bits(fn, d.arg[1], Kw)
+        c = c if d.op == Oadd else -c
+        op, c = (Oadd, c) if c >= 0 else (Osub, -c)
+        after.setdefault(id(d), []).append(Ins(op, Kl, iv.widenext, iv.wide, getcon(c, fn)))
+        heads.setdefault(iv.head.id, []).append(Ins(Ocopy, Kw, narrow, iv.wide, R))
+        for n in range(p.narg):
+            if p.arg[n] == iv.next and dom(iv.head, p.blk[n]):
+                p.arg[n] = iv.widenext
+            else:
+                out = tails.setdefault(p.blk[n].id, [])
+                p.arg[n] = build(p.arg[n], out)
+        p.to = iv.wide
+        p.cls = Kl
+    for b in fn.rpo[:fn.nblk]:
+        new = list(heads.get(b.id, ()))
+        for i in b.ins[:b.nins]:
+            new += before.get(id(i), ())
+            new.append(i)
+            new += after.get(id(i), ())
+        new += tails.get(b.id, ())
+        b.ins = new
+        b.nins = len(new)
+    return True
+def run(fn):
+    if not any(i.nsw for b in fn.rpo[:fn.nblk] for i in b.ins[:b.nins]):
+        return False
+    changed = _folds(fn)
+    changed = _widen(fn) or changed
+    for b in fn.rpo[:fn.nblk]:
+        for i in b.ins[:b.nins]:
+            i.nsw = False
+    return changed
+''',
 'backend/parse.py': '''\
 import math
 import re
@@ -10593,6 +10911,8 @@ _VOLOPS = {optab[o].name: o for o in range(D.Ovloadsb, D.Ovstored + 1)}
 _VOLOPS.update(vloadw=D.Ovloadsw, vloadl=D.Ovload, vloads=D.Ovload, vloadd=D.Ovload)
 Tsp = Ntok + 3
 Tbits = Ntok + 4
+Tnsw = Ntok + 5
+_NSWOPS = {'addnsw': D.Oadd, 'subnsw': D.Osub, 'mulnsw': D.Omul}
 _BITOPS = ('bclz', 'bctz', 'bpopcnt', 'bswap', 'bswap16')
 kwmap = {
     Tloadw: "loadw", Tloadl: "loadl", Tloads: "loads", Tloadd: "loadd",
@@ -10762,6 +11082,9 @@ def lex():
         if _ext.volatile and S.tokval_str in _VOLOPS:
             S.mathop = _VOLOPS[S.tokval_str]
             return Tvol
+        if _ext.nowrap and S.tokval_str in _NSWOPS:
+            S.mathop = _NSWOPS[S.tokval_str]
+            return Tnsw
         err("unknown keyword %s", S.tokval_str)
     return t
 def _quoted(c, t):
@@ -11097,6 +11420,12 @@ def parseline(ps):
         return PIns
     elif op == Tvol:
         return _ins(S.mathop, k, r, arg)
+    elif op == Tnsw:
+        if i != 2 or KBASE(k) != 0:
+            err("%snsw needs two arguments and class w or l", optab[S.mathop].name)
+        p = _ins(S.mathop, k, r, arg)
+        D.insb[D.curi - 1].nsw = True
+        return p
     elif op == Tbits:
         if i != 1 or KBASE(k) != 0 or (S.mathop == D.Obswap16 and k != Kw):
             err("%s needs one argument and class w or l", optab[S.mathop].name)
@@ -13990,7 +14319,7 @@ def ssacheck(fn):
 'backend/thread.py': '''\
 from . import defs as D
 from .defs import RCon, RTmp, CBits, KBASE, Kw, Kl, UPhi, rtype, rval
-from .util import iscmp, phiarg, isconbits, newtmp, cmpwlneg
+from .util import getcon, iscmp, phiarg, isconbits, newtmp, cmpwlneg
 from .simplify import _facts
 _CHEAP = frozenset((D.Oadd, D.Osub, D.Oand, D.Oor, D.Oxor, D.Oshl, D.Oshr, D.Osar, D.Oextsw, D.Oextuw, D.Ocopy))
 def _value(fn, q, b, v, k):
@@ -14092,6 +14421,67 @@ def _combinable(fn, x, n):
     if fn.tmp[rval(x.jmp.arg)].nuse != 1:
         return None
     return ins
+BITTEST_MIN = 6
+def _equality(fn, b):
+    d = fn.tmp[rval(b.jmp.arg)].def_ if rtype(b.jmp.arg) == RTmp else None
+    cm = iscmp(d.op) if d is not None else None
+    if cm is None or KBASE(cm[0]) != 0 or cm[1] not in (D.Cieq, D.Cine) or fn.tmp[rval(b.jmp.arg)].nuse != 1:
+        return None
+    c = isconbits(fn, d.arg[1])
+    if c is None or rtype(d.arg[0]) != RTmp:
+        return None
+    eq, ne = (b.s1, b.s2) if cm[1] == D.Cieq else (b.s2, b.s1)
+    return d.arg[0], cm[0], c, eq, ne
+def _bittest(fn, h):
+    if h.jmp.type != D.Jjnz or h.s1 is h.s2:
+        return False
+    e = _equality(fn, h)
+    if e is None:
+        return False
+    x, k, c, hit, b = e
+    w = 64 if k == D.Kl else 32
+    full = (1 << w) - 1
+    vals = {c & full}
+    chain = []
+    while b is not h and b not in chain and _combinable(fn, b, 1) is not None:
+        e = _equality(fn, b)
+        if e is None or e[0] != x or e[1] != k or e[3] is not hit or not _samephis(hit, h, b):
+            break
+        vals.add(e[2] & full)
+        chain.append(b)
+        b = e[4]
+    miss = b
+    if len(vals) < BITTEST_MIN or max(vals) - min(vals) >= 64 or hit is h or hit in chain or miss is hit or miss is h:
+        return False
+    lo, span = min(vals), max(vals) - min(vals)
+    mask = sum(1 << (v - lo) for v in vals)
+    t = x
+    new = []
+    if lo:
+        t = newtmp('bt', k, fn)
+        new.append(D.Ins(D.Osub, k, t, x, getcon(D.s64(lo), fn)))
+    inr, sh, bit, bw, r = (newtmp('bt', cl, fn) for cl in (Kw, D.Kl, D.Kl, Kw, Kw))
+    new += [D.Ins((D.Ocmpw if k == Kw else D.Ocmpl) + D.Ciule, Kw, inr, t, getcon(span, fn)),
+            D.Ins(D.Oshr, D.Kl, sh, getcon(D.s64(mask), fn), t),
+            D.Ins(D.Oand, D.Kl, bit, sh, getcon(1, fn)),
+            D.Ins(D.Ocopy, Kw, bw, bit, D.R),
+            D.Ins(D.Oand, Kw, r, inr, bw)]
+    h.ins = h.ins[:h.nins] + new
+    h.nins = len(h.ins)
+    last = chain[-1]
+    p = miss.phi
+    while p:
+        p.blk = [h if q is last else q for q in p.blk]
+        p = p.link
+    for q in chain:
+        q.ins = []
+        q.nins = 0
+        q.jmp.type = D.Jhlt
+        q.jmp.arg = D.R
+        q.s1 = q.s2 = None
+    h.jmp.arg = r
+    h.s1, h.s2 = hit, miss
+    return True
 def _samephis(t, p, q):
     x = t.phi
     while x:
@@ -14202,6 +14592,16 @@ def run(fn):
     from . import cfg, ssa
     any_ = False
     cfg.fillloop(fn)
+    bits = False
+    if D.T.name.startswith('arm64'):
+        for b in list(fn.rpo[:fn.nblk]):
+            if b.jmp.type != D.Jhlt and _bittest(fn, b):
+                bits = True
+    if bits:
+        any_ = True
+        cfg.fillcfg(fn)
+        ssa.filluse(fn)
+        cfg.filldom(fn)
     for _ in range(6):
         cur = False
         for b in list(fn.rpo[:fn.nblk]):
@@ -14335,6 +14735,7 @@ def emit(op, k, to, arg0, arg1):
     D.insb[D.curi] = Ins(op, k, to, arg0, arg1)
 def emiti(i):
     emit(i.op, i.cls, i.to, i.arg[0], i.arg[1])
+    D.insb[D.curi].nsw = i.nsw
 def idup(b, s, n):
     insb = D.insb
     b.ins = [insb[k].copy() for k in range(s, s + n)]
@@ -15494,6 +15895,8 @@ def _compile_options(c):
           help='Turn off the loop optimizer')
     c.opt('--no-fma', flag=True, group=g,
           help='No fused multiply-add contraction (results identical to `-ffp-contract=off`)')
+    c.opt('--wrapv', flag=True, group=g,
+          help='Signed integer overflow wraps, instead of being undefined')
 class Failure(Exception):
     def __init__(self, status=1):
         Exception.__init__(self, status)
@@ -15533,14 +15936,16 @@ class _Settings:
         self.ctx = ctx
     def __enter__(self):
         from .. import driver
-        self.old = driver.MIDDLE, driver.FMA
+        self.old = driver.MIDDLE, driver.FMA, driver.WRAPV
         if self.ctx.values.get('no_opt'):
             driver.MIDDLE = False
         if self.ctx.values.get('no_fma'):
             driver.FMA = False
+        if self.ctx.values.get('wrapv'):
+            driver.WRAPV = True
     def __exit__(self, *exc):
         from .. import driver
-        driver.MIDDLE, driver.FMA = self.old
+        driver.MIDDLE, driver.FMA, driver.WRAPV = self.old
 def _module(ctx, src, filename):
     from .. import driver
     v = ctx.values
@@ -16671,6 +17076,8 @@ _VERSION = b'cimo-2'
 MIDDLE = os.environ.get('CIMO_MIDDLE', '1') != '0'
 FMA = os.environ.get('CIMO_FMA', '1') != '0'
 _fma = contextvars.ContextVar('cimo_fma', default=None)
+_wrapv = contextvars.ContextVar('cimo_wrapv', default=None)
+WRAPV = os.environ.get('CIMO_WRAPV', '0') not in ('', '0')
 _compile_lock = threading.RLock()
 INLINE = int(os.environ.get('CIMO_INLINE', '40'))
 def _qbe(ssa, params=None, middle=None, stkchk=None, target=None):
@@ -16683,7 +17090,7 @@ def _qbe(ssa, params=None, middle=None, stkchk=None, target=None):
     try:
         with _compile_lock, _middle.options(enabled=MIDDLE if middle is None else middle,
                              params=params or {}), \\
-                _ext.options(fma=True, ldp=True, layout=True, math=True, trap=True, volatile=True, vla=True, cse=True, isel=True, bigcopy=256,
+                _ext.options(fma=True, ldp=True, layout=True, math=True, trap=True, volatile=True, vla=True, cse=True, isel=True, nowrap=True, bigcopy=256,
                              inline=INLINE, stkchk=stkchk), _Recursion():
             D.T = next(t for t in _targets() if t.name == (target or TARGET))
             drv = _Driver(out, 0)
@@ -16795,17 +17202,20 @@ def _preprocess(src, filename='<string>', include_dirs=(), host_headers=False, d
 def _ir(pp, filename='<string>', host_headers=False):
     from .frontend import FrontendError
     try:
-        return _frontend(pp, filename, fma=_contract(), builtins=True,
+        return _frontend(pp, filename, fma=_contract(), nowrap=not _wraps(), builtins=True,
                          diagnostics=True, prune=True)
     except FrontendError as e:
         raise CompileError(_hint(str(e), host_headers)) from None
 def _contract():
     v = _fma.get()
     return FMA if v is None else v
+def _wraps():
+    v = _wrapv.get()
+    return WRAPV if v is None else v
 def _key(pp):
     return hashlib.sha256(
         _VERSION + _link.compiler_key().encode() + _link._key(TARGET).encode() + TARGET.encode()
-        + (b'm' if MIDDLE else b'') + (b'f' if _contract() else b'') + b'i%d' % INLINE
+        + (b'm' if MIDDLE else b'') + (b'f' if _contract() else b'') + (b'v' if _wraps() else b'') + b'i%d' % INLINE
         + pp.encode('utf-8', 'surrogateescape')).hexdigest()[:24]
 def _build(src, filename='<string>', include_dirs=(), host_headers=False, defines=()):
     _check_machine()
@@ -16959,20 +17369,22 @@ class Module:
         raise TypeError('module has no main(); call one of: %s' % ', '.join(self._kernels))
 def compile(src: str, include_dirs: Iterable[PathArg] = (), link: Union[str, Iterable[str]] = (),
             host_headers: bool = False, defines: Defines = (), cache: bool = True,
-            fma: Optional[bool] = None) -> Module:
-    return _module(src, '<string>', include_dirs, link, host_headers, defines, cache, fma)
+            fma: Optional[bool] = None, wrapv: Optional[bool] = None) -> Module:
+    return _module(src, '<string>', include_dirs, link, host_headers, defines, cache, fma, wrapv)
 def load(path: PathArg, include_dirs: Iterable[PathArg] = (), link: Union[str, Iterable[str]] = (),
          host_headers: bool = False, defines: Defines = (), cache: bool = True,
-         fma: Optional[bool] = None) -> Module:
+         fma: Optional[bool] = None, wrapv: Optional[bool] = None) -> Module:
     from .resources import read_text
     path = os.fspath(path)
-    return _module(read_text(path), path, include_dirs, link, host_headers, defines, cache, fma)
-def _module(src, filename, include_dirs, link, host_headers, defines, cache=True, fma=None):
+    return _module(read_text(path), path, include_dirs, link, host_headers, defines, cache, fma, wrapv)
+def _module(src, filename, include_dirs, link, host_headers, defines, cache=True, fma=None, wrapv=None):
     token = _link.cache_writes.set(bool(cache))
     ftoken = _fma.set(None if fma is None else bool(fma))
+    vtoken = _wrapv.set(None if wrapv is None else bool(wrapv))
     try:
         return _module1(src, filename, include_dirs, link, host_headers, defines)
     finally:
+        _wrapv.reset(vtoken)
         _fma.reset(ftoken)
         _link.cache_writes.reset(token)
 def _module1(src, filename, include_dirs, link, host_headers, defines):
@@ -21096,13 +21508,14 @@ class _Recursion(object):
 def _tostr(s):
     return s.encode('latin-1').decode('utf-8', 'surrogateescape')
 def compile(text, filename='<stdin>', target=DEFAULT_TARGET, pponly=False, fma=False,
-            builtins=False, diagnostics=False, prune=False, volatile=False, vlafree=False, vastruct=None, bitops=False, bigcopy=None):
+            builtins=False, diagnostics=False, prune=False, volatile=False, vlafree=False, vastruct=None, bitops=False, bigcopy=None, nowrap=False):
     if isinstance(text, str):
         text = text.encode('utf-8', 'surrogateescape')
     text = text.decode('latin-1')
     from . import qbe as _qbe
     try:
         _qbe.contract = bool(fma)
+        _qbe.nowrap = bool(nowrap)
         _qbe.builtins = bool(builtins)
         _qbe.volatile = bool(volatile)
         _qbe.vlafree = bool(vlafree)
@@ -21123,6 +21536,7 @@ def compile(text, filename='<stdin>', target=DEFAULT_TARGET, pponly=False, fma=F
         raise
     finally:
         _qbe.contract = False
+        _qbe.nowrap = False
         _qbe.builtins = False
         _qbe.volatile = False
         _qbe.vlafree = False
@@ -21924,6 +22338,7 @@ _BITBUILTINS.update(__builtin_bswap16=(IBSWAP16, 'w'), __builtin_bswap32=(IBSWAP
                     __builtin_bswap64=(IBSWAP, 'l'))
 del _n, _i
 contract = False
+nowrap = False
 instname = [None] + [_s for _n, _s in _OPS]
 instname += [None] * (IFSQRT - len(instname)) + list(_MATHINST)
 instname += ['v' + instname[_o] for _o in range(ISTORED, ILOADUB + 1)]
@@ -21949,7 +22364,7 @@ class QbeType(object):
         self.load = load
         self.store = store
 class Inst(object):
-    __slots__ = ('kind', 'cls', 'res', 'arg0', 'arg1', 'arg2')
+    __slots__ = ('kind', 'cls', 'res', 'arg0', 'arg1', 'arg2', 'nsw')
 JUMP_NONE, JUMP_JMP, JUMP_JNZ, JUMP_RET, JUMP_HLT = range(5)
 class Block(object):
     __slots__ = ('label', 'insts', 'phi_class', 'phi_blk', 'phi_val', 'phi_res', 'jump_kind',
@@ -22059,6 +22474,7 @@ def mkinst(f, op, cls, arg0, arg1):
     inst.cls = cls
     inst.arg0 = arg0
     inst.arg1 = arg1
+    inst.nsw = False
     inst.res = Value(VALUE_NONE)
     if cls and op != IARG:
         functemp(f, inst.res)
@@ -22529,6 +22945,9 @@ def funcbranch(f, e, bt, bf):
     v = funcexpr(f, e)
     funcjnz(f, v, e.type, bt, bf)
     return v
+def _nowrapinst(f, t):
+    if nowrap and t.prop & PROPINT and t.issigned and t.size >= 4 and t.kind != TYPEBITINT:
+        f.end.insts[-1].nsw = True
 def _binop(op, t):
     if op == TMUL:
         return IMUL
@@ -22794,6 +23213,7 @@ def funcexpr(f, e):
             v = mkintconst(1) if e.op == TINC else funcinst(f, ICEQW, 'w', l, mkintconst(0))
         else:
             v = funcinst(f, IADD if e.op == TINC else ISUB, qbetype(t).base, l, r)
+            _nowrapinst(f, t)
         v = funcstore(f, e.type, e.qual, lval, v)
         return l if e.post else v
     elif k == EXPRCALL:
@@ -22882,6 +23302,8 @@ def funcexpr(f, e):
         if op == INONE:
             U.fatal("internal error; unimplemented binary expression")
         v = funcinst(f, op, qbetype(e.type).base, l, r)
+        if op in (IADD, ISUB, IMUL) and t is e.l.type:
+            _nowrapinst(f, e.type)
         if t.kind == TYPEBITINT:
             v = funcbits(f, t, v, BITS0)
         return v
@@ -23188,6 +23610,8 @@ def emitinst(insts, i, n):
         emitclass(inst.cls, inst.arg1)
         w(' ')
     w(instname[inst.kind])
+    if inst.nsw:
+        w('nsw')
     if inst.kind == IGETSP:
         w('\\n')
         return i + 1
@@ -28584,10 +29008,10 @@ def transform(fn, lp):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "eaad4d8757ed41794334",
-"runtime-arm64": "3e707266948c4db61a20",
-"runtime-arm64_apple": "56c7bacad7780d712b2a",
-"runtime-arm64_win": "efe61714f250b956896f"
+"compiler": "c472c2e12051c508d3d7",
+"runtime-arm64": "47404a155a3e3b2c218a",
+"runtime-arm64_apple": "f5eb49e8ba17edd46d3c",
+"runtime-arm64_win": "ced7ede90e0382958495"
 }
 ''',
 'onefile.py': '''\

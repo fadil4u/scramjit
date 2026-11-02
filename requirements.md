@@ -472,6 +472,16 @@ dtypes and range analysis. Done when each rule has differential tests, the gener
 each M0 kernel contains no iterator or boxing code, and every supported `math` function gives
 results identical to CPython's, natively and in Pyodide.
 
+**M2 acceptance (2026-11-02).** Met as written: every rule has differential tests (`tests/test_m2.py`, `test_lazy.py`,
+`test_for_else.py`), `tests/test_m2_acceptance.py` finds no iterator or boxing code in each M0 kernel's C, and `math` matches CPython
+natively and in Pyodide (28,019 cases there). Not built, and not in that check: narrow types. Reads and stores of narrow
+dtypes work, but arithmetic on them falls back, and range analysis picks no narrow types. Its payoff needs SIMD. `for ... else`
+needed definite assignment to follow breaks: `found` assigned before each break and in the else is assigned after the loop.
+
+Found on the way, in code emitted before this: a size from the user could wrap (`[1.5] * (2**61 + 1)`: 8 times that is 8 bytes), so
+`malloc` succeeded and the fill crashed the process. Now `MemoryError`, as in Python. cimo made signed overflow undefined the same
+day; what scramjit emits still wraps through unsigned, checked by audit and by 36 cases against numpy at the extremes.
+
 **M3: n-D arrays, errors, disk cache, Pyodide.** Done when all M0 kernels run in native CPython
 and in Pyodide, a second process reuses the disk cache, and every out-of-subset construct is
 reported at its Python line (fallback warning, preflight, and `CompileError` under

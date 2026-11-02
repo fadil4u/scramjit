@@ -71,7 +71,8 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
    variable), and so does an int that becomes a float, where the int is a literal up to 2^53 or a parameter, and it's only
    returned or combined with a float. Not yet: other uses of such a variable (`-s`, `s + 1`, `t = s`, `a[s]`, `if s:`), and
    `s = n` from an int variable, each of which keeps the function in Python.
-8. **Rest of M2:** `for ... else`. Then the M2 acceptance check.
+8. **Narrow arithmetic, the part of M2 not built:** arithmetic on `int32`, `uint8` and the like, as numpy does it (NEP 50).
+   Value-range narrowing (item 1) has little to win until cimo vectorizes.
 9. **Rest of M3:** run the M0 kernels in Pyodide as a test, not only through the site; preflight's
    per-loop report once cimo exposes one (cimo's `TODO.md`), and a `disk` label in the compile column,
    which needs cimo to say whether a compile hit its cache.

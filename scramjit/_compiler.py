@@ -271,6 +271,8 @@ class Compiler:
         self.hoisted_lines = set()   # Python lines whose checks live only in a versioned loop's slow copy
         self.slow_copy = 0     # inside that slow copy
         self.forwards = {}     # array -> (loop variable, temp holding its element at var - 1)
+        self.broke = []        # for each open Python loop, the flag its else tests, or None
+        self.da_breaks = []    # for each loop definite assignment is in: what's assigned at each break
         self.polls = sys.platform != 'emscripten'       # no signals to wait for in Pyodide
         self.uses_stop = False  # the kernel takes sj_stop, the Ctrl-C flag it checks (see open_counted)
         self.counted = {}      # depth of an open counted loop -> what closing it must emit
@@ -417,12 +419,9 @@ class Compiler:
         elif isinstance(s, (ast.If, ast.While)):
             self.check_test(s.test)
             self.infer_block(s.body)
-            if isinstance(s, ast.While) and s.orelse:
-                self.fail(s, 'while ... else')
             self.infer_block(s.orelse)
         elif isinstance(s, ast.For):
-            if s.orelse:
-                self.fail(s, 'for ... else')
+            self.infer_block(s.orelse)
             self.bind_types(s.target, self.elem_struct(self.iterable(s.iter)), s)
             lists = {n.id for n in ast.walk(s.iter) if isinstance(n, ast.Name)
                      and self.env.get(n.id) is not None and self.env[n.id].kind == 'list'}
@@ -1165,22 +1164,23 @@ class Compiler:
                 for b in s.orelse:
                     self.stmt(b)
             self.close()
-        elif isinstance(s, ast.While):
-            self.open('for (;;)')
-            self.loops.append(None)
-            if self.polls:
-                self.emit(self.poll())
-            self.emit(f'if (!({self.truth(self.expr(s.test)[0], self.typeof(s.test))})) break;')
-            for b in s.body:
-                self.stmt(b)
-            self.loops.pop()
-            self.close()
-        elif isinstance(s, ast.For):
-            d = self.iterable(s.iter)
-            if d[0] == 'range':
+        elif isinstance(s, (ast.While, ast.For)):
+            flag = self.temp() if s.orelse else None     # an else runs unless the loop was left by a break
+            if flag:
+                self.emit(f'int {flag} = 0;')
+            self.broke.append(flag)
+            if isinstance(s, ast.While):
+                self.while_loop(s)
+            elif self.iterable(s.iter)[0] == 'range':
                 self.for_range(s)
             else:
-                self.for_iter(s, d)
+                self.for_iter(s, self.iterable(s.iter))
+            self.broke.pop()
+            if flag:
+                self.open(f'if (!{flag})')
+                for b in s.orelse:
+                    self.stmt(b)
+                self.close()
         elif isinstance(s, ast.Return):
             if s.value is not None and self.ret.kind == 'tuple':
                 vals = self.texpr(s.value)
@@ -1205,6 +1205,8 @@ class Compiler:
                     self.emit(f'sj_io[2] = {self.ret_flag(s.value, v[1])};')
             self.emit('goto sj_done;')
         elif isinstance(s, ast.Break):
+            if self.broke[-1]:
+                self.emit(f'{self.broke[-1]} = 1;')
             loop = self.loops[-1]
             if loop is None:
                 self.emit('break;')
@@ -1213,6 +1215,17 @@ class Compiler:
                 self.emit(f'goto {loop[0]};')
         elif isinstance(s, ast.Continue):
             self.emit('continue;')
+
+    def while_loop(self, s):
+        self.open('for (;;)')
+        self.loops.append(None)
+        if self.polls:
+            self.emit(self.poll())
+        self.emit(f'if (!({self.truth(self.expr(s.test)[0], self.typeof(s.test))})) break;')
+        for b in s.body:
+            self.stmt(b)
+        self.loops.pop()
+        self.close()
 
     def ret_flag(self, e, flag):
         """A returned value's flag: 0 a Python float or int, 1 numpy, RETURNS_INT an int held as a double."""
@@ -1794,7 +1807,11 @@ class Compiler:
         if dyn:
             self.owned.append((pf, 'int'))
 
-        def alloc(count):
+        def alloc(count, each=1):
+            # past this, the size in bytes would wrap to something small, and malloc would succeed
+            self.emit(f'if ((uint64_t)({count}) > 9223372036854775807ULL / sizeof({et.ctype}) / {each}) '
+                      f'SJ_FAIL({MEMORY_ERROR}, {line}, 0, 0);')
+            count = f'({count}) * {each}'
             self.emit(f'int64_t {n} = 0;')
             self.emit(f'{p} = malloc(sizeof({et.ctype}) * (size_t)({count} > 0 ? {count} : 1));')
             self.emit(f'if (!{p}) SJ_FAIL({MEMORY_ERROR}, {line}, 0, 0);')
@@ -1863,7 +1880,7 @@ class Compiler:
                     push(c, f, t)
             else:
                 reps = self.hold(f'({kc} > 0 ? {kc} : 0)', T.INT)
-                alloc(f'{reps} * {len(vals)}')
+                alloc(reps, len(vals))
                 r = self.temp()
                 self.open_counted('int64_t', r, '0', reps)
                 for c, f, t in vals:
@@ -2648,6 +2665,21 @@ def ends_with_return(stmts):
         return ends_with_return(last.body) and ends_with_return(last.orelse)
     if isinstance(last, ast.While) and isinstance(last.test, ast.Constant) and last.test.value is True:
         return not any(isinstance(n, ast.Break) for n in ast.walk(last))
+    if isinstance(last, (ast.For, ast.While)) and ends_with_return(last.orelse):
+        return not has_own_break(last.body)      # the else is the only way past it
+    return False
+
+
+def has_own_break(stmts):
+    """A break in these statements that leaves the loop they're the body of."""
+    for s in stmts:
+        if isinstance(s, ast.Break):
+            return True
+        if isinstance(s, (ast.For, ast.While)):
+            if has_own_break(s.orelse):
+                return True
+        elif isinstance(s, ast.If) and (has_own_break(s.body) or has_own_break(s.orelse)):
+            return True
     return False
 
 
@@ -2703,19 +2735,29 @@ def da_stmt(c, s, assigned):
         if b is ALL:
             return a
         return a & b
-    if isinstance(s, ast.While):
-        da_reads(c, s.test, assigned)
-        da_block(c, s.body, set(assigned))
-        return assigned
-    if isinstance(s, ast.For):
-        da_reads(c, s.iter, assigned)
-        names = {n.id for n in ast.walk(s.target) if isinstance(n, ast.Name)}
-        da_block(c, s.body, assigned | names)
-        return assigned
+    if isinstance(s, (ast.While, ast.For)):
+        inside = set(assigned)
+        if isinstance(s, ast.While):
+            da_reads(c, s.test, assigned)
+        else:
+            da_reads(c, s.iter, assigned)
+            inside |= {n.id for n in ast.walk(s.target) if isinstance(n, ast.Name)}
+        c.da_breaks.append([])
+        da_block(c, s.body, inside)
+        breaks = c.da_breaks.pop()
+        if not s.orelse:
+            return assigned
+        out = da_block(c, s.orelse, set(assigned))    # only the else and the breaks lead past this loop
+        for b in breaks:
+            out = b if out is ALL else out & b
+        return out
     if isinstance(s, ast.Return):
         if s.value is not None:
             da_reads(c, s.value, assigned)
         return ALL
-    if isinstance(s, (ast.Break, ast.Continue)):
+    if isinstance(s, ast.Break):
+        c.da_breaks[-1].append(set(assigned))
+        return ALL
+    if isinstance(s, ast.Continue):
         return ALL
     return assigned

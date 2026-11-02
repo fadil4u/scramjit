@@ -12,12 +12,14 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
 <style>
-:root{--bg:#f6f6f9;--white:#fff;--ink:#0f172a;--ink2:#334155;--ink3:#5b687c;--ink4:#94a3b8;--line:#e2e8f0;--cold:#2563eb;--hot:#f97316;--hotD:#c2410c;--hotDD:#9a3412;--hot50:#fff4eb;--code:#0b0f1a;--codeline:#1f2535;--flow:linear-gradient(90deg,#2563eb,#f97316 62%,#dc2626);--font:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:'DM Mono',ui-monospace,monospace}
-*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#f6f6f9;--white:#fff;--ink:#0f172a;--ink2:#334155;--ink3:#5b687c;--ink4:#94a3b8;--line:#e2e8f0;--cold:#2563eb;--hot:#f97316;--hotD:#c2410c;--hotDD:#9a3412;--hot50:#fff4eb;--code:#0b0f1a;--code2:#0f1420;--codeline:#1f2535;--flow:linear-gradient(90deg,#2563eb,#f97316 62%,#dc2626);--font:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:'DM Mono',ui-monospace,monospace}
+*{box-sizing:border-box;margin:0;padding:0;scrollbar-width:none}
+*::-webkit-scrollbar{display:none}
 [hidden]{display:none!important}
 body{background:var(--bg);color:var(--ink2);font:16px/1.55 var(--font);-webkit-font-smoothing:antialiased;overflow-x:hidden}
 a{color:inherit;text-decoration:none}
 a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(--hot);outline-offset:2px}
+.ic{width:17px;height:17px;flex:none;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
 .top{background:rgba(246,246,249,.92);border-bottom:1px solid var(--line)}
 .top-in{max-width:1380px;margin:0 auto;padding:0 24px;height:58px;display:flex;align-items:center;justify-content:space-between}
 .logo{font:500 16px var(--mono);color:var(--ink);letter-spacing:-.02em;display:flex;align-items:center;gap:9px}
@@ -30,38 +32,115 @@ h1{font-size:clamp(25px,3vw,33px);font-weight:800;letter-spacing:-.03em;line-hei
 .grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin-top:14px;align-items:start}
 .card{background:var(--white);border:1px solid var(--line);border-radius:12px}
 .stage{padding:16px;display:flex;flex-direction:column;gap:12px}
-.ask{display:flex;gap:8px;flex-wrap:wrap}
-.ask input{flex:1 1 180px;min-width:0;padding:8px 12px;border:1px solid var(--line);border-radius:8px;font:inherit;font-size:15px;color:var(--ink);background:var(--white)}
-.btn{display:inline-flex;align-items:center;padding:9px 14px;border-radius:8px;font:600 14px var(--font);border:1px solid transparent;cursor:pointer}
+.ask{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.ask input{flex:1 1 170px;min-width:0;padding:8px 12px;border:1px solid var(--line);border-radius:8px;font:inherit;font-size:15px;color:var(--ink);background:var(--white)}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 14px;border-radius:8px;font:600 14px var(--font);border:1px solid transparent;cursor:pointer}
 .btn:disabled{opacity:.45;cursor:default}
 .btn-p{background:var(--hotD);color:#fff}.btn-p:not(:disabled):hover{background:var(--hotDD)}
-.btn-s{background:var(--white);color:var(--ink);border-color:var(--line)}.btn-s:not(:disabled):hover{border-color:var(--hot)}
-#story{height:min(44vh,440px);overflow-y:auto;padding:14px;border:1px solid var(--line);border-radius:8px;background:#fcfcfd;color:var(--ink);font-size:16px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere}
+.icon{display:inline-grid;place-items:center;width:40px;height:40px;flex:none;border-radius:8px;border:1px solid var(--line);background:var(--white);color:var(--ink);cursor:pointer}
+.icon:not(:disabled):hover{border-color:var(--hot);color:var(--hotD)}.icon:disabled{opacity:.45;cursor:default}
+#story{height:min(40vh,420px);overflow-y:auto;padding:14px;border:1px solid var(--line);border-radius:8px;background:#fcfcfd;color:var(--ink);font-size:16px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere}
 #story span.v1{background:#fff1e3}#story span.v2{background:#e6efff}#story span.v3{background:#e4f6ee}#story span.v4{background:#f3e9ff}
 #story mark{display:inline-block;margin:0 4px;padding:0 7px;border-radius:999px;background:var(--ink);color:#fff;font:500 11.5px/1.7 var(--mono);white-space:nowrap;vertical-align:1px}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
 .stats b{display:block;font-size:20px;font-weight:700;letter-spacing:-.02em;color:var(--ink);font-variant-numeric:tabular-nums;white-space:nowrap}
 .stats span{font-size:12px;color:var(--ink3)}
-.lab{font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink4)}
+.lab-lab{font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink4)}
 #chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-.chip{padding:5px 11px;border-radius:999px;border:1px solid var(--line);background:var(--white);font:500 13px var(--font);color:var(--ink);cursor:pointer}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:5px 11px 5px 9px;border-radius:999px;border:1px solid var(--line);background:var(--white);font:500 13px var(--font);color:var(--ink);cursor:pointer}
+.chip .ic{width:15px;height:15px}
 .chip:not(:disabled):hover{border-color:var(--hot)}.chip:disabled{opacity:.45;cursor:default}
 .chip[aria-pressed=true]{background:var(--hot50);border-color:var(--hot);color:var(--hotDD)}
-.switch{display:flex;gap:8px;align-items:center;font-size:14px;cursor:pointer}.switch input{accent-color:var(--hotD);width:16px;height:16px}
-.codecard{background:var(--code);border-color:var(--codeline);overflow:hidden}
-.codebar{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--codeline);flex-wrap:wrap}
+/* the scramjit switch, as in the home page's demos */
+.lab-mode{position:relative;display:inline-flex;align-items:center;align-self:flex-start;max-width:100%}
+.lab-sj{display:inline-flex;align-items:center;gap:9px;border:1px solid #2a3042;border-radius:12px;padding:9px 12px 9px 14px;font:600 14px var(--font);color:#c9d1e2;background:#141a28;cursor:pointer;transition:border-color .25s,box-shadow .25s,color .25s}
+.lab-sj:disabled{opacity:.55;cursor:default}
+.lab-sj:not(:disabled):hover{border-color:#3d4560;color:#fff}
+.lab-sj .lab-logo{width:20px;height:20px;flex:none;filter:grayscale(1) brightness(.75);transition:filter .3s}
+.lab-sj:not(:disabled):hover .lab-logo{filter:grayscale(.4)}
+.lab-track{position:relative;width:38px;height:20px;border-radius:999px;background:#2d3448;transition:background .25s}
+.lab-knob{position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:#8e98b0;transition:left .25s,background .25s}
+.lab-state{min-width:22px;font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:#6f7891}
+.lab-sj[aria-checked=true]{color:#fff;border-color:#f9731699;box-shadow:0 0 22px -4px rgba(249,115,22,.7)}
+.lab-sj[aria-checked=true] .lab-logo{filter:none}
+.lab-sj[aria-checked=true] .lab-track{background:linear-gradient(90deg,#2563eb,#f97316 60%,#dc2626)}
+.lab-sj[aria-checked=true] .lab-knob{left:21px;background:#fff}
+.lab-sj[aria-checked=true] .lab-state{color:#ffd2ad}
+.lab-nudge{margin-left:10px;white-space:nowrap;font:600 12.5px var(--font);color:var(--hotD);opacity:0;transition:opacity .4s;pointer-events:none}
+.lab-nudge::before{content:"←";margin-right:6px}
+.lab.nudge .lab-nudge{opacity:1}
+.lab.nudge .lab-sj{animation:labpulse 1.4s ease-in-out infinite}
+@keyframes labpulse{50%{box-shadow:0 0 0 4px rgba(249,115,22,.35),0 0 22px rgba(249,115,22,.6);color:#fff}}
+/* the code: the editor; with scramjit on, tabs for the syntax tree, the C and the WebAssembly */
+.codecard{background:var(--code);border-color:var(--codeline);overflow:hidden;display:flex;flex-direction:column;height:calc(100vh - 118px);min-height:560px}
+.codebar{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--codeline);flex-wrap:wrap}
 .codebar span{font-size:13px;color:#8b949e}
-.codebar .btn-s{background:transparent;color:#d7dde8;border-color:var(--codeline)}
-#err{display:none;background:#2a1014;color:#ffb4b4;font:12.5px/1.45 var(--mono);padding:10px 14px;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto}
-.CodeMirror{height:calc(100vh - 170px);min-height:440px;font:12.5px/1.5 var(--mono);background:var(--code);color:#d7dde8}
+.codebar .icon{background:transparent;color:#d7dde8;border-color:var(--codeline)}.codebar .icon:not(:disabled):hover{color:#fff;border-color:#f9731688}
+#err{display:none;flex:none;background:#2a1014;color:#ffb4b4;font:12.5px/1.45 var(--mono);padding:10px 14px;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto}
+.lab-tabs{flex:none;display:flex;align-items:flex-end;gap:0;padding:6px 8px 0;background:var(--code2);border-bottom:1px solid #232838;overflow-x:auto;overflow-y:hidden}
+.lab-tab{position:relative;flex:none;display:inline-flex;align-items:center;gap:6px;margin-bottom:-1px;border:1px solid transparent;border-bottom:0;border-radius:7px 7px 0 0;background:none;color:#7d869c;font:500 11.5px var(--mono);padding:7px 13px 8px;cursor:pointer;white-space:nowrap;transition:color .2s,background .2s,max-width .45s,padding .45s,opacity .35s}
+.lab-tab svg{width:13px;height:13px;flex:none;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linejoin:round;opacity:.8}
+.lab-tab svg.li{width:14px;height:14px;stroke:none;opacity:.55;filter:saturate(.6);transition:opacity .2s,filter .2s}
+.lab-tab.open svg.li,.lab-tab:hover svg.li{opacity:1;filter:none}
+.lab-tab:hover{color:#d6deeb;background:#141927}
+.lab-tab.open{color:#fff;background:var(--code);border-color:#232838}
+.lab-tab.open::before{content:"";position:absolute;left:-1px;right:-1px;top:-1px;height:2px;border-radius:7px 7px 0 0;background:#3b82f6}
+.lab.fast .lab-tab.lab-more.open::before{background:linear-gradient(90deg,#f97316,#dc2626)}
+.lab-tab.open::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--code)}
+.lab-more{max-width:0;padding-left:0;padding-right:0;border-width:0;opacity:0;overflow:hidden;pointer-events:none}
+.lab.sj .lab-more{max-width:170px;padding-left:13px;padding-right:13px;border-width:1px;opacity:1;pointer-events:auto}
+.lab.sj .lab-more:nth-of-type(3){transition-delay:.08s}.lab.sj .lab-more:nth-of-type(4){transition-delay:.16s}
+.lab-note{margin-left:auto;align-self:center;padding:0 4px 6px 10px;font:500 11px var(--mono);color:#6f7891;white-space:nowrap}
+.lab-note.busy::before{content:"";display:inline-block;width:8px;height:8px;margin-right:7px;border-radius:50%;background:#f97316;animation:labblink .8s ease-in-out infinite alternate}
+@keyframes labblink{to{opacity:.25}}
+.lab-progress{flex:none;height:2px;background:transparent;overflow:hidden;opacity:0;transition:opacity .25s}
+.lab-progress.on{opacity:1}
+.lab-progress i{display:block;height:100%;width:0;background:linear-gradient(90deg,#2563eb,#f97316 60%,#dc2626);box-shadow:0 0 10px rgba(249,115,22,.6)}
+.lab-pane{position:relative;flex:1;min-height:0;--p:0}
+.lab-code,.lab-panel{position:absolute;inset:0}
+.lab-code .CodeMirror{height:100%;background:transparent;color:#c9d1d9;font:12.5px/1.6 var(--mono)}
+.lab-panel .CodeMirror{height:100%;background:transparent;color:#c9d1d9;font:11.5px/1.55 var(--mono)}
 .cm-s-sj .CodeMirror-gutters{background:transparent;border-right:0}.cm-s-sj .CodeMirror-linenumber{color:#3a4258}
 .cm-s-sj .CodeMirror-cursor{border-left:2px solid #ffb072}
 .cm-s-sj .CodeMirror-selected,.cm-s-sj.CodeMirror-focused .CodeMirror-selected{background:#2a2f45}
-.cm-s-sj .cm-keyword{color:#ff7b72}.cm-s-sj .cm-builtin{color:#ffa657}.cm-s-sj .cm-number{color:#79c0ff}.cm-s-sj .cm-string{color:#a5d6ff}.cm-s-sj .cm-comment{color:#6e7681}.cm-s-sj .cm-def{color:#d2a8ff}
-.changed{background:rgba(249,115,22,.17)}
+.cm-s-sj .cm-keyword{color:#ff7b72}.cm-s-sj .cm-builtin{color:#ffa657}.cm-s-sj .cm-number{color:#79c0ff}.cm-s-sj .cm-string{color:#a5d6ff}
+.cm-s-sj .cm-comment{color:#6e7681}.cm-s-sj .cm-meta{color:#8b949e}.cm-s-sj .cm-type,.cm-s-sj .cm-variable-3{color:#ffa657}.cm-s-sj .cm-atom{color:#79c0ff}.cm-s-sj .cm-qualifier{color:#ff7b72}.cm-s-sj .cm-def{color:#d2a8ff}.cm-s-sj .cm-variable-2{color:#c9d1d9}.cm-s-sj .cm-operator{color:#c9d1d9}
+/* an edit: lines stay tinted while they differ from the original; a preset's change flashes as it's made */
+.changed{background:rgba(249,115,22,.14)}
+.pulse{animation:editpulse 1.7s ease-out both}
+@keyframes editpulse{0%{background:rgba(249,115,22,.62);box-shadow:inset 4px 0 0 #f97316}35%{background:rgba(249,115,22,.34);box-shadow:inset 4px 0 0 #f97316}100%{background:transparent;box-shadow:inset 4px 0 0 transparent}}
+.pulse-g .CodeMirror-linenumber{animation:editgutter 1.7s ease-out both}
+@keyframes editgutter{0%,35%{color:#ffb072}100%{color:#3a4258}}
+.edit-mark{border-radius:3px;background:rgba(249,115,22,.5);color:#fff;animation:editmark 2.6s ease-out both}
+@keyframes editmark{0%{background:rgba(249,115,22,.85);box-shadow:0 0 12px 2px rgba(249,115,22,.75)}60%{background:rgba(249,115,22,.4);box-shadow:0 0 0 0 transparent}100%{background:transparent}}
+@media (prefers-reduced-motion:reduce){.pulse,.pulse-g .CodeMirror-linenumber,.edit-mark,.lab.nudge .lab-sj,.lab-note.busy::before{animation:none}.edit-mark{background:rgba(249,115,22,.4)}.lab.nudge .lab-sj{box-shadow:0 0 0 3px rgba(249,115,22,.5)}}
+/* the syntax tree */
+.lab-tree{position:absolute;inset:0;overflow:auto;padding:12px 14px 20px;font:11.5px/1.5 var(--mono);color:#b9c2d6}
+.lab-tree ul{list-style:none;margin:0;padding:0 0 0 16px;border-left:1px solid #252b3c;margin-left:6px}
+.lab-tree>ul{border-left:0;padding-left:0;margin-left:0}
+.lab-tree li{position:relative;margin:3px 0}
+.lab-tree ul ul>li::before{content:"";position:absolute;left:-16px;top:11px;width:12px;border-top:1px solid #252b3c}
+.lab-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:2px 6px;border-radius:6px;cursor:default}
+.lab-row.x{cursor:pointer}.lab-row.x:hover{background:#151a28}
+.lab-k{flex:none;font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;color:#cfe0ff;background:#1b2b52}
+.lab-k.loop{color:#ffd2ad;background:#3a1d10}.lab-k.cond{color:#e9d5ff;background:#2e1a47}.lab-k.def{color:#fff;background:#1e40af}
+.lab-k.ex{color:#aab3c8;background:#1b2030}
+.lab-t{color:#d6deeb;white-space:pre}
+.lab-ty{flex:none;font-size:10.5px;padding:0 6px;border-radius:999px;border:1px solid #2a3042;color:#9aa4bb}
+.lab-ty b{font-weight:600;color:#c9d1e2}
+.lab-ty.arr{border-color:#6d28d966;color:#d8b4fe}.lab-ty.flt{border-color:#c2410c66;color:#ffb072}.lab-ty.int{border-color:#2563eb66;color:#93c5fd}
+.lab-row .lab-caret{flex:none;width:10px;color:#4b5470;transition:transform .2s}.lab-row.x.on .lab-caret{transform:rotate(90deg)}
+.lab-ex{margin:2px 0 6px 22px;padding:6px 8px;border-radius:6px;background:#0d111c;border:1px solid #1d2232}
+.lab-tree-head{margin:0 0 10px;color:#6f7891}
+/* the raster line: the C, above it, replaces the Python, below it, as it sweeps down */
+.lab-pane.sweep .lab-code{clip-path:inset(calc(var(--p) * 100%) 0 0 0)}
+.lab-pane.sweep .lab-panel{clip-path:inset(0 0 calc((1 - var(--p)) * 100%) 0)}
+.lab-scan{position:absolute;left:0;right:0;top:calc(var(--p) * 100%);height:2px;z-index:3;pointer-events:none;opacity:0;transition:opacity .2s;background:linear-gradient(90deg,rgba(37,99,235,0),#3b82f6 12%,#f97316 58%,#ef4444 88%,rgba(239,68,68,0));box-shadow:0 0 16px 3px rgba(249,115,22,.45)}
+.lab-scan::after{content:"";position:absolute;left:0;right:0;bottom:2px;height:26px;background:linear-gradient(0deg,rgba(249,115,22,.12),rgba(249,115,22,0))}
+.lab-pane.sweep .lab-scan{opacity:1}
 .foot{margin-top:18px;font-size:13px;color:var(--ink3);max-width:90ch}.foot a{color:var(--cold);font-weight:500}
-@media(max-width:1000px){.grid{grid-template-columns:minmax(0,1fr)}.top-in,.page{padding-left:16px;padding-right:16px}.CodeMirror{height:60vh;min-height:320px}}
-@media(max-width:520px){.stats{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:1000px){.grid{grid-template-columns:minmax(0,1fr)}.top-in,.page{padding-left:16px;padding-right:16px}.codecard{height:70vh;min-height:420px}}
+@media(max-width:520px){.stats{grid-template-columns:repeat(2,1fr)}.lab-nudge{display:none}}
 </style>
 </head>
 <body>
@@ -71,287 +150,59 @@ h1{font-size:clamp(25px,3vw,33px);font-weight:800;letter-spacing:-.03em;line-hei
 </div></header>
 <main class="page">
   <h1>Edit a language model while it writes</h1>
-  <p class="lede">The whole forward pass of this 15M-parameter Llama 2 is the plain Python on the right, compiled by scramjit in this tab. Change a line and the story carries on with the new code, from the same point. It's a tiny model trained on children's stories. The first visit downloads 60 MB.</p>
+  <p class="lede">The whole forward pass of this 15M-parameter Llama 2 is the plain Python on the right, running in this tab. Turn on scramjit to compile it. Change a line and the story carries on with the new code, from the same point. It's a tiny model trained on children's stories. The first visit downloads 60 MB.</p>
   <p id="status" role="status" aria-live="polite">Starting</p>
-  <div class="grid">
+  <div class="grid lab" id="demo">
     <section class="card stage" aria-label="The story">
+      <div class="lab-mode" id="mode" hidden>
+        <button type="button" class="lab-sj" id="sj" role="switch" aria-checked="false"><svg class="lab-logo" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lg-sj" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2563eb"/><stop offset=".6" stop-color="#f97316"/><stop offset="1" stop-color="#dc2626"/></linearGradient></defs><rect width="32" height="32" rx="8" fill="url(#lg-sj)"/><path d="M5.5 9.5L13 14h6l7.5-4.5M5.5 22.5L13 18h6l7.5 4.5" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="16" r="1.7" fill="#fff"/></svg>scramjit<span class="lab-track"><span class="lab-knob"></span></span><span class="lab-state">off</span></button>
+        <span class="lab-nudge" aria-hidden="true">Slow? Turn it on</span>
+      </div>
       <form class="ask" id="ask">
         <input id="prompt" aria-label="How the story starts" value="Once upon a time" maxlength="200">
-        <button class="btn btn-s" id="again" type="submit" disabled>New story</button>
-        <button class="btn btn-s" id="pause" type="button" disabled>Pause</button>
-        <button class="btn btn-p" id="load" type="button" hidden>Download 60 MB and start</button>
+        <button class="icon" id="again" type="submit" disabled title="New story" aria-label="New story"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M12 12v6M9 15h6"/></svg></button>
+        <button class="icon" id="pause" type="button" disabled title="Pause" aria-label="Pause"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg></button>
+        <button class="icon" id="clear" type="button" title="Clear the text" aria-label="Clear the text"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4l10-10a1 1 0 0 1 1.4 0l5.6 5.6a1 1 0 0 1 0 1.4L11 21"/><path d="M22 21H7M5 11l9 9"/></svg></button>
+        <button class="btn btn-p" id="load" type="button" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></svg>Download 60 MB and start</button>
       </form>
       <div id="story" aria-live="off" tabindex="0"></div>
       <div class="stats">
         <div><b id="rate">–</b><span>tokens/s</span></div>
+        <div><b id="times">–</b><span>against plain Python</span></div>
         <div><b id="compile">–</b><span>last compile</span></div>
         <div><b id="tokens">0</b><span>tokens</span></div>
-        <div><b id="swaps">0</b><span>code swaps</span></div>
       </div>
       <div>
-        <div class="lab">Try an edit</div>
+        <div class="lab-lab">Try an edit</div>
         <div id="chips"></div>
       </div>
-      <label class="switch"><input type="checkbox" id="plain" disabled>Run without the compiler: the same code as ordinary Python</label>
     </section>
     <section class="card codecard" aria-label="The forward pass">
-      <div class="codebar"><button class="btn btn-p" id="run" disabled>Compile and swap in</button><button class="btn btn-s" id="reset" disabled>Reset</button><span>Ctrl+Enter</span></div>
+      <div class="codebar"><button class="btn btn-p" id="run" disabled><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg><i id="runlabel" style="font-style:normal">Run this code</i></button><button class="icon" id="reset" disabled title="Reset the code" aria-label="Reset the code"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></button><span>Ctrl+Enter</span></div>
+      <div class="lab-tabs" role="tablist" aria-label="The code, and what scramjit makes of it">
+        <button type="button" class="lab-tab open" role="tab" data-s="python"><svg class="li" viewBox="0 0 16 16" aria-hidden="true"><path fill="#3b82f6" d="M7.9 1C5 1 5.2 2.3 5.2 2.3v1.3h2.8V4H3.9S2 3.8 2 6.8 3.6 9.7 3.6 9.7h1V8.3s-.1-1.7 1.7-1.7h2.8s1.6 0 1.6-1.6V2.6S11 1 7.9 1zM6.4 1.9a.5.5 0 1 1 0 1 .5.5 0 0 1 0-1z"/><path fill="#facc15" d="M8.1 15c2.9 0 2.7-1.3 2.7-1.3v-1.3H8V12h4.1s1.9.2 1.9-2.8-1.6-2.9-1.6-2.9h-1v1.4s.1 1.7-1.7 1.7H6.9s-1.6 0-1.6 1.6v2.4S5 15 8.1 15zm1.5-.9a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1z"/></svg>forward.py</button>
+        <button type="button" class="lab-tab lab-more" role="tab" data-s="tree"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="3" r="1.6"/><circle cx="3.5" cy="12.5" r="1.6"/><circle cx="12.5" cy="12.5" r="1.6"/><path d="M8 4.6v3M8 7.6 3.5 11M8 7.6l4.5 3.4"/></svg>AST &amp; types</button>
+        <button type="button" class="lab-tab lab-more" role="tab" data-s="c"><svg class="li" viewBox="0 0 16 16" aria-hidden="true"><path fill="#3b6fb6" d="M8 .8l6.2 3.6v7.2L8 15.2 1.8 11.6V4.4z"/><path fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" d="M10.3 6.1a3 3 0 1 0 0 3.8"/></svg>forward.c</button>
+        <button type="button" class="lab-tab lab-more" role="tab" data-s="wasm"><svg class="li" viewBox="0 0 16 16" aria-hidden="true"><path fill="#654ff0" d="M10 1h5v14H1V1h5a2 2 0 0 0 4 0z"/><text x="8" y="12.6" text-anchor="middle" font-family="Arial,sans-serif" font-weight="700" font-size="6.2" fill="#fff">WA</text></svg>forward.wat</button>
+        <span class="lab-note" id="note"></span>
+      </div>
+      <div class="lab-progress" id="progress" aria-hidden="true"><i></i></div>
       <div id="err" role="alert"></div>
-      <textarea id="code" spellcheck="false" aria-label="The forward pass"></textarea>
+      <div class="lab-pane" id="pane">
+        <div class="lab-code" id="codepane"><textarea id="code" spellcheck="false" aria-label="The forward pass"></textarea></div>
+        <div class="lab-panel" id="panel" hidden></div>
+        <div class="lab-tree" id="tree" hidden></div>
+        <i class="lab-scan" aria-hidden="true"></i>
+      </div>
     </section>
   </div>
   <p class="foot">No server: Python, numpy, the compiler and the model all run in your browser. Weights and the C original are <a href="https://github.com/karpathy/llama2.c">Andrej Karpathy's llama2.c</a>; the weights download from Hugging Face. <a href="https://github.com/farizrahman4u/scramjit/tree/main/docs/demos/llm">Source.</a></p>
 </main>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
-<script>
-'use strict';
-const $ = id => document.getElementById(id);
-const BOOT_MS = 300000, COMPILE_MS = 60000, GEN_MS = 30000, PLAIN_MS = 180000, CHUNK_MS = 60, MAX_CHARS = 30000;
-const ATT = 'range(pos + 1)', TEMP = 'logits[i] /= 0.8', MARK = '    # temperature\n';
-let robot = -1;
-const EDITS = [
-  { key: 'short', group: 'memory', label: 'Remember only 8 tokens', from: ATT, to: 'range(max(0, pos - 8), pos + 1)' },
-  { key: 'none', group: 'memory', label: 'No memory', from: ATT, to: 'range(pos, pos + 1)' },
-  { key: 'flat', label: 'Flat attention', from: 'att[t] = math.exp(att[t] - top)', to: 'att[t] = 1.0' },
-  { key: 'rope', label: 'No positions', from: 'for i in range(0, dim, 2):', to: 'for i in range(0, 0, 2):' },
-  { key: 'layers', label: 'Drop 2 layers', from: 'for l in range(n_layers):', to: 'for l in range(n_layers - 2):' },
-  { key: 'hot', group: 'temp', label: 'Hotter', from: TEMP, to: 'logits[i] /= 1.6' },
-  { key: 'cold', group: 'temp', label: 'Colder', from: TEMP, to: 'logits[i] /= 0.3' },
-  { key: 'robot', label: 'Obsessed with robots', from: MARK, to: () => `    logits[${robot}] += 8.0  # "robot"\n${MARK}` },
-];
-const toText = e => typeof e.to === 'function' ? e.to() : e.to;
-
-let worker, editor, watchdog, original = '', lastGood = '', previousGood = '', id = 0, label = '', pendingLabel = '';
-let ready = false, running = false, asking = false, compiling = false, booted = false, plain = false, restarting = false;
-let tokens = 0, swaps = 0, recent = [], version = 0, span = null;
-let compiler = null, compilerUp = false, compilerDog, background = null;
-const known = new Set();
-// A second Python uses memory; a machine that can't spare it compiles in the writing worker, pausing the story.
-const roomy = () => (navigator.deviceMemory || 8) >= 4 && (navigator.hardwareConcurrency || 4) >= 4 && !/Mobi/.test(navigator.userAgent);
-const active = new Set();
-const say = m => { $('status').textContent = m; };
-const hidden = () => document.hidden;
-
-function arm(ms) { clearTimeout(watchdog); watchdog = setTimeout(hung, ms); }
-function calm() { clearTimeout(watchdog); }
-function showError(text) { $('err').textContent = text; $('err').style.display = text ? 'block' : 'none'; }
-function controls(on) { for (const b of ['run', 'reset', 'again', 'pause', 'plain']) $(b).disabled = !on; document.querySelectorAll('.chip').forEach(c => { c.disabled = !on; }); }
-
-function hung() {
-  worker.terminate();
-  const code = booted ? lastGood : '';
-  showError(booted ? 'That code stopped responding, so the tab stopped it and went back to the last code that worked. An infinite loop?' : 'Loading took too long. Reload the page to try again.');
-  window.demoState = { ...window.demoState, hung: (window.demoState?.hung || 0) + 1 };
-  asking = compiling = running = ready = false;
-  controls(false);
-  if (!booted) return say('Stopped');
-  say('Restarting');
-  restarting = code; plain = false; $('plain').checked = false;
-  start();
-}
-function start() { worker = new Worker('worker.js'); worker.onmessage = onMessage; arm(BOOT_MS); worker.postMessage({ type: 'boot' }); }
-function startCompiler() {
-  if (compiler || !roomy()) return;
-  compiler = new Worker('worker.js'); compilerUp = false;
-  compiler.onmessage = onCompiler;
-  compiler.onerror = dropCompiler;
-  compiler.postMessage({ type: 'bootCompiler' });
-}
-function dropCompiler() { clearTimeout(compilerDog); if (compiler) compiler.terminate(); compiler = null; compilerUp = false; }
-function onCompiler({ data: m }) {
-  if (m.type === 'compilerReady') { compilerUp = true; window.demoState = { ...window.demoState, compilerUp: m.seconds }; }
-  if (m.type === 'failed') { dropCompiler(); if (background) { const b = background; background = null; swapIn(b.code, b.name); } }
-  if (m.type === 'precompiled' && background && m.id === background.id) {
-    clearTimeout(compilerDog);
-    const b = background; background = null;
-    if (m.error) return rejected(m.error);
-    worker.postMessage({ type: 'adopt', files: m.files }, m.files.map(f => f.data.buffer));
-    swapIn(b.code, b.name, m.seconds);
-  }
-}
-function rejected(error) {
-  compiling = false; controls(true);
-  window.demoState = { ...window.demoState, compiles: (window.demoState?.compiles || 0) + 1, compile: null, error };
-  showError(error);
-  say('That code did not compile. The story is still running the last code that worked.');
-  ask();
-}
-function compilerHung() {
-  dropCompiler(); background = null; controls(true);
-  window.demoState = { ...window.demoState, hung: (window.demoState?.hung || 0) + 1, compiles: (window.demoState?.compiles || 0) + 1, compile: null };
-  showError(`That code didn't finish compiling in ${COMPILE_MS / 1000} s, so it was stopped. The story is still running the last code that worked.`);
-  say('Stopped that compile');
-  startCompiler();
-}
-
-function onMessage({ data: m }) {
-  if (m.type === 'status') say(m.msg);
-  if (m.type === 'alive') arm(BOOT_MS);
-  if (m.type === 'failed') { calm(); showError(m.error); say(booted ? 'Stopped: see the error beside the editor.' : 'Could not start: ' + m.error); asking = compiling = false; window.demoState = { ...window.demoState, failed: m.error }; }
-  if (m.type === 'ready') {
-    calm(); booted = true; robot = m.robot;
-    window.demoState = { ...window.demoState, python: m.python, boot: m.seconds };
-    buildChips();
-    pendingLabel = '';
-    compile(restarting || editor.getValue(), '');
-  }
-  if (m.type === 'compiled') compiled(m);
-  if (m.type === 'text') gotText(m);
-}
-
-function compile(code, name) {
-  showError('');
-  controls(false); $('pause').disabled = false; $('plain').disabled = false;
-  if (ready && compilerUp && !known.has(code)) {
-    say('Compiling; the story keeps writing');
-    const mine = ++id;
-    background = { id: mine, code, name };
-    clearTimeout(compilerDog); compilerDog = setTimeout(compilerHung, COMPILE_MS);
-    compiler.postMessage({ type: 'precompile', id: mine, code });
-    window.demoState = { ...window.demoState, tokensAtCompile: tokens };
-    return;
-  }
-  say(known.has(code) ? 'Swapping' : 'Compiling; the story waits here');
-  swapIn(code, name);
-}
-function swapIn(code, name, seconds) {
-  compiling = true; pendingLabel = name; compile.code = code; compile.seconds = seconds;
-  arm(COMPILE_MS);
-  worker.postMessage({ type: 'compile', id: ++id, code });
-}
-function compiled(m) {
-  calm();
-  compiling = false;
-  controls(true);
-  const took = compile.seconds ?? m.seconds, paused = m.seconds;
-  window.demoState = { ...window.demoState, compile: took, pause: paused, compiles: (window.demoState?.compiles || 0) + 1, error: m.error || null, writtenDuring: tokens - (window.demoState?.tokensAtCompile ?? tokens) };
-  if (m.error) return rejected(m.error);
-  known.add(compile.code);
-  previousGood = lastGood; lastGood = compile.code;
-  $('compile').textContent = m.cached ? 'cached' : took.toFixed(1) + ' s';
-  if (!ready) {
-    ready = true; running = true;
-    if (restarting) { restarting = false; say('Restarted on the last code that worked'); } else say('Writing');
-    worker.postMessage({ type: 'start', prompt: $('prompt').value });
-    window.demoState.firstAt = performance.now();
-    setTimeout(startCompiler, 1500);
-  } else {
-    swaps++; $('swaps').textContent = swaps; version = (version % 4) + 1;
-    const when = m.cached ? 'cached' : took.toFixed(1) + ' s';
-    say(m.cached ? 'Swapped back in. Same story, new code.' : compile.seconds !== undefined ? `Compiled in ${when} while the story kept writing; the swap paused it ${paused.toFixed(1)} s.` : `Compiled and swapped in, ${when}. Same story, new code.`);
-    newSpan(`${pendingLabel || 'your edit'} · ${when}`);
-  }
-  ask();
-}
-function ask() {
-  if (!ready || !running || asking || compiling || hidden()) return;
-  asking = true; arm(plain ? PLAIN_MS : GEN_MS);
-  worker.postMessage({ type: 'gen', ms: CHUNK_MS });
-}
-function newSpan(markText) {
-  const box = $('story');
-  if (markText) { const b = document.createElement('mark'); b.textContent = markText; box.append(b); }
-  span = document.createElement('span');
-  if (version) span.className = 'v' + version;
-  box.append(span);
-}
-function gotText(m) {
-  if (!compiling) calm();
-  asking = false;
-  if (m.text.length) write(m.text);
-  tokens += m.tokens;
-  recent.push([m.tokens, m.seconds]);
-  if (recent.length > 24) recent.shift();
-  const n = recent.reduce((a, r) => a + r[0], 0), s = recent.reduce((a, r) => a + r[1], 0);
-  const rate = s ? n / s : 0;
-  $('rate').textContent = rate >= 10 ? Math.round(rate) : rate.toFixed(2);
-  $('tokens').textContent = tokens.toLocaleString();
-  window.demoState = { ...window.demoState, tokens, rate };
-  if (m.error) {
-    showError(m.error + '\n\nThat edit failed partway through the story, so it went back to the code before it and started a new story.');
-    say('Went back to the previous code');
-    lastGood = previousGood || original; window.demoState.runtimeError = m.error;
-    version = 0; newSpan('back to previous code');
-  }
-  ask();
-}
-function write(pieces) {
-  const box = $('story'), follow = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-  if (!span) newSpan();
-  let t = pieces.join('');
-  const before = box.textContent;
-  if (!before || before.endsWith('\n')) t = t.replace(/^ +/, '');
-  t = t.replace(/\n\n +/g, '\n\n');
-  span.append(t);
-  while (box.textContent.length > MAX_CHARS && box.firstChild !== span) box.firstChild.remove();
-  if (follow) box.scrollTop = box.scrollHeight;
-  window.demoState = { ...window.demoState, tail: box.textContent.slice(-280) };
-}
-
-function replaceAll(text, a, b) { return text.split(a).join(b); }
-function toggle(e) {
-  let code = editor.getValue();
-  const on = active.has(e.key), to = toText(e);
-  if (on) {
-    code = replaceAll(code, to, e.from); active.delete(e.key);
-  } else {
-    for (const o of EDITS) if (o.group && o.group === e.group && active.has(o.key)) { code = replaceAll(code, toText(o), o.from); active.delete(o.key); }
-    if (!code.includes(e.from)) return showError(`"${e.label}" changes a line that's no longer there. Press Reset, then try it again.`);
-    code = replaceAll(code, e.from, to); active.add(e.key);
-  }
-  editor.setValue(code);
-  showChips();
-  compile(code, (on ? 'undo: ' : '') + e.label.toLowerCase());
-}
-function showChips() { document.querySelectorAll('.chip').forEach(c => c.setAttribute('aria-pressed', active.has(c.dataset.key))); }
-function buildChips() {
-  if ($('chips').children.length) return;
-  for (const e of EDITS) {
-    if (e.key === 'robot' && robot < 0) continue;
-    const b = document.createElement('button');
-    b.className = 'chip'; b.type = 'button'; b.textContent = e.label; b.dataset.key = e.key; b.disabled = true; b.onclick = () => toggle(e);
-    $('chips').append(b);
-  }
-  showChips();
-}
-function changedLines() {
-  const orig = new Set(original.split('\n'));
-  editor.operation(() => { for (let i = 0; i < editor.lineCount(); i++) { const c = !orig.has(editor.getLine(i)); editor[c ? 'addLineClass' : 'removeLineClass'](i, 'background', 'changed'); } });
-}
-function run() { if (!compiling && booted) { active.clear(); showChips(); compile(editor.getValue(), ''); } }
-
-$('run').onclick = run;
-$('reset').onclick = () => { active.clear(); showChips(); editor.setValue(original); compile(original, 'reset'); };
-$('ask').onsubmit = e => {
-  e.preventDefault();
-  if (!ready) return;
-  $('story').append('\n\n'); newSpan();
-  worker.postMessage({ type: 'start', prompt: $('prompt').value }); running = true; $('pause').textContent = 'Pause'; ask();
-};
-$('pause').onclick = () => { running = !running; $('pause').textContent = running ? 'Pause' : 'Resume'; say(running ? 'Writing' : 'Paused'); ask(); };
-$('plain').onchange = () => {
-  plain = $('plain').checked; recent = [];
-  worker.postMessage({ type: 'plain', on: plain });
-  say(plain ? 'Compiler off: the same code as ordinary Python, one token at a time' : 'Compiler on');
-  newSpan(plain ? 'compiler off' : 'compiler on');
-  ask();
-};
-$('load').onclick = () => { $('load').hidden = true; start(); };
-document.addEventListener('visibilitychange', () => { if (!hidden()) ask(); });
-
-editor = CodeMirror.fromTextArea($('code'), { mode: 'python', theme: 'sj', lineNumbers: true, indentUnit: 4, extraKeys: { 'Ctrl-Enter': run, 'Cmd-Enter': run } });
-editor.on('change', () => { clearTimeout(changedLines.t); changedLines.t = setTimeout(changedLines, 120); });
-window.demoApi = { editor, run, toggle, EDITS, get lastGood() { return lastGood; }, get version() { return version; } };
-
-async function kept() { try { const c = await caches.open('scramjit-llm-1'); return !!(await c.match('https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin')); } catch { return false; } }
-(async () => {
-  original = await (await fetch('forward.py')).text();
-  editor.setValue(original);
-  const net = navigator.connection || {};
-  const careful = net.saveData || net.type === 'cellular' || /(^|-)2g$/.test(net.effectiveType || '');
-  if (careful && !(await kept())) { $('load').hidden = false; say('Ready when you are: 60 MB to download.'); } else start();
-})();
-</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/clike/clike.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/mode/simple.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/wast/wast.min.js"></script>
+<script src="page.js"></script>
 </body>
 </html>

@@ -1,4 +1,5 @@
 """The page's Python side: weights, tokenizer, compiling the editor's source, generating."""
+import ast
 import hashlib
 import importlib.util
 import json
@@ -10,6 +11,7 @@ import time
 
 os.environ.setdefault('CIMO_CACHE_DIR', '/tmp/cimo_cache')
 
+import lab  # noqa: E402  (the site's demos: the syntax tree with its types, and the WebAssembly text)
 import numpy as np  # noqa: E402
 from scramjit import scram  # noqa: E402
 
@@ -121,29 +123,48 @@ def _message(e):
     return text[:1500]
 
 
-def compile_forward(code):
-    """Swaps in the editor's source, or reports why not and leaves the running code alone. Generation
-    state stays as it is: a trial call uses its own caches, so the story carries on across the swap."""
+def _stages(fn, code):
+    """What the tabs show: the generated C, and the syntax tree with the types scramjit inferred."""
+    entry = next(v for v in fn._cache.values() if hasattr(v, 'source'))
+    fdef = next(n for n in ast.parse(code).body if isinstance(n, ast.FunctionDef) and n.name == 'forward')
+    return {'c': entry.source, 'tree': lab.stmt_tree(fdef, dict(entry.locals))}
+
+
+def compile_forward(code, compiled=True):
+    """Swaps in the editor's source, compiled or as plain Python, or reports why not and leaves the running
+    code alone. Generation state stays as it is: a trial call uses its own caches, so the story carries on."""
     t = time.perf_counter()
     try:
-        cached = code in _memo
-        if cached:
-            fn, plain = _memo[code]
+        out = {}
+        if compiled:
+            cached = code in _memo
+            if cached:
+                fn, plain = _memo[code]
+            else:
+                plain = _load(code)
+                fn = scram(fallback=False)(plain)
+                keep = S.logits.copy()
+                fn(*_args(BOS, 0, [c.copy() for c in S.caches], [w.copy() for w in S.work]))
+                ok = np.isfinite(S.logits).all()
+                S.logits[:] = keep
+                if not ok:
+                    raise ValueError('this forward pass produces NaN or infinite logits')
+                _memo[code] = fn, plain
+                out = _stages(fn, code)
+            out['cached'] = cached
         else:
-            plain = _load(code)
-            fn = scram(fallback=False)(plain)
-            keep = S.logits.copy()
-            fn(*_args(BOS, 0, [c.copy() for c in S.caches], [w.copy() for w in S.work]))
-            ok = np.isfinite(S.logits).all()
-            S.logits[:] = keep
-            if not ok:
-                raise ValueError('this forward pass produces NaN or infinite logits')
-            _memo[code] = fn, plain
-        S.previous = S.fn, S.plain
-        S.fn, S.plain = fn, plain
-        return json.dumps({'seconds': time.perf_counter() - t, 'cached': cached})
+            fn, plain = None, _load(code)
+        S.previous = S.fn, S.plain, S.use_plain
+        S.fn, S.plain, S.use_plain = fn, plain, not compiled
+        return json.dumps({'seconds': time.perf_counter() - t, **out})
     except BaseException as e:  # a compile error, or the trial call failing
         return json.dumps({'error': _message(e)})
+
+
+def wasm_text(code):
+    """The running compiled function as WebAssembly text."""
+    lab.S['fn'] = _memo[code][0]
+    return lab.wasm_text()
 
 
 def _cached():
@@ -182,10 +203,6 @@ def _begin():
     S.token, S.pos, S.pending = BOS, 0, list(S.prompt)
 
 
-def set_plain(on):
-    S.use_plain = bool(on)
-
-
 def step(ms):
     """Generates for about `ms`, at least one token. Returns the text and the time in forward passes."""
     out, seconds, n = [], 0.0, 0
@@ -216,7 +233,8 @@ def step(ms):
             if time.perf_counter() >= end:
                 break
     except BaseException as e:
-        S.fn, S.plain = S.previous      # the edit passed its trial call but failed further into the story
+        if S.previous and S.previous[1]:
+            S.fn, S.plain, S.use_plain = S.previous      # the edit failed further into the story than its trial call
         _begin()
         return json.dumps({'error': _message(e), 'text': out, 'tokens': n, 'seconds': seconds})
     return json.dumps({'text': out, 'tokens': n, 'seconds': seconds})

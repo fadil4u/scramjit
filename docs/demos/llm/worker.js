@@ -47,6 +47,8 @@ async function python() {
   py.FS.mkdirTree('/home/pyodide/scramjit');
   py.FS.writeFile('/home/pyodide/cimo.py', await text('../../py/cimo.py'));
   for (const f of SJ) py.FS.writeFile('/home/pyodide/scramjit/' + f, await text('../../py/scramjit/' + f));
+  py.FS.writeFile('/home/pyodide/lab.py', await text('../../lab/lab.py'));
+  py.FS.writeFile('/home/pyodide/wat.py', await text('../../lab/wat.py'));
   py.FS.writeFile('/home/pyodide/demo_py.py', await text('demo_py.py'));
   py.runPython("import sys; sys.path.insert(0, '/home/pyodide')");
   await py.runPythonAsync('import demo_py');
@@ -76,9 +78,13 @@ onmessage = async ({ data: m }) => {
       postMessage({ type: 'precompiled', id: m.id, seconds: r.seconds, error: r.error, files }, files.map(f => f.data.buffer));
     }
     if (m.type === 'adopt') for (const f of m.files) { py.FS.mkdirTree(f.path.slice(0, f.path.lastIndexOf('/'))); py.FS.writeFile(f.path, f.data); }
-    if (m.type === 'compile') { await breathe(); postMessage({ type: 'compiled', id: m.id, ...jsonOf(demo.compile_forward(m.code)) }); }
+    if (m.type === 'compile') { await breathe(); postMessage({ type: 'compiled', id: m.id, ...jsonOf(demo.compile_forward(m.code, m.compiled)) }); }
     if (m.type === 'start') demo.start(m.prompt);
-    if (m.type === 'plain') demo.set_plain(m.on);
+    if (m.type === 'wat') {
+      let t;
+      try { t = demo.wasm_text(m.code); } catch (err) { t = ';; could not disassemble: ' + err.message; }
+      postMessage({ type: 'wat', code: m.code, text: t });
+    }
     if (m.type === 'gen') postMessage({ type: 'text', ...jsonOf(demo.step(m.ms)) });
   } catch (err) { postMessage({ type: 'failed', compiler: m.type === 'bootCompiler' || m.type === 'precompile', error: err.message }); }
 };

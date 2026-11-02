@@ -26,6 +26,7 @@ let compiled = false, runningPlain = true, nudged = false, startedAt = 0, stage 
 let tokens = 0, recent = [], version = 0, span = null, pyRate = 0;
 let compiler = null, compilerUp = false, compilerDog, background = null, want = null, editTimer = null, typing = false, carryIntro = false, barOn = false;
 const known = new Set(), infos = new Map();
+let heatPrompted = false, heatPrompt;
 let heatWanted = false, heatFor = null, heatAsked = null, heatDog, heatPainted = 0, heatLines = [];   // the heatmap
 let sharedWaiting = false;                             // the editor holds code from a link: nothing runs it until asked
 // A second Python uses memory; a machine that can't spare it compiles in the writing worker, pausing the story.
@@ -283,7 +284,7 @@ function setMode(on) {
   if (on === compiled || !ready) return;
   setSwitch(on);
   root.classList.remove('nudge'); nudged = true;
-  if (!on) showStage('python');
+  if (!on) { showStage('python'); endPrompt(); }
   request(editor.getValue(), on ? 'scramjit on' : 'scramjit off', on);
 }
 
@@ -345,7 +346,7 @@ function sweep() {
     const u = d ? Math.min(1, (now - t0) / d) : 1, e = u < .5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u);
     pane.style.setProperty('--p', e.toFixed(4));
     if (u < 1 && compiled) requestAnimationFrame(step);
-    else { pane.classList.remove('sweep'); showStage(compiled ? 'c' : 'python'); }
+    else { pane.classList.remove('sweep'); showStage('python'); if (compiled) promptHeat(); }
   })(t0);
 }
 
@@ -525,13 +526,45 @@ function heatFailed(error) {
 }
 function clearHeat() {
   editor.operation(() => {
-    for (const [h, cls] of heatLines) editor.removeLineClass(h, 'background', cls);
+    for (const [h, cls] of heatLines) { editor.removeLineClass(h, 'background', cls); editor.removeLineClass(h, 'gutter', 'heat-lit'); }
     heatLines = [];
     editor.clearGutter('heat');
   });
+  editor.getGutterElement().querySelector('.heat-strip')?.remove();
+}
+// once, after the first compile: the button is easy to miss, and this is what to look at next
+function promptHeat() {
+  if (heatPrompted || heatWanted) return;
+  heatPrompted = true;
+  root.classList.add('heatnudge');
+  state({ heatPrompted: true });
+  heatPrompt = setTimeout(endPrompt, 15000);
+}
+function endPrompt() { clearTimeout(heatPrompt); root.classList.remove('heatnudge'); }
+// cold to hot, as a line's share of the hottest line
+const HEAT = [[0, [37, 99, 235]], [.35, [124, 58, 237]], [.7, [234, 88, 12]], [1, [220, 38, 38]]];
+function heatColor(u) {
+  let i = 1;
+  while (i < HEAT.length - 1 && u > HEAT[i][0]) i++;
+  const [a, ca] = HEAT[i - 1], [b, cb] = HEAT[i], k = (u - a) / (b - a);
+  return `rgb(${ca.map((c, n) => Math.round(c + (cb[n] - c) * k)).join()})`;
+}
+// one gradient down the whole column, with a stop at the middle of each line, so that lines blend into each other
+function paintStrip(lines, top) {
+  const column = editor.getGutterElement().querySelector('.CodeMirror-linenumbers');
+  if (!column) return;
+  let strip = column.querySelector('.heat-strip');
+  if (!strip) { strip = document.createElement('div'); strip.className = 'heat-strip'; column.prepend(strip); }
+  const half = editor.defaultTextHeight() / 2, stops = [], span = Math.log(top + 1);   // counts span nine orders of magnitude
+  for (let i = 0; i < editor.lineCount(); i++) {
+    const v = lines[i + 1];
+    stops.push(`${v ? heatColor(Math.log(v + 1) / span) : 'transparent'} ${(editor.heightAtLine(i, 'local') + half).toFixed(1)}px`);
+  }
+  strip.style.background = `linear-gradient(to bottom,${stops.join()})`;
 }
 function setHeat(on) {
   heatWanted = on;
+  endPrompt();
   $('heat').setAttribute('aria-pressed', on);
   editor.setOption('gutters', on ? ['heat', 'CodeMirror-linenumbers'] : ['CodeMirror-linenumbers']);
   if (on) { showStage('python'); return startHeat(); }
@@ -555,12 +588,14 @@ function paintHeat(lines) {
       if (!h || !v) continue;
       const cls = 'h' + Math.max(1, Math.ceil(5 * Math.sqrt(v / top)));
       editor.addLineClass(h, 'background', cls);
+      editor.addLineClass(h, 'gutter', 'heat-lit');
       heatLines.push([h, cls]);
       const n = document.createElement('div');
       n.className = 'heat-n'; n.textContent = shortCount(v);
       editor.setGutterMarker(h, 'heat', n);
     }
   });
+  paintStrip(lines, top);
   state({ heatTop: top, heatPaints: (window.demoState?.heatPaints || 0) + 1, heatHot: Object.entries(lines).sort((a, b) => b[1] - a[1]).slice(0, 3).map(x => +x[0]) });
 }
 $('heat').onclick = () => setHeat(!heatWanted);

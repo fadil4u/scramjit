@@ -204,7 +204,7 @@ def precompile(code, counts=False):
     files, so the worker that's writing the story only has to load them. Empty shapes: nothing runs."""
     t = time.perf_counter()
     before = _cached()
-    error = None
+    error = fn = None
     try:
         fn = scram(fallback=False, counts=counts)(_load(code))
         fn(BOS, 0, 0, 0, 0, 6, 0, 0, *[np.zeros(1) for _ in range(23)])
@@ -212,7 +212,8 @@ def precompile(code, counts=False):
         error = _message(e)
     now = _cached()
     files = [p for p, m in now.items() if before.get(p) != m]
-    if error and not files:
+    # the call only exists to compile, and on these arrays it may well raise: that says nothing about the code
+    if error and not (fn is not None and fn.signatures):
         return json.dumps({'error': error})
     return json.dumps({'seconds': time.perf_counter() - t, 'files': files})
 

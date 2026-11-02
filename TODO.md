@@ -52,8 +52,8 @@ LLM demo's code; spills per line, once cimo can report them.
 5. **numpy calls in compiled functions:** `x * 2` and other calls that make arrays still run as Python.
    No cimo work is required for any step; its SIMD only adds speed. In this order:
    - **numpy functions on single numbers: built.** See `loops-and-builtins.md`. Left in Python: `np.tanh` and `np.power`, which aren't libm's, and
-     combinations whose result depends on the platform or numpy version. Bit for bit checked on arm64 and wasm only: check x86-64 when it lands,
-     where numpy may use SIMD routines for `exp` and `sin`. Not yet: `np.mod`, `np.floor_divide`, `np.degrees`, `np.radians`.
+     combinations whose result depends on the platform or numpy version. Bit for bit checked on arm64, wasm and x86-64 with AVX2 (Windows, emulated). Check AVX-512, where numpy
+     may use its own `exp` and `sin`. Not yet: `np.mod`, `np.floor_divide`, `np.degrees`, `np.radians`.
    - **Views: built.** Pointer, extents and strides, no allocation; `m[i]`, slices of any step, `m[:, j]`, `for row in m`. Not yet: returning one,
      assigning to a slice, `a, b = m[0], m[1]`, rows in `enumerate()` and `zip()`, strided arrays as arguments (`f(x[::2])` from Python runs as Python).
    - **Reductions: built,** for one number from `float64` or `int64`. `axis=` that returns an array, `keepdims=True`, `dtype=`, `out=`, `where=`, `initial=` stay Python.
@@ -102,7 +102,7 @@ LLM demo's code; spills per line, once cimo can report them.
 11. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x` raise today** (see Gotchas). Rerunning
    in Python, for functions that write nothing, or resuming in Python alongside loop lifting would remove
    the difference.
-12. **A NaN's sign differs from CPython's on Windows** (arm64, the only one tried). `inf % 1.0`, `inf // 1.0`
+12. **A NaN's sign differs from CPython's on Windows** (arm64, and x86-64 under emulation). `inf % 1.0`, `inf // 1.0`
    and `math.atan2(0.0, nan)` give `7ff8...` where CPython gives `fff8...`, and `nan * -1` gives `fff8...`
    where it gives `7ff8...`; `tests/test_m1.py` and `test_m2.py` fail there on these, 7 in all. The values are
    all NaN, and only `math.copysign` or the raw bytes can tell. Likely fix: call the CRT's `fmod` through the

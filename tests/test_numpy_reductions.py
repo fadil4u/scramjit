@@ -356,3 +356,9 @@ def test_the_note_about_speed_is_only_outside_loops():
     b = scram(cache=False, fallback=False)(in_a_loop)
     b(np.ones((2, 2)))
     assert not any(v.gotchas for v in b._cache.values())
+
+
+def test_division_messages_are_this_python_s():
+    f, g = make('a % b', 'a', 'b')
+    assert outcome(f, [1.0, 0.0])[:3] == outcome(g, [1.0, 0.0])[:3]
+    assert g.signatures

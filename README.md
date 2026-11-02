@@ -198,8 +198,8 @@ is no sandbox.
 
 Pre-release.
 
-- 93 tests pass. Developed and benchmarked on arm64 Linux and in Pyodide. x86-64, macOS and Windows
-  are cimo targets, but scramjit's tests don't run on them in CI yet.
+- About 1,600 tests pass. Developed and benchmarked on arm64 Linux and in Pyodide, and run by hand on arm64 Windows and on x86-64 Windows
+  (emulated), where a NaN's sign can differ. macOS is a cimo target that scramjit hasn't been run on, and none of these run in CI yet.
 - A function that doesn't compile whole has its loops compiled on their own, where they fit.
 - Dicts compile when passed in with keys that don't change. Next, the rest of the data structures: see `TODO.md`.
 - Next: see [`TODO.md`](TODO.md).

@@ -1216,7 +1216,10 @@ class Compiler:
             self.emit(f'if ({n} == 0) SJ_FAIL({VALUE_ERROR}, {line}, {VALUE_ERROR_MESSAGES.index(words[op])}, 0);')
         if op in ('max', 'min') and floats:
             rule = zero_rule('maximum' if op == 'max' else 'minimum')
-            return self.hold(f'sj_np_{op}_f({p}, {n}, {st}, {0 if rule == "first" else 1})', T.FLOAT), '1'
+            code = {'first': 0, 'second': 2, 'positive' if op == 'max' else 'negative': 1}.get(rule)
+            if code is None:
+                self.fail(e, f'{op}() on a numpy whose signed zeros go another way')
+            return self.hold(f'sj_np_{op}_f({p}, {n}, {st}, {code})', T.FLOAT), '1'
         return self.hold(f'sj_np_{op}_{suffix}({p}, {n}, {st})', T.INT if op != 'max' and op != 'min' or not floats else T.FLOAT), '1'
 
     def numpy_call(self, e, name):

@@ -2,7 +2,6 @@
 
 import json
 import os
-import pty
 import select
 import subprocess
 import sys
@@ -12,6 +11,8 @@ import time
 
 import numpy as np
 import pytest
+
+pty = pytest.importorskip('pty', reason='no pseudo-terminals here', exc_type=ImportError)
 
 from scramjit import _dispatch
 

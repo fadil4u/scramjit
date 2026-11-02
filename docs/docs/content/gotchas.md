@@ -122,9 +122,9 @@ numpy runs `max`, `min`, `argmax`, `argmin`, `any` and `all` with SIMD, which co
 
 `x.max()` with NaNs in the array gives NaN, as numpy does. If those NaNs have different signs, which one you get can differ, since numpy's depends on how its loops are laid out.
 
-### numpy's exact results were checked on arm64 and in WebAssembly
+### numpy's exact results depend on the CPU it uses
 
-The numpy functions that compile matched numpy bit for bit there on 160,024 inputs. On x86-64, numpy can use its own SIMD routines for functions such as `np.exp` and `np.sin`, which may differ in the last bits from the C library's that compiled code calls. Results agree to rounding, but that hasn't been checked bit for bit.
+The numpy functions that compile matched numpy bit for bit on arm64, in WebAssembly, and on x86-64 with AVX2. numpy can pick its own routines by CPU, notably with AVX-512, for functions such as `np.exp` and `np.sin`. Those may differ in the last bits from the C library's that compiled code calls. That case hasn't been checked. Results agree to rounding.
 
 ### Debuggers, tracers and coverage don't see inside
 

@@ -180,6 +180,9 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   `max` and `min` follow the scalar function's rule on both platforms; which of two NaNs of different signs comes back depends on numpy's loop layout, and isn't matched.
   Only forms giving one number compile; `axis` on n-D and `keepdims=True` return arrays. On 1,000,000 elements `sum` is within 15% of numpy (not SIMD there
   either), `max` 9x slower, `argmax` 4x, `all` 2.4x; preflight notes these only outside loops, since in a loop `m[i].sum()` wins up to 150x over a numpy call.
+- **x86-64 (first run 2026-11-02, Windows, emulated, AVX2, Python 3.12).** The whole suite runs. `platform.machine()` says ARM64 there, and cimo handles it. All numpy functions on single
+  numbers match; AVX-512 unchecked. `max` and `min` keep the last of two zeros, a third rule next to "by sign" (arm64) and "the first" (wasm). Python 3.12 words `1.0 % 0.0` differently from 3.13,
+  so zero-division messages now come from the running Python. NaN signs differ as on Windows arm64.
 - **numpy calls (decided 2026-11-02; see `TODO.md`):** array-creating calls stay in Python. Array-creating
   operations stay in Python, and MKL and BLAS stay out: not pure Python, and their results vary by library, CPU and thread count. A
   plain loop doesn't reproduce `np.sum` (pairwise), and is 6 to 12x slower than numpy on 1,000,000 elements until cimo has SIMD.

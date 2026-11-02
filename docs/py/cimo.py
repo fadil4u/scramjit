@@ -6749,7 +6749,20 @@ def _qins(i, e):
     op = i.op
     if op == Ocopy and i.cls == D.Kq:
         if rtype(i.to) == RSlot or rtype(i.arg[0]) == RSlot:
-            die("128-bit copy through memory")
+            if req(i.to, i.arg[0]):
+                return True
+            tmpreg = 31
+            if rtype(i.arg[0]) == RSlot:
+                if rtype(i.to) == RSlot:
+                    f.write("\\tldr\\tq31, %s\\n" % _qaddr(i.arg[0], e))
+                else:
+                    tmpreg = rval(i.to) - V0
+                    f.write("\\tldr\\tq%d, %s\\n" % (tmpreg, _qaddr(i.arg[0], e)))
+                    return True
+            else:
+                tmpreg = rval(i.arg[0]) - V0
+            f.write("\\tstr\\tq%d, %s\\n" % (tmpreg, _qaddr(i.to, e)))
+            return True
         if not req(i.to, i.arg[0]):
             f.write("\\tmov\\t%s, %s\\n" % (_qv(i.to), _qv(i.arg[0])))
         return True
@@ -8529,7 +8542,15 @@ def callable(r, fn):
             if c.i == 0:
                 return 1
     return 0
+_qdest = [R]
 def sel(i, fn):
+    if i.op in (D.Oqfma0, D.Oqsel0):
+        d = _qdest[0]
+        emit(i.op, D.Kq, R, d, R)
+        emit(Ocopy, D.Kq, d, i.arg[0], R)
+        return
+    if i.op in (D.Oqfma1s, D.Oqfma1d, D.Oqsel1):
+        _qdest[0] = i.to
     if D.isqop(i.op):
         emiti(i)
         iarg = D.insb[D.curi].arg
@@ -16415,6 +16436,8 @@ def doblk(b, cur):
                             skip = True
                         else:
                             i.to = TMP(rf)
+                            if D.Oqfma1s <= i.op <= D.Oqfma1d or i.op == D.Oqsel1:
+                                radd(cur, r, rf)
         if skip:
             continue
         nr = 0
@@ -21354,13 +21377,16 @@ def _contract():
         return False
     v = _fma.get()
     return FMA if v is None else v
+def _vectorizes():
+    from . import middle as _middle
+    return _middle.vectorizing
 def _wraps():
     v = _wrapv.get()
     return WRAPV if v is None else v
 def _key(pp):
     return hashlib.sha256(
         _VERSION + _link.compiler_key().encode() + _link._key(TARGET).encode() + TARGET.encode()
-        + (b'm' if MIDDLE else b'') + (b'f' if _contract() else b'') + (b'v' if _wraps() else b'') + b'i%d' % INLINE
+        + (b'm' if MIDDLE else b'') + (b'f' if _contract() else b'') + (b'v' if _wraps() else b'') + (b'V' if _vectorizes() else b'') + b'i%d' % INLINE
         + pp.encode('utf-8', 'surrogateescape')).hexdigest()[:24]
 def _build(src, filename='<string>', include_dirs=(), host_headers=False, defines=()):
     _check_machine()
@@ -31087,10 +31113,11 @@ class Image:
 import contextlib
 enabled = False
 params = {}
+vectorizing = __import__('os').environ.get('CIMO_VECTORIZE', '1') != '0'
 unroll = 4
 debug = False
 stats = None
-_NAMES = ('enabled', 'params', 'unroll', 'debug', 'stats')
+_NAMES = ('enabled', 'params', 'unroll', 'debug', 'stats', 'vectorizing')
 def configure(**kw):
     g = globals()
     old = {k: g[k] for k in _NAMES}
@@ -31528,6 +31555,8 @@ from ..backend.util import iscmp, newtmp
 from . import ir
 from .ir import Bail, Emitter
 from .affine import Analysis, Lin, AV, norm
+from . import vectorize
+from ..backend import ext as _ext
 import cimo.middle as M
 MAXFULL = 16
 MAXFULLINS = 320
@@ -31676,6 +31705,8 @@ class Fast:
         self.chains = []
         self.srload = {}
         self.chk = set()
+        self.vf = 0
+        self.vchecks = ()
     def leaf(self, key):
         r, kind = key
         if key in self.memo:
@@ -32093,20 +32124,24 @@ def _replace_outside(fn, lp, H, newexit, E, env, newblocks):
             i.arg[0] = _m(env, i.arg[0])
             i.arg[1] = _m(env, i.arg[1])
         b.jmp.arg = _m(env, b.jmp.arg)
-def transform(fn, lp, rts, done, mode='opt'):
+def _lanes(fn, lp, sh, A, ctl, rts):
+    if not (_ext.vector and D.T.name.startswith('arm64') and M.vectorizing):
+        return 0
+    probe = Fast(fn, lp, sh, A, rts)
+    probe.ctl = ctl
+    probe.plan(1)
+    vf = vectorize.plan(probe, rts)
+    return (vf, probe.vchecks) if vf else 0
+def vectorizable(fn, lp, rts):
+    if not (_ext.vector and D.T.name.startswith('arm64') and M.vectorizing):
+        return False
     sh = Shape(fn, lp)
     A = Analysis(fn, lp, sh.order)
     A.fn_con0 = ir.getcon(0, fn)
     ctl = Control(A, sh)
-    nbody = sum(ir.ins(b).__len__() for b in sh.order)
-    T = ctl.const_trips(MAXFULL)
-    if mode == 'full':
-        if T is not None and T * nbody <= MAXFULLINS:
-            full_unroll(fn, lp, sh, A, ctl, T)
-            return True
-        return False
-    if T is not None and T <= 1:
-        return False
+    A, ctl = _hoisted(fn, lp, sh, A, ctl, rts)[:2]
+    return bool(_lanes(fn, lp, sh, A, ctl, rts))
+def _hoisted(fn, lp, sh, A, ctl, rts):
     loads = []
     stores = []
     for b in sh.order:
@@ -32130,16 +32165,39 @@ def transform(fn, lp, rts, done, mode='opt'):
         A = Analysis(fn, lp, sh.order, frozenset(hoist))
         A.fn_con0 = ir.getcon(0, fn)
         ctl = Control(A, sh)
+    return A, ctl, hoist, noalias_load
+def transform(fn, lp, rts, done, mode='opt'):
+    sh = Shape(fn, lp)
+    A = Analysis(fn, lp, sh.order)
+    A.fn_con0 = ir.getcon(0, fn)
+    ctl = Control(A, sh)
+    nbody = sum(ir.ins(b).__len__() for b in sh.order)
+    T = ctl.const_trips(MAXFULL)
+    if mode == 'full':
+        if T is not None and T * nbody <= MAXFULLINS:
+            full_unroll(fn, lp, sh, A, ctl, T)
+            return True
+        return False
+    if T is not None and T <= 1:
+        return False
+    A, ctl, hoist, noalias_load = _hoisted(fn, lp, sh, A, ctl, rts)
+    lanes = _lanes(fn, lp, sh, A, ctl, rts)
+    vf, vchecks = lanes or (0, ())
     fast = Fast(fn, lp, sh, A, rts)
     fast.ctl = ctl
-    fast.find_chains(noalias_load)
+    fast.vf = vf
+    fast.vchecks = vchecks
+    if not vf:
+        fast.find_chains(noalias_load)
     ncl = 0
-    U = max(1, M.unroll)
+    U = vf or max(1, M.unroll)
     fast.plan(U)
     ncl = len(fast.cloned)
-    while U > 1 and ncl * U > MAXBODY:
+    while U > 1 and not vf and ncl * U > MAXBODY:
         U //= 2
     fast.U = U
+    if vf:
+        M.count('vectorized')
     if U == 1 and not fast.groups and not hoist and not fast.chains:
         return False
     emit_versioned(fn, lp, sh, A, ctl, fast, U, done)
@@ -32233,6 +32291,8 @@ def emit_versioned(fn, lp, sh, A, ctl, fast, U, done):
         for v in (vlo, vhi):
             ext = e2.op(D.Oextsw if c.kind == 's' else D.Oextuw, Kl, v)
             oks.append(e2.cmp(D.Oceql, ext, v))
+    if fast.vf:
+        oks += vectorize.overlapchecks(fast, e2, T, 16 // fast.vf)
     ok = None
     for o in oks:
         co = ir.conval(fn, o)
@@ -32289,7 +32349,8 @@ def emit_versioned(fn, lp, sh, A, ctl, fast, U, done):
     if U > 1:
         stM = {sv: newtmp('m', _svcls(fn, sv, fast, [(None, state0[sv])]), fn) for sv in svs}
         em = Emitter(fn, MB)
-        out, _ = fast.copies(em, stM, U)
+        fast.em = em
+        out = vectorize.body(fast, em, stM) if fast.vf else fast.copies(em, stM, U)[0]
         out = fast.advance(em, out, U)
         c = em.raw(D.Ocnel if kc == Kl else D.Ocnew, Kw, out[('iv', ctlg.idx)], end4)
         em.flush()
@@ -32745,7 +32806,7 @@ from ..backend.util import newtmp
 from . import ir
 from .ir import Bail, Emitter
 from .affine import Analysis
-from .inner import Shape, Control
+from .inner import Shape, Control, vectorizable
 import cimo.middle as M
 MAXINNER = 40
 def _clone(em, i, env):
@@ -32771,6 +32832,8 @@ def transform(fn, O, rts, done):
     shi = Shape(fn, I)
     if shi.pre is not Bpre or Bpre.npred != 1 or Bpre.phi:
         raise Bail('inner preheader')
+    if vectorizable(fn, I, rts):
+        raise Bail('the inner loop vectorizes')
     Ej = shi.E
     if Ej not in O.blocks or Ej.npred != 1 or Ej.jmp.type != D.Jjmp or Ej.s1 is not Ho \\
             or Ej.phi or O.latches[0] is not Ej:
@@ -33415,14 +33478,208 @@ def transform(fn, lp):
     M.count('unswitch')
     return True
 ''',
+'middle/vectorize.py': '''\
+from ..backend import defs as D
+from ..backend.defs import R, Kw, Kl, Ks, Kd, Kq, Ins, optab, rval
+from . import ir
+_LANE = {Ks: 's', Kd: 'd', Kw: 'w', Kl: 'l'}
+_SIZE = {Ks: 4, Kd: 8, Kw: 4, Kl: 8}
+_FPONLY = frozenset(('s', 'd'))
+MAXCHECKS = 8
+def _opname(i):
+    k = i.cls
+    x = _LANE.get(k)
+    if x is None:
+        return None
+    op = i.op
+    if op in (D.Oadd, D.Osub, D.Oneg):
+        return {D.Oadd: 'qadd', D.Osub: 'qsub', D.Oneg: 'qneg'}[op] + x
+    if op == D.Omul:
+        return 'qmul' + x if x != 'l' else None
+    if op == D.Odiv:
+        return 'qdiv' + x if x in _FPONLY else None
+    if x in _FPONLY and op in (D.Ofsqrt, D.Ofabs, D.Ofmin, D.Ofmax):
+        return {D.Ofsqrt: 'qsqrt', D.Ofabs: 'qabs', D.Ofmin: 'qmin', D.Ofmax: 'qmax'}[op] + x
+    if x not in _FPONLY and op in (D.Oand, D.Oor, D.Oxor):
+        return {D.Oand: 'qand', D.Oor: 'qor', D.Oxor: 'qxor'}[op]
+    if x not in _FPONLY and op in (D.Oshl, D.Oshr, D.Osar):
+        return {D.Oshl: 'qshl', D.Oshr: 'qshr', D.Osar: 'qsar'}[op] + x
+    return None
+def _loadsize(i):
+    if i.op == D.Oload and i.cls in _SIZE:
+        return _SIZE[i.cls]
+    if i.op in (D.Oloadsw, D.Oloaduw) and i.cls == Kw:
+        return 4
+    return None
+def _storeclass(i):
+    return {D.Ostorew: Kw, D.Ostorel: Kl, D.Ostores: Ks, D.Ostored: Kd}.get(i.op)
+def _distance(store, load, vf, storeat, loadat):
+    d = store.L.c - load.L.c
+    size = abs(store.S.c)
+    if d == 0 or abs(d) >= vf * size:
+        return True
+    return d < 0 and loadat < storeat
+def plan(fast, rts):
+    A = fast.A
+    sh = fast.sh
+    for p in ir.phis(sh.H):
+        if rval(p.to) not in A.biv:
+            return 0
+    widths = set()
+    mem = []
+    made = set()
+    third = None
+    for n, i in enumerate(fast.cloned):
+        if i.op in (D.Onop, D.Odbgloc):
+            continue
+        if i.op == D.Ofma0:
+            if i.cls not in (Ks, Kd):
+                return 0
+            third = i
+            if not _operand(fast, i.arg[0], made):
+                return 0
+            continue
+        if i.op == D.Ofma1:
+            if third is None or i.cls not in (Ks, Kd):
+                return 0
+            third = None
+            widths.add(_SIZE[i.cls])
+            if not (_operand(fast, i.arg[0], made) and _operand(fast, i.arg[1], made)):
+                return 0
+            made.add(rval(i.to))
+            continue
+        size = _loadsize(i)
+        k = _storeclass(i)
+        if size is not None or k is not None:
+            if k is not None:
+                size = _SIZE[k]
+                if not _operand(fast, i.arg[0], made):
+                    return 0
+            f = A.form(i.arg[1 if k is not None else 0], 64)
+            if f is None or not f.S.isconst() or f.S.c != size or A.avlevel(f) == 'X':
+                return 0
+            widths.add(size)
+            mem.append((i, f, n, k is not None))
+            if k is None:
+                made.add(rval(i.to))
+            continue
+        name = _opname(i)
+        if name is None:
+            return 0
+        widths.add(_SIZE[i.cls])
+        args = [i.arg[0]] if i.arg[1] == R or i.op in (D.Oshl, D.Oshr, D.Osar) else i.arg[:2]
+        if i.op in (D.Oshl, D.Oshr, D.Osar):
+            c = ir.conval(fast.fn, i.arg[1])
+            if c is None or not 0 < c < 8 * _SIZE[i.cls]:
+                return 0
+        for a in args:
+            if not _operand(fast, a, made):
+                return 0
+        made.add(rval(i.to))
+    if third is not None or len(widths) != 1 or not mem:
+        return 0
+    vf = 16 // widths.pop()
+    far = set()
+    for i, f, n, isstore in mem:
+        if not isstore:
+            continue
+        for j, g, m, other in mem:
+            if j is i or (other and m < n):
+                continue
+            if not rts.may_alias(i.arg[1], j.arg[1] if other else j.arg[0]):
+                continue
+            if f.L.noconst().ident() != g.L.noconst().ident():
+                far.add(tuple(sorted((f.L.noconst().ident(), g.L.noconst().ident()), key=str)))
+            elif f.S.c != g.S.c:
+                return 0
+            elif other:
+                d = f.L.c - g.L.c
+                if d != 0 and abs(d) < vf * f.S.c:
+                    return 0
+            elif not _distance(f, g, vf, n, m):
+                return 0
+    if len(far) > MAXCHECKS:
+        return 0
+    fast.vchecks = _checks(mem, far)
+    return vf
+def _checks(mem, far):
+    ranges = {}
+    for i, f, n, isstore in mem:
+        key = f.L.noconst().ident()
+        L, lo, hi = ranges.get(key, (f.L.noconst(), f.L.c, f.L.c + f.S.c))
+        ranges[key] = (L, min(lo, f.L.c), max(hi, f.L.c + f.S.c))
+    return [(ranges[a], ranges[b]) for a, b in sorted(far, key=str)]
+def overlapchecks(fast, em, T, step):
+    out = []
+    span = em.mulc(Kl, T, step)
+    for (la, alo, ahi), (lb, blo, bhi) in fast.vchecks:
+        a, b = fast.lin(la, 64), fast.lin(lb, 64)
+        a0, a1 = em.addc(Kl, a, alo), em.add(Kl, em.addc(Kl, a, ahi - step), span)
+        b0, b1 = em.addc(Kl, b, blo), em.add(Kl, em.addc(Kl, b, bhi - step), span)
+        out.append(em.raw(D.Oor, Kw, em.cmp(D.Ocugel, b0, a1), em.cmp(D.Ocugel, a0, b1)))
+    return out
+def _operand(fast, a, made):
+    if not ir.istmp(a):
+        return True
+    if not fast.A.inloop(a):
+        return True
+    t = rval(a)
+    if t in made:
+        return True
+    f = fast.A.forms.get(t)
+    return f is not None and f.inv()
+def body(fast, em, state):
+    fn = fast.fn
+    env = {}
+    third = None
+    lane = None
+    def vec(a, k):
+        if ir.istmp(a) and rval(a) in env:
+            return env[rval(a)]
+        key = ('dup', a, k)
+        if key not in fast.memo:
+            em0, fast.em = fast.em, fast.fp
+            s = fast.opmap(a, 0, {}, state, None) if ir.istmp(a) else a
+            fast.em = em0
+            fast.memo[key] = fast.fp.raw(getattr(D, 'Oqdup' + _LANE[k]), Kq, s)
+        return fast.memo[key]
+    for i in fast.cloned:
+        if i.op in (D.Onop, D.Odbgloc):
+            continue
+        if i.op == D.Ofma0:
+            third = vec(i.arg[0], i.cls)
+            continue
+        if i.op == D.Ofma1:
+            a, b = vec(i.arg[0], i.cls), vec(i.arg[1], i.cls)
+            em.ins(Ins(D.Oqfma0, Kq, R, third, R))
+            env[rval(i.to)] = em.raw(getattr(D, 'Oqfma1' + _LANE[i.cls]), Kq, a, b)
+            continue
+        if _loadsize(i) is not None:
+            env[rval(i.to)] = em.raw(D.Oqload, Kq, fast.opmap(i.arg[0], 0, env, state, None))
+            continue
+        k = _storeclass(i)
+        if k is not None:
+            v = vec(i.arg[0], k)
+            em.ins(Ins(D.Oqstore, Kq, R, v, fast.opmap(i.arg[1], 0, env, state, None)))
+            continue
+        name = _opname(i)
+        op = getattr(D, 'O' + name)
+        if i.op in (D.Oshl, D.Oshr, D.Osar):
+            env[rval(i.to)] = em.raw(op, Kq, vec(i.arg[0], i.cls), i.arg[1])
+        elif i.arg[1] == R:
+            env[rval(i.to)] = em.raw(op, Kq, vec(i.arg[0], i.cls))
+        else:
+            env[rval(i.to)] = em.raw(op, Kq, vec(i.arg[0], i.cls), vec(i.arg[1], i.cls))
+    return dict(state)
+''',
 'onefile-keys.json': '''\
 {
-"compiler": "e77d21d790e5c88b9785",
-"runtime-amd64_sysv": "43662a3d8a1c0c480dc2",
-"runtime-amd64_windows": "223bf3a404e7d7bb26ea",
-"runtime-arm64": "83c3f7d46b81b5e52bf8",
-"runtime-arm64_apple": "396543835e316ffb449f",
-"runtime-arm64_win": "ae32b3776c6427e98ee0"
+"compiler": "ff3316e69bc4f697a203",
+"runtime-amd64_sysv": "857971c6b0db1c97384d",
+"runtime-amd64_windows": "050e191577fb2c84e10d",
+"runtime-arm64": "5f7268a9562f37bde531",
+"runtime-arm64_apple": "6be9a6b193949b566797",
+"runtime-arm64_win": "726b60b3231b63359508"
 }
 ''',
 'onefile.py': '''\

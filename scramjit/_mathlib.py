@@ -255,13 +255,13 @@ static double sj_np_prod_f(const double *a, int64_t n, int64_t st) {
     for (int64_t i = 1; i < n; i++) r *= a[i * st];
     return r;
 }
-/* A NaN wins. Of 0.0 and -0.0: rule 0 keeps the first seen, 1 prefers the sign this numpy's maximum or minimum does */
+/* A NaN wins. Of 0.0 and -0.0: rule 0 keeps the first seen, 1 prefers the sign max or min would, 2 takes the last seen */
 static double sj_np_max_f(const double *a, int64_t n, int64_t st, int rule) {
     double r = a[0];
     for (int64_t i = 0; i < n && r == r; i++) {
         double e = a[i * st];
         if (e != e || e > r) r = e;
-        else if (rule && e == 0.0 && r == 0.0 && signbit(r)) r = e;
+        else if (e == 0.0 && r == 0.0 && (rule == 2 || (rule == 1 && signbit(r)))) r = e;
     }
     return r;
 }
@@ -270,7 +270,7 @@ static double sj_np_min_f(const double *a, int64_t n, int64_t st, int rule) {
     for (int64_t i = 0; i < n && r == r; i++) {
         double e = a[i * st];
         if (e != e || e < r) r = e;
-        else if (rule && e == 0.0 && r == 0.0 && signbit(e)) r = e;
+        else if (e == 0.0 && r == 0.0 && (rule == 2 || (rule == 1 && signbit(e)))) r = e;
     }
     return r;
 }

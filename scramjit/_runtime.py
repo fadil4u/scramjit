@@ -25,7 +25,7 @@ ZERO_DIVISION_MESSAGES = [
     'integer modulo by zero',                 # int % int
     'float floor division by zero',           # // with a float
     'float modulo by zero',                   # % with a float
-    None,                                     # 0.0 ** negative: this Python's own wording, below
+    '0.0 cannot be raised to a negative power',  # 0.0 ** negative
 ]
 VALUE_ERROR_MESSAGES = [
     'cannot convert float NaN to integer',
@@ -70,10 +70,12 @@ LIBM = ['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'asinh', 'acosh', 'atanh', 
         'atan2', 'pow', 'ldexp', 'nextafter', 'hypot', 'fmod']
 
 
-try:
-    0.0 ** -1.0
-except ZeroDivisionError as _e:
-    ZERO_DIVISION_MESSAGES[6] = str(_e)
+# Python's wording changes between versions (`1.0 % 0.0` says "float modulo" before 3.13): use this one's
+for _i, _f in enumerate((lambda: 1 / 0, lambda: 1.0 / 0.0, lambda: 1 // 0, lambda: 1 % 0, lambda: 1.0 // 0.0, lambda: 1.0 % 0.0, lambda: 0.0 ** -1.0)):
+    try:
+        _f()
+    except ZeroDivisionError as _e:
+        ZERO_DIVISION_MESSAGES[_i] = str(_e)
 
 
 def exception(status, io):

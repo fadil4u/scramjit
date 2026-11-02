@@ -1,0 +1,92 @@
+// Drives docs/demos/llm in headless Chromium: first tokens, every one-click edit, bad edits, a hang, the compiler switch.
+//   python3 -m http.server 8766 --directory docs &   node tools/drive_llm.mjs http://127.0.0.1:8766/demos/llm/ OUTDIR
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+const url = process.argv[2], out = process.argv[3];
+const CHROME = process.env.HOME + '/.cache/ms-playwright/chromium_headless_shell-1234/chrome-linux/headless_shell';
+const chrome = spawn(CHROME, ['--remote-debugging-port=9336', '--no-sandbox', '--window-size=1440,1000', '--use-gl=swiftshader', 'about:blank'], { stdio: 'ignore' });
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let target;
+for (let i = 0; i < 50 && !target; i++) { await sleep(200); try { target = (await (await fetch('http://127.0.0.1:9336/json')).json()).find(t => t.type === 'page'); } catch {} }
+const ws = new WebSocket(target.webSocketDebuggerUrl); await new Promise(r => ws.onopen = r);
+let n = 0; const wait = new Map(), logs = [];
+ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id) { wait.get(m.id)?.(m.result); wait.delete(m.id); } if (m.method === 'Runtime.exceptionThrown') logs.push(m.params.exceptionDetails.text + ' ' + (m.params.exceptionDetails.exception?.description || '').slice(0, 200)); if (m.method === 'Network.loadingFailed' && !m.params.canceled) logs.push('load failed: ' + m.params.errorText); };
+const send = (method, params = {}) => new Promise(r => { const id = ++n; wait.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
+const ev = async x => (await send('Runtime.evaluate', { expression: x, returnByValue: true })).result?.value;
+await send('Page.enable'); await send('Runtime.enable'); await send('Network.enable');
+const shot = async f => fs.writeFileSync(`${out}/${f}.png`, Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
+const state = async () => JSON.parse((await ev('JSON.stringify(window.demoState||{})')) || '{}');
+const until = async (f, s = 120) => { for (let i = 0; i < s * 4; i++) { await sleep(250); const o = await state(); if (f(o)) return o; } return { timedOut: await ev("document.getElementById('status').textContent"), ...(await state()) }; };
+const text = id => ev(`document.getElementById('${id}').textContent`);
+const J = JSON.stringify;
+const t0 = Date.now();
+await send('Page.navigate', { url });
+let o = await until(s => s.tokens > 40, 240);
+console.log(`first 40 tokens after ${((Date.now() - t0) / 1000).toFixed(1)} s; python+compiler ${o.python?.toFixed(1)} s, with weights ${o.boot?.toFixed(1)} s; first compile ${o.compile?.toFixed(1)} s`, o.timedOut || '');
+await sleep(4000);
+console.log('rate', await text('rate'), 'tok/s; tail:', (await state()).tail?.slice(-120).replace(/\n/g, '/'));
+await shot('writing');
+o = await until(s => s.compilerUp, 90);
+console.log('compiler worker up after', o.compilerUp?.toFixed(1), 's', o.timedOut || '');
+async function compileDone(before) { return until(s => (s.compiles || 0) > before || s.failed, 120); }
+const orig = await ev('demoApi.editor.getValue()');
+const keys = await ev('demoApi.EDITS.map(e=>e.key)');
+for (const k of keys) {
+  const before = (await state()).compiles;
+  await ev(`document.querySelector('.chip[data-key=${k}]').click()`);
+  const s = await compileDone(before);
+  await sleep(2500);
+  const now = await state();
+  console.log(`${k}: compile ${s.compile?.toFixed(1)} s, story paused ${s.pause?.toFixed(2)} s, ${s.writtenDuring} tokens written meanwhile, ${await text('rate')} tok/s`, s.error ? 'ERROR ' + s.error.slice(0, 120) : '', '|', now.tail?.slice(-110).replace(/\n/g, '/'));
+  if (k === 'robot') await shot('robot');
+  const b2 = (await state()).compiles;
+  await ev(`document.querySelector('.chip[data-key=${k}]').click()`);
+  const u = await compileDone(b2);
+  console.log(`  undo: ${u.compile?.toFixed(2)} s`);
+}
+await shot('edits');
+async function trial(label, code, f) {
+  const before = (await state()).compiles;
+  await ev(`demoApi.editor.setValue(${J(code)}); demoApi.run()`);
+  const s = await compileDone(before);
+  console.log(`${label}: compile ${s.compile?.toFixed(1)} s`, s.error ? 'rejected: ' + s.error.slice(0, 170) : 'ok');
+  return s;
+}
+const words = async () => (await state()).tokens;
+await trial('bad: syntax', orig.replace('def forward', 'def forward(('));
+await trial('bad: out of bounds', orig.replace('logits[i] /= 0.8', 'logits[i + 1] /= 0.8'));
+await trial('bad: nan', orig.replace('logits[i] /= 0.8', 'logits[i] = logits[i] * 0.0 / 0.0'));
+await trial('bad: unknown name', orig.replace('logits[i] /= 0.8', 'logits[i] /= nope'));
+await trial('bad: no forward', 'x = 1\n');
+const a = await words(); await sleep(2500);
+console.log('story kept going through the bad edits:', (await words()) - a, 'tokens in 2.5 s; last good is original:', (await ev('demoApi.lastGood')) === orig);
+await trial('late failure (passes the first call, fails at position 200)', orig.replace('    head = dim // n_heads\n', '    head = dim // n_heads\n    if pos == 200:\n        x[dim + 5] = 1.0\n'));
+o = await until(s => s.runtimeError || s.failed, 60);
+console.log('  ', o.runtimeError ? 'went back: ' + o.runtimeError.slice(0, 120) : 'no runtime error seen ' + (o.timedOut || ''));
+await trial('restore', orig);
+const hungBefore = (await state()).hung || 0;
+const t1 = Date.now();
+await ev(`demoApi.editor.setValue(${J(orig.replace('    head = dim // n_heads\n', '    head = dim // n_heads\n    while pos > -1:\n        pos += 1\n        pos -= 1\n'))}); demoApi.run()`);
+await sleep(1000);
+const during = await words(); await sleep(3000);
+console.log('during a hanging edit, tokens in 3 s:', (await words()) - during);
+await until(s => (s.hung || 0) > hungBefore || s.compiles > (hungBefore + 1e9) , 130);
+const t2 = Date.now(); const tk = await words();
+await until(s => s.tokens > tk + 20, 120);
+console.log(`hang: state ${J({ hung: (await state()).hung })} after ${((t2 - t1) / 1000).toFixed(0)} s, writing ${((Date.now() - t2) / 1000).toFixed(0)} s later; err: ${(await text('err')).slice(0, 90)}`);
+await until(s => s.compilerUp, 60);
+await ev('demoApi.editor.setValue(demoApi.lastGood)');
+await sleep(1000);
+await ev("(()=>{const p=document.getElementById('plain');p.click();})()");
+await sleep(30000);
+console.log('compiler off for 30 s:', await text('rate'), 'tok/s');
+await shot('plain');
+await ev("(()=>{const p=document.getElementById('plain');p.click();})()");
+await sleep(5000);
+console.log('compiler back on:', await text('rate'), 'tok/s');
+await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+await sleep(1500);
+await shot('phone');
+console.log('horizontal overflow on a phone:', await ev('document.documentElement.scrollWidth > window.innerWidth'));
+console.log('page errors:', logs.length ? logs.slice(0, 5) : 'none');
+ws.close(); chrome.kill(); process.exit(0);

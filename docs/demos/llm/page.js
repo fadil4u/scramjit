@@ -512,7 +512,7 @@ function startHeat() {
   const code = lastGood;
   if (!heatWanted || runningPlain || !code || heatAsked === code) return;
   heatAsked = code;
-  note('compiling a copy that counts…', true);
+  note('counting…', true);
   clearTimeout(heatDog);
   heatDog = setTimeout(() => heatFailed(`The copy that counts lines didn't compile in ${COMPILE_MS / 1000} s.`), COMPILE_MS);
   if (compiler && compilerUp) compiler.postMessage({ type: 'precompileHeat', code });

@@ -99,7 +99,7 @@ h1{font-size:clamp(25px,3vw,33px);font-weight:800;letter-spacing:-.03em;line-hei
 .lab-more{max-width:0;padding-left:0;padding-right:0;border-width:0;opacity:0;overflow:hidden;pointer-events:none}
 .lab.sj .lab-more{max-width:170px;padding-left:13px;padding-right:13px;border-width:1px;opacity:1;pointer-events:auto}
 .lab.sj .lab-more:nth-of-type(3){transition-delay:.08s}.lab.sj .lab-more:nth-of-type(4){transition-delay:.16s}
-.lab-note{margin-left:auto;align-self:center;padding:0 4px 6px 10px;font:500 11px var(--mono);color:#6f7891;white-space:nowrap}
+.lab-note{margin-left:auto;align-self:center;padding:0 4px 6px 10px;font:500 11px var(--mono);color:#6f7891;white-space:nowrap;position:sticky;right:-8px;background:var(--code2)}.lab-note:empty{padding:0}
 .lab-note.busy::before{content:"";display:inline-block;width:8px;height:8px;margin-right:7px;border-radius:50%;background:#f97316;animation:labblink .8s ease-in-out infinite alternate}
 @keyframes labblink{to{opacity:.25}}
 .lab-progress{flex:none;height:2px;background:transparent;overflow:hidden;opacity:0;transition:opacity .25s}

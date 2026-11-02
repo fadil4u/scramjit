@@ -15,11 +15,11 @@ import warnings
 import weakref
 
 from . import _types as T
-from ._compiler import Compiler
+from ._compiler import Compiler, WEB_SUFFIX
 from ._errors import CompileError, FallbackWarning, Unsupported
 from . import _interrupt
 from . import _lift
-from ._runtime import LIBM, PRELUDE, exception
+from ._runtime import LIBM, PRELUDE, RERUN, RETURNS_INT, exception
 
 _cimo = None
 _cimo_lock = threading.Lock()
@@ -132,9 +132,10 @@ PYTHON = _Python()
 
 
 class Compiled:
-    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop')
+    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun')
 
-    def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None, stop=False):
+    def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None, stop=False, rerun=False):
+        self.rerun = rerun
         self.checks, self.hoisted, self.gotchas, self.stop = checks or {}, hoisted, gotchas or {}, stop
         self.locals = locals_ or {}           # variable -> inferred type name
         self.kernel = kernel
@@ -211,6 +212,10 @@ def _make_plan(f, entry, args):
         result = 'tuple([box(io, at, flag, et) for at, flag, et in boxes])'
     else:
         result = 'box(io, 0, 16, ret)'
+    rerun = ''
+    if entry.rerun:
+        env.update(f=f, RERUN=RERUN)
+        rerun = f"        if status == RERUN:\n            return f._py({', '.join(names)})\n"
     src = f"""def plan({', '.join(names)}):
 {chr(10).join(src_guards)}
 {take}    if pool:
@@ -224,7 +229,7 @@ def _make_plan(f, entry, args):
     status = kernel({''.join(c + ', ' for c in cargs)}ioaddr)
     if status:
         pool.append(entry)
-        failed(status, io)
+{rerun}        failed(status, io)
     value = {result}
     pool.append(entry)
     return value
@@ -429,7 +434,8 @@ class Function:
             import numpy
             self._np = numpy
         return Compiled(kernel, c.ret, key, source, _libm_table() if c.uses_libm else None,
-                        {k: t.name for k, t in c.env.items()}, c.checks, c.hoisted_lines, c.gotchas, c.uses_stop)
+                        {WEB_SUFFIX.sub("'", k): t.name for k, t in c.env.items()}, c.checks, c.hoisted_lines, c.gotchas,
+                        c.uses_stop, c.uses_rerun)
 
     def _run(self, entry, args):
         cargs = []
@@ -449,6 +455,8 @@ class Function:
             cargs.append(_interrupt.address())
         io = bytearray(40 + (16 * len(entry.ret.elem) if entry.ret.kind == 'tuple' else 0))
         status = entry.kernel(*cargs, io)
+        if status == RERUN and entry.rerun:
+            return self._py(*args)
         if status:
             slots = [int.from_bytes(io[i:i + 8], 'little', signed=True) for i in range(0, 40, 8)]
             _raise_at(exception(status, slots), self._filename, slots[1], self.__name__)
@@ -460,6 +468,8 @@ class Function:
         return self._box(io, 0, 16, r)
 
     def _box(self, io, at, flag_at, r):
+        if r.np == 'dyn' and r.kind == 'float' and io[flag_at] == RETURNS_INT:
+            return int(struct.unpack_from('<d', io, at)[0])
         np = r.np if r.np != 'dyn' else io[flag_at] != 0
         if np and self._np is None:
             import numpy

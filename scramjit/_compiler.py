@@ -18,13 +18,15 @@ where Python raises) and the type a value is returned as.
 import ast
 import copy
 import math
+import re
 
 from . import _types as T
+from . import _webs
 from ._errors import Unsupported
 import sys
 
 from ._mathlib import snippets
-from ._runtime import (INDEX_ERROR, INTERRUPTED, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
+from ._runtime import (INDEX_ERROR, INTERRUPTED, RERUN, RETURNS_INT, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
                        OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION)
 
 BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'round', 'sum', 'any', 'all')
@@ -222,8 +224,27 @@ class Lazy(ast.NodeTransformer):
         return ast.copy_location(ast.For(c.target, c.iter, head + s.body, s.orelse), s)
 
 
+WEB_SUFFIX = re.compile(r'__v\d+\b')
+
+
+def exact_int_literal(node):
+    """Is this statement x = <an int literal a double holds exactly>?"""
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
+        return False
+    v = node.value
+    if isinstance(v, ast.UnaryOp) and isinstance(v.op, ast.USub):
+        v = v.operand
+    return isinstance(v, ast.Constant) and type(v.value) is int and abs(v.value) <= 1 << 53
+
+
+
 class Compiler:
     def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, parity=True):
+        self.again = (arg_types, globals_, filename, line_offset, boundscheck, parity)
+        self.split_done = False    # names are split into webs, so a conflict left is within one variable
+        self.tagged = set()        # variables holding an exact int or a float: a double and v___int (see may_tag)
+        self.not_literal = set()   # variables assigned an int that isn't a literal
+        self.uses_rerun = False    # the kernel can ask for the call to run as Python, before doing anything
         local = {p.arg for p in fdef.args.posonlyargs + fdef.args.args}
         local |= {n.id for n in ast.walk(fdef) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
         self.f = Lazy(local, set(globals_)).visit(copy.deepcopy(fdef))
@@ -267,7 +288,7 @@ class Compiler:
         return node.lineno + self.offset
 
     def fail(self, node, reason):
-        raise Unsupported(node, reason)
+        raise Unsupported(node, WEB_SUFFIX.sub('', reason))
 
     def is_builtin(self, name, which):
         return name == which and name not in self.env and name not in self.globals
@@ -317,12 +338,57 @@ class Compiler:
         old = self.env.get(name)
         if old is not None and old.kind == 'array':
             self.fail(node, f'{name} is reassigned')
+        if t is T.INT and not exact_int_literal(node):
+            self.not_literal.add(name)
         if old is not None and old is not t:
             j = T.join(old, t)
+            if j is None and self.may_tag(name, old, t):
+                self.tagged.add(name)
+                j = T.scalar('float', 'dyn')
             if j is None:
                 self.fail(node, f'{name} is {old.name} and later {t.name}; a variable must keep one type')
             t = j
         self.env[name] = t
+
+    def may_tag(self, name, old, t):
+        """s = 0, then s += a[i] on floats: one variable with two types, and after no iterations Python has the
+        int. It's held as a double with a flag saying it's still an int. A double holds such an int exactly when
+        it's a small enough literal, or a parameter checked on entry, and an int behaves just like that float only
+        in some places: check_tagged makes sure that's all it meets."""
+        if not self.split_done or name in self.not_literal:
+            return False
+        kinds = {old.kind, t.kind}
+        return kinds == {'int', 'float'} and (old if old.kind == 'int' else t) is T.INT
+
+    def check_tagged(self):
+        if not self.tagged:
+            return
+        parents = {c: p for p in ast.walk(self.f) for c in ast.iter_child_nodes(p)}
+        for n in ast.walk(self.f):
+            if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) and n.target.id in self.tagged:
+                if self.typeof(n.value).kind != 'float':
+                    self.mixed(n, n.target.id)
+            if isinstance(n, ast.Name) and n.id in self.tagged and isinstance(n.ctx, ast.Load) \
+                    and not self.tag_is_safe(n, parents):
+                self.mixed(n, n.id)
+
+    def tag_is_safe(self, n, parents):
+        p = parents.get(n)
+        if isinstance(p, ast.BinOp):
+            other = p.right if p.left is n else p.left
+            return not (isinstance(other, ast.Name) and other.id in self.tagged) and self.typeof(other).kind == 'float'
+        if isinstance(p, ast.Compare) and len(p.ops) == 1:
+            other = p.comparators[0] if p.left is n else p.left
+            return not (isinstance(other, ast.Name) and other.id in self.tagged) and self.typeof(other).kind == 'float'
+        if isinstance(p, ast.AugAssign):        # two that may still be ints would give an int
+            return p.value is n and self.typeof(p.target).kind == 'float' \
+                and not (isinstance(p.target, ast.Name) and p.target.id in self.tagged)
+        if isinstance(p, ast.Return):
+            return True
+        return isinstance(p, ast.Tuple) and isinstance(parents.get(p), ast.Return)
+
+    def mixed(self, node, name):
+        self.fail(node, f'{name} is int and later float, and this use would differ between them; a variable must keep one type')
 
     def infer_block(self, stmts):
         for i, s in enumerate(stmts):
@@ -901,8 +967,25 @@ class Compiler:
         name = self.filename.replace('\\', '\\\\').replace('"', '\\"')
         self.lines.append(f'#line {self.line(node)} "{name}"')
 
+    def came_as(self, param):
+        """The type a parameter has on entry, whatever else it's assigned later."""
+        return self.again[0][self.params.index(param)]
+
+    def infer_with_webs(self):
+        """A type conflict may be two variables with one name. Most functions never need to find out."""
+        try:
+            self.infer()
+        except Unsupported as u:
+            if 'must keep one type' not in u.reason:
+                raise
+            tree = _webs.split(self.f) or self.f
+            self.__init__(tree, *self.again)
+            self.split_done = True
+            self.infer()
+        self.check_tagged()
+
     def generate(self):
-        self.infer()
+        self.infer_with_webs()
         da_block(self, self.f.body, set(self.params))
         self.find_aliases()
         self.facts.update(self.mod_assigned())
@@ -913,10 +996,19 @@ class Compiler:
                 params += [f'{t.ctype}v_{p}', f'int64_t v_{p}__n'] + [f'int64_t v_{p}__n{k}' for k in range(1, t.ndim)]
             elif t.kind == 'tuple':
                 params += [f'{et.ctype} v_{p}__{i}' for i, et in enumerate(t.elem)]
+            elif p in self.tagged and self.came_as(p) is T.INT:
+                params.append(f'int64_t v_{p}__in')
             else:
                 params.append(f'{t.ctype} v_{p}')
         self.mark(self.f)
         head = len(self.lines)
+        for p in self.params:
+            if p in self.tagged and self.came_as(p) is T.INT:
+                self.uses_rerun = True       # nothing has happened yet, so Python can still take this call
+                self.emit(f'if ((uint64_t)v_{p}__in + 9007199254740992ULL > 18014398509481984ULL) return {RERUN};')
+                self.emit(f'double v_{p} = (double)v_{p}__in; int v_{p}__int = 1;')
+            elif p in self.tagged:
+                self.emit(f'int v_{p}__int = 0;')
         for name, t in self.env.items():
             if t.kind == 'list':
                 self.emit(f'{t.elem.ctype} *v_{name} = NULL; int64_t v_{name}__n = 0;')
@@ -932,8 +1024,10 @@ class Compiler:
                 continue
             if name not in self.params:
                 self.emit(f'{t.ctype} v_{name} = 0;')
+                if name in self.tagged:
+                    self.emit(f'int v_{name}__int = 0;')
             if t.np == 'dyn':
-                self.emit(f'int v_{name}__np = 0;')
+                self.emit(f'int v_{name}__np = {1 if name in self.params and self.came_as(name).np is True else 0};')
         self.emit('int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;')
         decl_at = len(self.lines)
         for s in self.f.body:
@@ -1017,6 +1111,8 @@ class Compiler:
         self.emit(f'v_{name} = {self.coerce(v[0], vt, t)};')
         if t.np == 'dyn':
             self.emit(f'v_{name}__np = {v[1]};')
+        if name in self.tagged:
+            self.emit(f'v_{name}__int = {1 if vt.kind == "int" else 0};')
 
     def stmt(self, s):
         if isinstance(s, ast.Expr):           # a docstring
@@ -1095,7 +1191,7 @@ class Compiler:
                         self.emit(f'{{ double {t} = {val}; memcpy(&sj_io[{4 + 2 * i}], &{t}, 8); }}')
                     else:
                         self.emit(f'sj_io[{4 + 2 * i}] = (int64_t)({val});')
-                    self.emit(f'sj_io[{5 + 2 * i}] = {f};')
+                    self.emit(f'sj_io[{5 + 2 * i}] = {self.ret_flag(s.value.elts[i] if isinstance(s.value, ast.Tuple) else None, f)};')
                 self.emit('goto sj_done;')
             elif s.value is not None:
                 v = self.expr(s.value)
@@ -1106,7 +1202,7 @@ class Compiler:
                 else:
                     self.emit(f'sj_io[0] = (int64_t)({val});')
                 if self.ret.np == 'dyn':
-                    self.emit(f'sj_io[2] = {v[1]};')
+                    self.emit(f'sj_io[2] = {self.ret_flag(s.value, v[1])};')
             self.emit('goto sj_done;')
         elif isinstance(s, ast.Break):
             loop = self.loops[-1]
@@ -1117,6 +1213,12 @@ class Compiler:
                 self.emit(f'goto {loop[0]};')
         elif isinstance(s, ast.Continue):
             self.emit('continue;')
+
+    def ret_flag(self, e, flag):
+        """A returned value's flag: 0 a Python float or int, 1 numpy, RETURNS_INT an int held as a double."""
+        if isinstance(e, ast.Name) and e.id in self.tagged:
+            return f'(v_{e.id}__int ? {RETURNS_INT} : {flag})'
+        return flag
 
     def for_range(self, s):
         args = [self.coerce(self.expr(a)[0], self.typeof(a), T.INT) for a in s.iter.args]

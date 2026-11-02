@@ -515,6 +515,17 @@ The command line (`scramjit/cli/`) is built like cimo's: its parser, terminal an
 rather than imported, because they aren't cimo's public API. `--run` reports on stderr so the program
 keeps stdout.
 
+**Variables that change type (2026-11-02).** Two steps, only after inference finds a conflict, so other functions keep
+their C. `_webs.py` splits a name into webs by reaching definitions (`x = 1`, used, `x = 0.5`, used; `for v` over two
+arrays). A web holding int and float, as in `s = 0; for v in x: s += v`, can't simply widen: after no iterations
+Python has the int. So it's a double with a flag saying it's still an int, for ints a double holds exactly, in the only places
+an int and that float behave the same: arithmetic and comparison with a float, and returning it. Every other read
+fails the compile. An int parameter is checked on entry, where a kernel that has done nothing can return `RERUN`, so the
+call runs as Python (needed for lifted loops, where `s` arrives as a parameter). No cost measured: `s = 0` and `s = 0.0`
+both 1.05 ns per element. A random program test found what hand-written ones hadn't: a parameter's C type must
+follow its signature, not its joined type (a float parameter later assigned `3`), and a numpy parameter whose variable
+can also hold Python floats started with its flag off, an older bug.
+
 **M4: loop lifting.** Compile the loops that fit inside functions that don't. Done when a function
 mixing Python-only setup (dicts, strings) with a numeric loop is partly compiled, matches CPython,
 and preflight (static, `--run` and `f.preflight()`) shows the state per line.

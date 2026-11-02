@@ -5,6 +5,7 @@ import json
 import os
 
 from .. import _dispatch, _preflight as P
+from .._compiler import WEB_SUFFIX
 from .term import Terminal, visible_len, wrap
 
 KEEP_HINT = ('a bounds check runs on every iteration; index with the loop variable over `range(len(a))`, '
@@ -197,7 +198,7 @@ def one_static(t, fdef, a, source, path, boundscheck):
     lines_table(t, text, start, fdef, 0, f'{fdef.name}({", ".join(x.name for x in a.signature)})',
                 _state_line(t, 'partly' if a.state == 'partly' else c is not None, f'· {os.path.basename(path)} · assumed signature'),
                 (c.checks, c.hoisted_lines, boundscheck) if c else None, a.problems,
-                {k: v.name for k, v in c.env.items()} if c else {}, c.gotchas if c else None, a.loops)
+                {WEB_SUFFIX.sub("'", k): v.name for k, v in c.env.items()} if c else {}, c.gotchas if c else None, a.loops)
 
 
 def function_report(f, signature, stream):
@@ -224,7 +225,7 @@ def function_report(f, signature, stream):
         lines_table(t, lines, f._first, fdef, offset, f'{f.__name__}({", ".join(x.name for x in a.signature)})',
                     _state_line(t, 'partly' if a.state == 'partly' else c is not None, f'· {where} · assumed signature, not called yet'),
                     (c.checks, c.hoisted_lines, f._boundscheck) if c else None, a.problems,
-                    {k: v.name for k, v in c.env.items()} if c else {}, c.gotchas if c else None, a.loops)
+                    {WEB_SUFFIX.sub("'", k): v.name for k, v in c.env.items()} if c else {}, c.gotchas if c else None, a.loops)
         return
     for i, key in enumerate(keys):
         if i:

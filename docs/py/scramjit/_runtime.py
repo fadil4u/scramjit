@@ -12,6 +12,8 @@ import os
 INDEX_ERROR, ZERO_DIVISION, VALUE_ERROR, OVERFLOW_ERROR, LIST_INDEX_ERROR, MEMORY_ERROR, INT_BOUNDS_ERROR = \
     1, 2, 3, 4, 5, 6, 7
 INTERRUPTED = 8      # the kernel saw Ctrl-C (see _interrupt.py)
+RERUN = 9            # the kernel did nothing and this call should run as Python
+RETURNS_INT = 2      # a returned float's flag, when the value is really a Python int
 NARROW_INT_DTYPES = ['int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
 
 LIST_INDEX_MESSAGES = ['list index out of range', 'list assignment index out of range']

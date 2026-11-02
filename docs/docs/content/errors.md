@@ -38,7 +38,7 @@ Some loops always stay in Python, because a compiled loop can't keep the functio
 - loops containing `return`
 - every loop of a function that uses closures, `locals()`, `eval`, `exec`, `del`, `global`, or is a generator
 
-A variable that changes type stops its loop compiling, as it does a whole function: `s = 0` then `s += a[i]` on a float array. Use `s = 0.0`.
+An int that turns into a float, such as `s = 0` then `s += a[i]` on a float array, compiles when it's a small literal or an argument and is only combined with floats or returned. After no iterations `s` is still the int `0`, as in Python. Any other use of such a variable keeps its loop or function in Python.
 
 ## The whole function falls back
 

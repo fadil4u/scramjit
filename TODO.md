@@ -31,8 +31,7 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 3. **Store-to-load forwarding, what's left:** `y[i - 1]` comes from a temporary when `y[i] = ...` is the
    loop's only array store and runs every iteration. Not yet: `y[i - 2]`, 2-D rows (`m[r, j - 1]`), and loops
    with other stores, which need a runtime test that the arrays don't overlap.
-4. **Loop lifting, what's left:** a loop stays in Python if a variable changes type at its start (`s = 0`, then
-   `s += a[i]` on floats: SSA below would fix this very common case), if a variable read afterwards may be unbound
+4. **Loop lifting, what's left:** a loop stays in Python if a variable read afterwards may be unbound
    (`for i ...` then reading `i`, with nothing assigned first), inside `try` or `with`, or containing `return`.
    "Partly compiled" is per function, not per signature. Tracebacks show one extra frame for a loop that raises.
 5. **Python data structures, nested, when statically sized and statically typed, after the loop work above:** so
@@ -62,7 +61,10 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
    broken down. Break-even is 30 to 50 loop iterations per call. Rejected: caching an array's address (saves
    200 ns, but `resize(refcheck=False)` would corrupt memory silently); `__call__` by argument count (100 to
    150 ns, not worth its keyword edge cases).
-7. **SSA for variables that change type** (`x = 1` then `x = 0.5`): today they fall back.
+7. **Variables that change type, what's left:** a name used for separate things compiles (each web is its own
+   variable), and so does an int that becomes a float, where the int is a literal up to 2^53 or a parameter, and it's only
+   returned or combined with a float. Not yet: other uses of such a variable (`-s`, `s + 1`, `t = s`, `a[s]`, `if s:`), and
+   `s = n` from an int variable, each of which keeps the function in Python.
 8. **Rest of M2:** `for ... else`. Then the M2 acceptance check.
 9. **Rest of M3:** run the M0 kernels in Pyodide as a test, not only through the site; preflight's
    per-loop report once cimo exposes one (cimo's `TODO.md`), and a `disk` label in the compile column,

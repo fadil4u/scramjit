@@ -165,6 +165,9 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   only through a call plan that checks those keys; the general path takes 9). A write goes back at both of the kernel's exits, so
   stores before an exception survive. The kernel's written variables are kept out of web splitting, since every exit reads them.
   Exact `dict` only, since a subclass can run code on a read, and one dict passed twice runs as Python.
+- **numpy calls (decided 2026-11-02, not built; see `TODO.md`):** scalar functions, then reductions, then views. Array-creating
+  operations stay in Python, and MKL and BLAS stay out: not pure Python, and their results vary by library, CPU and thread count. A
+  plain loop doesn't reproduce `np.sum` (pairwise), and is 6 to 12x slower than numpy on 1,000,000 elements until cimo has SIMD.
 - **Later:** growable lists, dicts, sets and strings as typed C containers: each needs allocation and a runtime.
 
 ## Semantics

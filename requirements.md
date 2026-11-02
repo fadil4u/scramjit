@@ -12,7 +12,9 @@ This is the living spec: what to build, why, what has been measured, and in what
   only). No native extensions. Supports what cimo supports: CPython 3.9+ and Pyodide.
 - **Compiled code is a cache** (decided 2026-11-02). It's built on the machine that runs it, from the Python source, and can always be
   built again. It is never distributed, in a package, a wheel or a single HTML file: an app carries its source and the compiler, whose
-  340 KB compressed and first-launch compile are worth keeping "no binaries" (measured: about 3% of a 12.2 MB single-file app, 0.7 s of a 3.5 s launch).
+  340 KB compressed and first-launch compile are worth keeping "no binaries" (measured: about 3% of a 12.2 MB single-file app, 0.7 s of a 3.5 s launch). The LLM demo keeps the last 8 compiled sources in the browser's
+  cache, about 360 KB, dropped when Python, cimo or scramjit changes: an edit made on an earlier visit took 0.33 s rather than 5.7. Turning scramjit on
+  gains less, since the page must first wait for plain Python's current token, several seconds.
 - **Use cimo's public API only.** Anything scramjit needs from cimo becomes a general cimo
   feature, not a private hook.
 - **Never change results.** A compiled function returns what CPython returns for the same

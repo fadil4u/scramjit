@@ -167,6 +167,29 @@ def wasm_text(code):
     return lab.wasm_text()
 
 
+def cache_stamp():
+    """What compiled files depend on, apart from the source they came from: other than this, they're dropped."""
+    h = hashlib.sha256(sys.version.encode())
+    for name in sorted(os.listdir('/home/pyodide/scramjit')) + ['../cimo.py']:
+        path = os.path.join('/home/pyodide/scramjit', name)
+        if os.path.isfile(path):
+            with open(path, 'rb') as f:
+                h.update(f.read())
+    return h.hexdigest()
+
+
+_seen = {}
+
+
+def cache_changes():
+    """The cache files written since the last time this was asked."""
+    global _seen
+    now = _cached()
+    changed = [p for p, m in now.items() if _seen.get(p) != m]
+    _seen = now
+    return json.dumps(changed)
+
+
 def _cached():
     found = {}
     for root, _, names in os.walk(os.environ['CIMO_CACHE_DIR']):

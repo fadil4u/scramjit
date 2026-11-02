@@ -136,7 +136,8 @@ function onMessage({ data: m }) {
   if (m.type === 'failed') { calm(); showError(m.error); progress(false); note(''); say(booted ? 'Stopped: see the error beside the editor.' : 'Could not start: ' + m.error); if (!firstToken) waitStops(); asking = compiling = false; state({ failed: m.error }); }
   if (m.type === 'ready') {
     calm(); booted = true; robot = m.robot;
-    state({ python: m.python, boot: m.seconds });
+    state({ python: m.python, boot: m.seconds, keptCodes: (m.kept || []).length });
+    for (const code of m.kept || []) known.add(code);    // compiled on an earlier visit
     buildChips();
     if (compiled) { note('compiling…', true); progress(true); }
     swapIn(restarting || editor.getValue(), '', false, undefined, compiled);

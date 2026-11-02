@@ -5,7 +5,6 @@ Live at scramjit.dev/demos/llm once pushed. `tools/drive_llm.mjs` drives it in h
 ## Next
 
 - Host the weights ourselves, or add a mirror: the Hugging Face download took 20 to 156 s across test runs.
-- Keep the first compile for return visits: store the compiled files in the browser's cache, as the weights are.
 - A bigger model: stories110M works at 9 tok/s today (440 MB download).
 - Share an edit as a link.
 - Real phones, Firefox, Safari.

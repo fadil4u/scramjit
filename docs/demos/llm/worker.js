@@ -12,6 +12,54 @@ const say = msg => postMessage({ type: 'status', msg });
 const breathe = () => new Promise(r => setTimeout(r));
 const jsonOf = s => JSON.parse(s);
 
+// Compiled code stays between visits, as a cache of its source: cimo uses a file only for the source it was built
+// from. Files live in the browser's cache, with a list of which source made which. Nothing here may stop the demo.
+const COMPILED = 'scramjit-llm-compiled-1', LIST = 'https://compiled.invalid/list', KEEP = 8;
+const fileUrl = path => 'https://compiled.invalid' + path;
+let keptList = null;                                   // { stamp, codes: [{ code, paths }] }, oldest first
+
+async function restoreCompiled() {
+  try {
+    const stamp = demo.cache_stamp();
+    keptList = { stamp, codes: [] };
+    const store = await caches.open(COMPILED);
+    const r = await store.match(LIST);
+    const list = r && await r.json();
+    if (list && list.stamp !== stamp) await caches.delete(COMPILED);   // another compiler or Python: start again
+    else if (list) {
+      for (const k of list.codes) {
+        let whole = true;
+        for (const path of k.paths) {
+          const f = await store.match(fileUrl(path));
+          if (!f) { whole = false; continue; }
+          py.FS.mkdirTree(path.slice(0, path.lastIndexOf('/')));
+          py.FS.writeFile(path, new Uint8Array(await f.arrayBuffer()));
+        }
+        if (whole) keptList.codes.push(k);
+      }
+    }
+  } catch { keptList = null; }
+  demo.cache_changes();
+  return keptList ? keptList.codes.map(k => k.code) : [];
+}
+
+async function keepCompiled(code) {
+  const paths = jsonOf(demo.cache_changes());
+  if (!keptList) return;
+  try {
+    const store = await caches.open(COMPILED);
+    for (const path of paths) await store.put(fileUrl(path), new Response(py.FS.readFile(path)));
+    const old = keptList.codes.find(k => k.code === code);
+    if (old && !paths.length) { keptList.codes = keptList.codes.filter(k => k !== old).concat(old); }   // used again: newest
+    else keptList.codes = keptList.codes.filter(k => k !== old).concat({ code, paths: [...new Set([...(old?.paths || []), ...paths])] });
+    const gone = keptList.codes.slice(0, -KEEP);
+    keptList.codes = keptList.codes.slice(-KEEP);
+    const used = new Set(keptList.codes.flatMap(k => k.paths));
+    for (const k of gone) for (const path of k.paths) if (!used.has(path)) await store.delete(fileUrl(path));
+    await store.put(LIST, new Response(JSON.stringify(keptList)));      // last: it says the files are all there
+  } catch { /* out of space, or private browsing: the next visit compiles */ }
+}
+
 async function opened() { try { return await caches.open(CACHE); } catch { return null; } }
 
 // A file from the browser's cache, or downloaded with progress and kept for the next visit.
@@ -59,12 +107,13 @@ async function boot() {
   const t = performance.now();
   await python();
   const ready = (performance.now() - t) / 1000;
+  const kept = await restoreCompiled();
   py.FS.writeFile('/home/pyodide/tokenizer.bin', await download(TOKENIZER, 'the tokenizer'));
   py.FS.writeFile('/home/pyodide/weights.bin', await download(WEIGHTS, 'the model'));
   say('Loading the weights');
   await breathe();
   const info = jsonOf(demo.setup('/home/pyodide/weights.bin', '/home/pyodide/tokenizer.bin'));
-  postMessage({ type: 'ready', python: ready, seconds: (performance.now() - t) / 1000, robot: demo.token_of('robot'), ...info });
+  postMessage({ type: 'ready', python: ready, seconds: (performance.now() - t) / 1000, robot: demo.token_of('robot'), kept, ...info });
 }
 
 onmessage = async ({ data: m }) => {
@@ -78,7 +127,12 @@ onmessage = async ({ data: m }) => {
       postMessage({ type: 'precompiled', id: m.id, seconds: r.seconds, error: r.error, files }, files.map(f => f.data.buffer));
     }
     if (m.type === 'adopt') for (const f of m.files) { py.FS.mkdirTree(f.path.slice(0, f.path.lastIndexOf('/'))); py.FS.writeFile(f.path, f.data); }
-    if (m.type === 'compile') { await breathe(); postMessage({ type: 'compiled', id: m.id, ...jsonOf(demo.compile_forward(m.code, m.compiled)) }); }
+    if (m.type === 'compile') {
+      await breathe();
+      const r = jsonOf(demo.compile_forward(m.code, m.compiled));
+      postMessage({ type: 'compiled', id: m.id, ...r });
+      if (m.compiled && !r.error) await keepCompiled(m.code);
+    }
     if (m.type === 'start') demo.start(m.prompt);
     if (m.type === 'wat') {
       let t;

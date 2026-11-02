@@ -24,7 +24,7 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
   expressions (cimo `TODO.md`: "Slower than gcc -O3 on scramjit's kernels").
 
 - **The LLM demo moves compiled code by listing what changes in `CIMO_CACHE_DIR`** (`docs/demos/llm/demo_py.py`: `precompile`), which depends on
-  cimo's cache layout. When cimo has public cache export and import (its `TODO.md`), use that, including to keep compiles between visits.
+  cimo's cache layout. The same listing keeps compiles between visits. When cimo has public cache export and import (its `TODO.md`), use that for both.
   The demo's tabs also read the private `fn._cache`, for the C and the inferred types.
 
 - **The demo's WebAssembly tab calls `cimo.wasm.build`** (`docs/lab/lab.py`: `wasm_text`) for the

@@ -10,7 +10,7 @@ Python at native speed.
 
 <img src="https://raw.githubusercontent.com/farizrahman4u/scramjit/main/docs/readme/race.gif" alt="The same Mandelbrot function rendered side by side on one clock, as plain Python and through scramjit." width="486">
 
-<sub>The same function on one clock, native on arm64. scramjit is capped at one fractal frame per GIF frame; uncapped, it does 21x the iterations. <a href="tools/readme_gif.py">Script.</a></sub>
+<sub>The same function on one clock, native on arm64. scramjit is capped at one fractal frame per GIF frame; uncapped, it does 21x the iterations. <a href="https://github.com/farizrahman4u/scramjit/blob/main/tools/readme_gif.py">Script.</a></sub>
 
 </div>
 
@@ -61,12 +61,12 @@ compile server, and targets WebAssembly. The code is editable and recompiles as 
 
 ## Examples
 
-[`examples/`](examples/) has runnable scripts: n-body gravity, edit distance, union-find, Karplus-Strong
+[`examples/`](https://github.com/farizrahman4u/scramjit/tree/main/examples) has runnable scripts: n-body gravity, edit distance, union-find, Karplus-Strong
 audio, a Mandelbrot renderer, Monte Carlo option pricing, threads, and what falling back looks like.
 
 ## Benchmarks
 
-Arm64 Linux, from [`bench/kernels.py`](bench/kernels.py) and [`bench/m1.py`](bench/m1.py). The
+Arm64 Linux, from [`bench/kernels.py`](https://github.com/farizrahman4u/scramjit/blob/main/bench/kernels.py) and [`bench/m1.py`](https://github.com/farizrahman4u/scramjit/blob/main/bench/m1.py). The
 hand-written C is compiled by cimo too.
 
 | Kernel | CPython | scramjit | Hand-written C | Speedup |
@@ -80,7 +80,7 @@ hand-written C is compiled by cimo too.
 
 Viewshed pays for exact `math` semantics; with `parity=False` it takes 7.3 ms. On Gray-Scott and
 flood fill, scramjit's C compiled by `gcc -O3` matches hand-written C compiled the same way, so the
-remaining gap there is cimo's backend ([`bench/gcc.py`](bench/gcc.py)). Four threads ran four calls
+remaining gap there is cimo's backend ([`bench/gcc.py`](https://github.com/farizrahman4u/scramjit/blob/main/bench/gcc.py)). Four threads ran four calls
 3.5x faster than running them one after another.
 
 ## How it works
@@ -199,7 +199,7 @@ Pre-release.
   (emulated), where a NaN's sign can differ. macOS is a cimo target that scramjit hasn't been run on, and none of these run in CI yet.
 - A function that doesn't compile whole has its loops compiled on their own, where they fit.
 - Dicts compile when passed in with keys that don't change. Next, the rest of the data structures: see `TODO.md`.
-- Next: see [`TODO.md`](TODO.md).
+- Next: see [`TODO.md`](https://github.com/farizrahman4u/scramjit/blob/main/TODO.md).
 
 ## Development
 

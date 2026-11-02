@@ -1,0 +1,61 @@
+// Drives the page in headless Chromium: a world, the thinking levels, an edit, training, hostile code.
+//   python3 -m http.server 8766 --directory docs &   node dev/drive.mjs http://127.0.0.1:8766/demos/rl/ OUTDIR
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+const url = process.argv[2], out = process.argv[3];
+const CHROME = process.env.HOME + '/.cache/ms-playwright/chromium_headless_shell-1234/chrome-linux/headless_shell';
+const chrome = spawn(CHROME, ['--remote-debugging-port=9335', '--no-sandbox', '--window-size=1440,1000', '--use-gl=swiftshader', 'about:blank'], { stdio: 'ignore' });
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let target;
+for (let i = 0; i < 50 && !target; i++) { await sleep(200); try { target = (await (await fetch('http://127.0.0.1:9335/json')).json()).find(t => t.type === 'page'); } catch {} }
+const ws = new WebSocket(target.webSocketDebuggerUrl); await new Promise(r => ws.onopen = r);
+let n = 0; const wait = new Map(), logs = [];
+ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id) { wait.get(m.id)?.(m.result); wait.delete(m.id); } if (m.method === 'Runtime.exceptionThrown') logs.push(m.params.exceptionDetails.text + ' ' + (m.params.exceptionDetails.exception?.description || '').slice(0, 200)); if (m.method === 'Network.loadingFailed' && !m.params.canceled) logs.push('load failed: ' + m.params.errorText); };
+const send = (method, params = {}) => new Promise(r => { const id = ++n; wait.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
+const ev = async x => (await send('Runtime.evaluate', { expression: x, returnByValue: true })).result?.value;
+await send('Page.enable'); await send('Runtime.enable'); await send('Network.enable');
+const shot = async f => fs.writeFileSync(`${out}/${f}.png`, Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
+const state = async () => JSON.parse((await ev('JSON.stringify(window.demoState||{})')) || '{}');
+const until = async (f, s = 90) => { for (let i = 0; i < s * 4; i++) { await sleep(250); const o = await state(); if (f(o)) return o; } return { timeout: await ev("document.getElementById('status').textContent"), ...(await state()) }; };
+const text = id => ev(`document.getElementById('${id}').textContent`);
+const t0 = Date.now();
+await send('Page.navigate', { url });
+let o = await until(s => s.shown > 20);
+console.log('first moves on screen after', ((Date.now() - t0) / 1000).toFixed(1), 's; python+compiler ready in', (await ev('window.demoReady'))?.toFixed(1), 's; planner compile', o.compile?.toFixed(1), 's', o.timeout || '');
+await shot('play');
+if (!process.env.QUICK) await sleep(25000);
+const bars = async () => { const t = (await state()).tallies || {}; return [1, 100, 1000, 10000, 100000, 1000000].map(b => t[b] ? `${b}: ${t[b].wins}/${t[b].episodes}` : `${b}: -`).join('  '); };
+console.log(' wins by thinking level:', await bars(), '|', await text('rate'), 'steps/s');
+await shot('bars');
+await ev(`(()=>{const l=document.getElementById('level');l.value=3;l.oninput();})()`);
+const orig = await ev('demoApi.editor.getValue()');
+const J = JSON.stringify;
+async function trial(label, code, wantFail) {
+  const t = Date.now();
+  await ev(`demoApi.editor.setValue(${J(code)}); demoApi.compile()`);
+  const s = await until(x => (x.shown > 5) || x.failed, 100);
+  console.log(`${label}: ${((Date.now() - t) / 1000).toFixed(1)} s`, s.failed ? `stopped at ${s.failed}: ${(s.error || '').slice(0, 110)}` : `compile ${s.compile?.toFixed(1)} s, playing`);
+}
+await trial('edit: bigger goal reward', orig.replace('reward = 1.0', 'reward = 5.0'));
+await trial('back to the original (no recompile)', orig);
+await sleep(1500);
+await ev("document.getElementById('trainbtn').click()");
+o = await until(s => s.trainDone || s.failed, 90);
+console.log('train:', await text('trainv'), o.failed || '');
+await sleep(6000);
+await shot('trained');
+console.log(' after training, level', await text('levelv'), '| won', await text('winrate'), 'of', await text('episodes'));
+const HEAD = 'def step(s, grid, obs, rnd, w, h, action):\n';
+const inject = line => { if (!orig.includes(HEAD)) throw new Error('no step head'); return orig.replace(HEAD, HEAD + line); };
+await trial('hostile: import', 'import os\n' + orig);
+await trial('hostile: attribute', inject('    q0 = s.__class__\n'));
+await trial('hostile: open', inject('    q0 = open(1)\n'));
+await trial('hostile: infinite loop', inject('    while s[0] > -1000000:\n        pass\n'));
+for (let i = 0; i < 120 && (await ev("document.getElementById('run').disabled")); i++) await sleep(500);
+await trial('after the hang, works again', orig);
+await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+await sleep(1500);
+await shot('phone');
+console.log('horizontal overflow on a phone:', await ev('document.documentElement.scrollWidth > window.innerWidth'));
+console.log('page errors:', logs.length ? logs.slice(0, 5) : 'none');
+ws.close(); chrome.kill(); process.exit(0);

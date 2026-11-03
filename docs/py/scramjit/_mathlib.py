@@ -430,6 +430,17 @@ static int sj_np_all_i(const int64_t *a, int64_t n, int64_t st) {
     return 1;
 }
 """),
+    'cmp_uf': ((), """
+/* an int in [0, 2**64) against a double, exactly, as sj_cmp_if: -1, 0, 1, or 2 for a NaN */
+static inline int sj_cmp_uf(uint64_t u, double f) {
+    if (f != f) return 2;
+    if (f < 0.0) return 1;
+    if (f >= 18446744073709551616.0) return -1;
+    uint64_t t = (uint64_t)f;                 /* f's whole part, exact */
+    if (u != t) return u < t ? -1 : 1;
+    return (double)t < f ? -1 : 0;
+}
+"""),
     'ipow': ((), """
 /* int ** a nonnegative int, wrapping at 64 bits */
 static int64_t sj_ipow(int64_t a, int64_t b) {

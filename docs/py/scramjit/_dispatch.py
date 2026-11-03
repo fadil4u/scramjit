@@ -65,15 +65,15 @@ def _arg_type(x):
     t = type(x)
     if t is Function or T.is_c_module(x) or T.is_c_function(x):
         return T.function_of(x)
-    if t is int:
-        return T.INT if -(1 << 63) <= x < (1 << 63) else None
+    if t is int:                             # past int64 but below 2**64: held unsigned, passed as its bits
+        return T.INT if -(1 << 63) <= x < (1 << 63) else T.U64 if 0 <= x < 1 << 64 else None
     if t is float:
         return T.FLOAT
     if t is bool:
         return T.BOOL
     if t is tuple:
         elems = [_arg_type(v) for v in x]
-        if not elems or any(e is None or not e.is_number for e in elems):
+        if not elems or any(e is None or not e.is_number or e is T.U64 for e in elems):
             return None
         return T.tuple_of(elems)
     np = sys.modules.get('numpy')
@@ -81,7 +81,7 @@ def _arg_type(x):
         if t is np.ndarray:
             if x.ndim >= 1 and x.dtype.isnative:
                 name = x.dtype.name
-                elem = T.NP_FLOAT64 if name == 'float64' else T.NP_INT64 if name == 'int64' else T.NARROW.get(name)
+                elem = T.NP_FLOAT64 if name == 'float64' else T.NP_INT64 if name == 'int64' else T.NP_UINT64 if name == 'uint64' else T.NARROW.get(name)
                 if elem is not None:
                     if x.flags.c_contiguous:
                         return T.array(elem, x.flags.writeable, x.ndim)
@@ -179,6 +179,8 @@ def _push(cargs, x, t):
             _push(cargs, x[key], ft)
     elif t.np:
         cargs.append(x.item())
+    elif t is T.U64:
+        cargs.append(x - (1 << 64))
     else:
         cargs.append(x)
 
@@ -310,6 +312,8 @@ def _make_plan(f, entry, args):
                 cargs.append(f'f{i}_{k}.item()' if ft.np else f'f{i}_{k}')
         elif t.np:
             cargs.append(f'{n}.item()')
+        elif t is T.U64:
+            cargs.append(f'({n} - 18446744073709551616)')
         else:
             cargs.append(n)
     if entry.libm is not None:
@@ -336,6 +340,8 @@ def _make_plan(f, entry, args):
                 if ft is T.INT:
                     src_guards.append(f'    if not -9223372036854775808 <= f{i}_{k} <= 9223372036854775807:\n        '
                                       f'return slow({again})')
+        elif t is T.U64:
+            src_guards.append(f'    if not 9223372036854775808 <= {n} <= 18446744073709551615:\n        return slow({again})')
         elif t.kind == 'int' and not t.np:
             src_guards.append(f'    if not -9223372036854775808 <= {n} <= 9223372036854775807:\n        return slow({again})')
     addresses = ''.join(f'        p{i} = addressof(from_buffer({names[i]}))\n' for i in arrays if args[i].flags.writeable)
@@ -746,7 +752,7 @@ class Function:
             if k not in d:
                 return None              # Python raises KeyError, at the right moment
             t = _arg_type(d[k])
-            if t is None:
+            if t is None or t is T.U64:
                 return None
             fields.append((k, t))
         return T.dict_of(fields)
@@ -830,7 +836,7 @@ class Function:
         if r.kind == 'float':
             v = struct.unpack_from('<d', io, at)[0]
         else:
-            v = int.from_bytes(io[at:at + 8], 'little', signed=True)
+            v = int.from_bytes(io[at:at + 8], 'little', signed=r is not T.U64 and r is not T.NP_UINT64)
         if np:
             name = T.as_narrow(r).name[3:] if T.is_narrow_dyn(r) or r.np is True else {'int': 'int64', 'float': 'float64', 'bool': 'bool_'}[r.kind]
             return getattr(self._np, 'bool_' if name == 'bool' else name)(v)

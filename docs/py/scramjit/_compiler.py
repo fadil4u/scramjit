@@ -75,6 +75,31 @@ def c_int(x):
     return f'{x}LL'
 
 
+def const_int(node):
+    """The Python value of an int expression made only of literals ((1 << 64) - 1, 2 ** 63), or None. Kept small."""
+    if isinstance(node, ast.Constant):
+        return node.value if type(node.value) is int else None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd, ast.Invert)):
+        v = const_int(node.operand)
+        return None if v is None else {ast.USub: -v, ast.UAdd: v, ast.Invert: ~v}[type(node.op)]
+    if isinstance(node, ast.BinOp) and type(node.op) in (ast.Add, ast.Sub, ast.Mult, ast.LShift, ast.RShift, ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor):
+        a, b = const_int(node.left), const_int(node.right)
+        if a is None or b is None or (type(node.op) in (ast.LShift, ast.Pow) and not 0 <= b <= 128) or (type(node.op) is ast.RShift and b < 0):
+            return None
+        v = {ast.Add: a + b, ast.Sub: a - b, ast.Mult: a * b, ast.BitAnd: a & b, ast.BitOr: a | b, ast.BitXor: a ^ b}.get(type(node.op)) \
+            if type(node.op) not in (ast.LShift, ast.RShift, ast.Pow) else (a << b if type(node.op) is ast.LShift else a >> b if type(node.op) is ast.RShift else a ** b)
+        return v if abs(v) < 1 << 128 else None
+    return None
+
+
+def folds(node):
+    """An expression of literals whose value only Python's unbounded ints get right: it compiles as that value."""
+    if isinstance(node, ast.Constant) or not isinstance(node, (ast.BinOp, ast.UnaryOp)):
+        return None
+    v = const_int(node)
+    return v if v is not None and -(1 << 63) <= v < 1 << 64 else None
+
+
 def const_number(node):
     """The value of a number literal, signed or not, else None."""
     sign = 1
@@ -515,6 +540,7 @@ class Compiler:
         self.tagged = set()        # variables holding an exact int or a float: a double and v___int (see may_tag)
         self.not_literal = set()   # variables assigned an int that isn't a literal
         self.python_values = {}    # each variable's Python numbers: the literal, or None
+        self.u64_params = set()    # parameters that must not be negative (else the call runs as Python)
         self.uses_rerun = False    # the kernel can ask for the call to run as Python, before doing anything
         self.tracks = False        # the function returns an array, so views remember which argument they're of
         self.makes = False         # the function makes arrays, so views remember the block they're in
@@ -665,6 +691,11 @@ class Compiler:
             self.not_literal.add(name)
         if t in (T.INT, T.FLOAT):
             self.python_values.setdefault(name, []).append(literal_value(node))
+        if old is not None and old is not t and {old, t} <= {T.U64, T.INT, T.BOOL} and T.U64 in (old, t):
+            if not self.name_nonneg(name, frozenset([name])):
+                self.fail(node, f'{name} holds an int past int64 in one place, and in another a value that may be negative')
+            t = T.U64
+            old = t
         if old is not None and old is not t:
             j = T.join(old, t) or self.narrow_variable(name, old, t)
             if j is None and self.may_tag(name, old, t):
@@ -957,7 +988,7 @@ class Compiler:
                         self.fail(e, 'a slice with bounds that are not integers')
             elif isinstance(k, ast.Constant) and (k.value is None or k.value is Ellipsis):
                 self.fail(e, 'None or ... in an index')
-            elif self.typeof(k).kind != 'int':
+            elif self.typeof(k).kind != 'int' or self.typeof(k) is T.U64:
                 self.fail(e, f'an index of type {self.typeof(k).name}')
         kept = at.ndim - sum(not isinstance(k, ast.Slice) for k in items)
         if not kept:
@@ -1012,12 +1043,14 @@ class Compiler:
             if isinstance(k, ast.Slice):
                 self.fail(sub, 'assigning to a slice')
             t = self.typeof(k)
-            if t.kind != 'int':
+            if t.kind != 'int' or t is T.U64:
                 self.fail(sub, f'an index of type {t.name}')
 
     def binop_type(self, a, b, op, node):
         if not (a.is_number and b.is_number):
             self.fail(node, f'{op} on {a.name} and {b.name}')
+        if a is T.U64 or b is T.U64:
+            return self.u64_binop_type(a, b, op, node)
         if op == 'Pow':
             return self.pow_type(a, b, node)
         if op in ('BitAnd', 'BitOr', 'BitXor', 'LShift', 'RShift'):
@@ -1029,6 +1062,117 @@ class Compiler:
         if r is None:
             self.fail(node, T.arith_problem(a, b, op))
         return r
+
+    def operands(self, node):
+        if isinstance(node, ast.BinOp):
+            return node.left, node.right
+        return node.target, node.value          # AugAssign
+
+    def u64_binop_type(self, a, b, op, node):
+        """An int in [0, 2**64) with another number. What stays in that range is held unsigned; what may not wraps at 64
+        bits, as every int does (+, -, *, <<, **), and a mask brings it back."""
+        left, right = self.operands(node)
+        if (a.np or b.np) and not (a.kind == 'float' or b.kind == 'float') or a.np is True or b.np is True or 'dyn' in (a.np, b.np):
+            self.fail(node, 'an int that may be past int64 with numpy scalars (numpy raises OverflowError)')
+        if a.kind == 'float' or b.kind == 'float':
+            if op in ('BitAnd', 'BitOr', 'BitXor', 'LShift', 'RShift'):
+                self.fail(node, 'a bitwise operator on a float')
+            if op == 'Pow':
+                self.fail(node, '** of an int past int64 and a float')
+            return T.FLOAT
+        if op == 'BitAnd':                           # masked by a constant that fits int64, or a length: an ordinary int
+            def small(x):
+                k = const_int(x)
+                return (k is not None and 0 <= k <= INT64_MAX) or (isinstance(x, ast.Call) and isinstance(x.func, ast.Name)
+                                                                  and x.func.id == 'len' and self.is_builtin('len', 'len'))
+            return T.INT if small(left) or small(right) else T.U64
+        if op in ('BitOr', 'BitXor'):
+            return T.U64 if self.nonneg(left) and self.nonneg(right) else T.INT
+        if op == 'RShift':                           # by 1 or more, it fits int64
+            k = const_int(right)
+            return T.INT if a is not T.U64 or (k is not None and k >= 1) else T.U64
+        if op in ('FloorDiv', 'Mod'):
+            if not (self.nonneg(left) and self.nonneg(right)):
+                self.fail(node, f'{"//" if op == "FloorDiv" else "%"} of an int past int64 and an int that may be negative')
+            return T.U64 if (op == 'FloorDiv' and a is T.U64) or (op == 'Mod' and b is T.U64 and a is T.U64) else T.INT
+        if op == 'Div':
+            self.fail(node, '/ of an int past int64')
+        if op == 'Pow' and b is T.U64:
+            self.fail(node, '** with an exponent past int64')
+        if op in ('Add', 'Mult', 'LShift', 'Pow') and self.nonneg(left) and self.nonneg(right):
+            return T.U64                             # exact up to 2**64, where it wraps
+        return T.INT
+
+    def nonneg(self, e, assume=frozenset()):
+        """Is e's Python value never negative? Read from the source: names are followed to every assignment, assuming
+        what's being shown (a loop that only xors and masks keeps a nonnegative value). A parameter counts if it's
+        checked when the function is called (u64_params): a negative one then runs as Python."""
+        if isinstance(e, ast.Constant):
+            return isinstance(e.value, (int, bool)) and e.value >= 0
+        if folds(e) is not None:
+            return folds(e) >= 0
+        if isinstance(e, ast.Name):
+            if e.id in assume or self.env.get(e.id) is T.U64:
+                return True
+            return self.name_nonneg(e.id, assume | {e.id})
+        if isinstance(e, ast.BinOp):
+            op = type(e.op)
+            if op is ast.BitAnd:
+                return self.nonneg(e.left, assume) or self.nonneg(e.right, assume)
+            if op is ast.Mod:
+                return self.nonneg(e.right, assume)
+            if op in (ast.RShift,):
+                return self.nonneg(e.left, assume)
+            if op in (ast.BitOr, ast.BitXor, ast.FloorDiv, ast.Add, ast.Mult, ast.LShift, ast.Pow):
+                return self.nonneg(e.left, assume) and self.nonneg(e.right, assume)
+            return False
+        if isinstance(e, ast.UnaryOp) and isinstance(e.op, ast.UAdd):
+            return self.nonneg(e.operand, assume)
+        if isinstance(e, ast.IfExp):
+            return self.nonneg(e.body, assume) and self.nonneg(e.orelse, assume)
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and len(e.args) == 1 and not e.keywords:
+            if e.func.id == 'len' and self.is_builtin('len', 'len'):
+                return True
+            if e.func.id == 'int' and self.is_builtin('int', 'int'):
+                a = e.args[0]
+                t = self.typeof(a)
+                return t is T.U64 or (T.is_narrow(t) and t.ctype.startswith('uint')) or (t.kind != 'float' and self.nonneg(a, assume))
+        return False
+
+    def name_nonneg(self, name, assume):
+        stores = []
+        for n in ast.walk(self.f):
+            if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For, ast.comprehension, ast.With, ast.NamedExpr)):
+                targets = n.targets if isinstance(n, ast.Assign) else [getattr(n, 'target', None)] if not isinstance(n, ast.With) \
+                    else [i.optional_vars for i in n.items]
+                for tg in targets:
+                    if tg is None:
+                        continue
+                    if any(isinstance(x, ast.Name) and x.id == name and isinstance(x.ctx, ast.Store) for x in ast.walk(tg)):
+                        if not isinstance(tg, ast.Name):
+                            return False
+                        stores.append(n)
+        for n in stores:
+            if isinstance(n, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                if n.value is None or not self.nonneg(n.value, assume):
+                    return False
+            elif isinstance(n, ast.AugAssign):
+                if not self.nonneg(ast.BinOp(ast.Name(name, ast.Load()), n.op, n.value), assume):
+                    return False
+            elif isinstance(n, (ast.For, ast.comprehension)):
+                it = n.iter
+                if not (isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == 'range' and 1 <= len(it.args) <= 3
+                        and (len(it.args) == 1 or self.nonneg(it.args[0], assume))
+                        and (len(it.args) < 3 or (isinstance(it.args[2], ast.Constant) and type(it.args[2].value) is int and it.args[2].value > 0))):
+                    return False
+            else:
+                return False
+        if name in self.params:
+            if self.came_as(name) not in (T.INT, T.BOOL):
+                return False
+            self.u64_params.add(name)
+            return True
+        return bool(stores)
 
     def pow_type(self, a, b, node):
         """a ** b. numpy's rules give one type whatever the values. Python's give a float for an int to
@@ -1076,8 +1220,10 @@ class Compiler:
             if isinstance(v, bool):
                 return T.BOOL
             if isinstance(v, int):
+                if INT64_MAX < v < 1 << 64:
+                    return T.U64
                 if not INT64_MIN <= v <= INT64_MAX:
-                    self.fail(e, 'an int literal outside int64')
+                    self.fail(e, 'an int literal outside int64 and uint64')
                 return T.INT
             if isinstance(v, float):
                 return T.FLOAT
@@ -1103,6 +1249,8 @@ class Compiler:
                 if e.attr in ('ndim', 'size'):
                     return T.INT
             self.fail(e, f'the attribute .{e.attr}')
+        if isinstance(e, ast.BinOp) and folds(e) is not None:
+            return T.U64 if folds(e) > INT64_MAX else T.INT
         if isinstance(e, ast.BinOp):
             op = ARITH.get(type(e.op))
             if op is None:
@@ -1120,6 +1268,10 @@ class Compiler:
                 self.fail(e, '~ on a non-int')
             if T.is_narrow_dyn(t):
                 self.fail(e, f'a unary operator on {t.name}: its result may not fit')
+            if t is T.U64 and not isinstance(e.op, ast.UAdd):
+                return T.INT                         # wraps
+            if t is T.NP_UINT64 and not isinstance(e.op, ast.Not):
+                self.fail(e, 'a unary operator on np.uint64')
             return T.INT if t is T.BOOL else t
         if isinstance(e, ast.Compare):
             if not all(type(o) in CMP for o in e.ops):
@@ -1128,6 +1280,11 @@ class Compiler:
             if not all(t.is_number for t in ts):
                 self.fail(e, 'comparisons of non-numbers')
             for a, b in zip(ts, ts[1:]):
+                if T.NP_UINT64 in (a, b):
+                    self.fail(e, 'comparing np.uint64 (write int(x))')
+                if T.U64 in (a, b) and ((a.np and a.kind == 'float' and a is not T.NP_FLOAT64) or (b.np and b.kind == 'float' and b is not T.NP_FLOAT64)
+                                        or 'dyn' in (a.np, b.np)):
+                    self.fail(e, f'comparing an int past int64 with {(b if a is T.U64 else a).name}')
                 if (T.is_narrow_dyn(a) or T.is_narrow_dyn(b)) and a.np is not True and b.np is not True \
                         and not (a.kind != 'float' and b.kind != 'float'):
                     self.fail(e, f'comparing {a.name} with {b.name}: numpy rounds one side and Python doesn\'t')
@@ -1183,6 +1340,17 @@ class Compiler:
         return None
 
     def math_type(self, e, name):
+        r = self.math_type_of(e, name)
+        for a in e.args:
+            try:
+                t = self.typeof(a)
+            except Unsupported:                       # a sequence (fsum of a generator): math_type_of took it
+                continue
+            if t in (T.U64, T.NP_UINT64):
+                self.fail(e, f'math.{name}() of an int past int64')
+        return r
+
+    def math_type_of(self, e, name):
         kind, _ = MATH_FUNCS[name]
         if kind == 'iter':
             return self.math_iter_type(e, name)
@@ -1443,6 +1611,8 @@ class Compiler:
         return self.hidden_map[h[0], h[1]] if self.hidden_map else h[1]
 
     def callee_type(self, e):
+        if any(self.typeof(a) is T.U64 for a in e.args) or any(self.typeof(k.value) is T.U64 for k in e.keywords):
+            self.fail(e, 'passes an int past int64 to a compiled function')
         c = self.compiled_callee(e)
         if c.makes and ret_arrays(c.ret):
             self.makes = True
@@ -2420,7 +2590,7 @@ class Compiler:
         if not args or not all(t.is_number for t in args):
             self.fail(e, f'{name}() of a non-number')
         if name == 'abs':
-            if len(args) != 1 or (args[0].np and args[0].kind == 'bool'):
+            if len(args) != 1 or (args[0].np and args[0].kind == 'bool') or args[0] is T.NP_UINT64:
                 self.fail(e, 'abs() with these arguments')
             return T.INT if args[0] is T.BOOL else args[0]
         if name in ('min', 'max'):
@@ -2433,6 +2603,14 @@ class Compiler:
             if args[0].kind != 'float' and args[0].np is not False:
                 self.fail(e, 'round() of a numpy int')
             return T.INT
+        if any(t is T.NP_UINT64 for t in args) and name not in ('int', 'float', 'bool'):
+            self.fail(e, f'{name}() of np.uint64 (write int(x))')
+        if name == 'int' and args[0] is T.NP_UINT64:
+            return T.U64
+        if name == 'round' and args[0] is T.U64:
+            self.fail(e, 'round() of an int past int64')
+        if name == 'int' and args[0] is T.U64:
+            return T.U64
         return T.INT if name == 'int' else T.FLOAT
 
     # ---- reductions: sum, min, max, any, all over an iterable or a comprehension, fused into
@@ -2625,6 +2803,8 @@ class Compiler:
                 params += [f'{et.ctype} v_{p}__{i}' for i, et in enumerate(t.elem)]
             elif p in self.tagged and self.came_as(p) is T.INT:
                 params.append(f'int64_t v_{p}__in')
+            elif t is T.U64:
+                params.append(f'int64_t v_{p}__in')
             else:
                 params.append(f'{t.ctype} v_{p}')
                 if self.came_as(p).np == 'dyn':     # from a call: the caller's variable and its flag
@@ -2634,6 +2814,12 @@ class Compiler:
         if self.makes:
             self.helpers.add('np_make')
             self.emit(f'sj_heap sj_h = {{0, 0, 1048576, {sys.maxsize}ULL}};')
+        for p in sorted(self.u64_params):
+            self.uses_rerun = True           # a negative one runs as Python, where it can still go negative
+            self.emit(f'if ({"v_" + p + "__in" if self.env[p] is T.U64 else "v_" + p} < 0) return {RERUN};')
+        for p in self.params:
+            if self.env[p] is T.U64:
+                self.emit(f'uint64_t v_{p} = (uint64_t)v_{p}__in;')
         for p in self.params:
             if p in self.tagged and self.came_as(p) is T.INT:
                 self.uses_rerun = True       # nothing has happened yet, so Python can still take this call
@@ -2708,7 +2894,8 @@ class Compiler:
             params.append('int64_t *restrict sj_c')
         if self.cname != 'sj_kernel':
             if self.uses_rerun:
-                raise Unsupported(None, 'an int argument of it becomes a float')
+                raise Unsupported(None, 'an int argument of it becomes a float' if self.tagged else
+                                  'an int argument of it must not be negative, and a call from compiled code can\'t run it as Python')
             self.unit.helpers |= self.helpers
             return '\n'.join(self.lines[:head] + [f'static int {self.cname}({", ".join(params + ["int64_t *sj_tb", "int64_t *sj_io"])}) {{']
                              + self.lines[head:] + ['}', ''])
@@ -3706,6 +3893,22 @@ class Compiler:
     def check_fits(self, node, et, v, vt):
         """numpy (NEP 50): a Python int that doesn't fit the dtype raises OverflowError; numpy scalars are cast (and wrap)."""
         dtype = et.name[3:]
+        if vt is T.U64 and et.kind != 'float':      # numpy: past int64 it doesn't convert at all
+            iv = self.hold(f'(uint64_t)({v[0]})', T.U64)
+            if dtype == 'uint64':
+                return
+            hi = T.INT_RANGE[dtype][1] if dtype in T.INT_RANGE else INT64_MAX
+            self.emit(f'if ({iv} > {hi}ULL) SJ_FAIL({INT_BOUNDS_ERROR}, {self.line(node)}, (int64_t){iv}, '
+                      f'{NARROW_INT_DTYPES.index(dtype) + 100});')
+            return
+        if dtype == 'uint64':                        # numpy casts numpy scalars; a Python int must not be negative
+            if vt.kind == 'float':
+                self.fail(node, 'storing a float into uint64 (numpy\'s cast past the range depends on the platform)')
+            if vt.np is not True:
+                iv = self.hold(self.coerce(v[0], vt, T.INT), T.INT)
+                cond = f'{iv} < 0' if vt.np is False else f'!{v[1]} && {iv} < 0'
+                self.emit(f'if ({cond}) SJ_FAIL({INT_BOUNDS_ERROR}, {self.line(node)}, {iv}, {NARROW_INT_DTYPES.index("uint64")});')
+            return
         if dtype in T.INT_RANGE and vt.kind in ('int', 'bool') and vt.np is not True:
             lo, hi = T.INT_RANGE[dtype]
             iv = self.hold(self.coerce(v[0], vt, T.INT), T.INT)
@@ -4025,6 +4228,8 @@ class Compiler:
             v = e.value
             if isinstance(v, bool):
                 return ('1' if v else '0'), '0'
+            if isinstance(v, int) and v > INT64_MAX:
+                return f'{v}ULL', '0'
             return (c_int(v) if isinstance(v, int) else c_float(v)), '0'
         if isinstance(e, ast.Name):
             if e.id in self.cnames:
@@ -4038,6 +4243,9 @@ class Compiler:
                     return f'{t.ndim}LL', '0'
                 return '(' + ' * '.join(self.extent(e.value.id, k) for k in range(t.ndim)) + ')', '0'
             return c_float(MATH_CONSTANTS[e.attr]), '0'
+        if isinstance(e, ast.BinOp) and folds(e) is not None:
+            v = folds(e)
+            return (f'{v}ULL' if v > INT64_MAX else c_int(v)), '0'
         if isinstance(e, ast.BinOp):
             lt = self.typeof(e.left)
             return self.arith(ARITH[type(e.op)], self.expr(e.left), lt, e.right, e)
@@ -4171,6 +4379,8 @@ class Compiler:
         for n, py, v in ((at, bt, b), (bt, at, a)):       # numpy: a Python int must fit the scalar's dtype, except for /
             if op != 'Div' and T.is_narrow(n) and n.kind == 'int' and py.kind != 'float' and py.np is False:
                 self.check_fits(node, n, (v, '0'), py)
+        if T.U64 in (at, bt) and at.kind != 'float' and bt.kind != 'float':
+            return self.u64_arith(op, a, at, b, bt, rt, npf, line, right, node), npf
         if op in ('LShift', 'RShift'):
             return self.shift(op, a, at, b, rt, npf, line, right), npf
         if not (T.is_narrow(rt) and rt.kind == 'int'):
@@ -4179,6 +4389,35 @@ class Compiler:
             sym = {'Add': '+', 'Sub': '-', 'Mult': '*'}[op]
             return f'(({rt.ctype})((uint32_t){a} {sym} (uint32_t){b}))', npf
         return f'(({rt.ctype})({self.arith_as(op, a, at, b, bt, right, rt, npf, line, node)}))', npf
+
+    def u64_arith(self, op, a, at, b, bt, rt, npf, line, right, node):
+        """Ints where one may be past int64 (u64_binop_type says which results stay unsigned). The bits are the same
+        either way: only //, %, >> and what the result means differ."""
+        ua, ub = f'(uint64_t)({a})', f'(uint64_t)({b})'
+        if op in ('BitAnd', 'BitOr', 'BitXor'):
+            r = f'({ua} {dict(BitAnd="&", BitOr="|", BitXor="^")[op]} {ub})'
+        elif op in ('FloorDiv', 'Mod'):              # both are nonnegative here
+            self.emit(f'if ({ub} == 0) SJ_FAIL({ZERO_DIVISION}, {line}, {2 if op == "FloorDiv" else 3}, 0);')
+            r = f'({ua} {"/" if op == "FloorDiv" else "%"} {ub})'
+        elif op == 'RShift' and at is T.U64:
+            k = self.hold(f'(int64_t)({b})', T.INT) if bt is not T.U64 else self.hold(ub, T.U64)
+            if bt is not T.U64:
+                self.emit(f'if ({k} < 0) SJ_FAIL({VALUE_ERROR}, {line}, {VALUE_ERROR_MESSAGES.index("negative shift count")}, 0);')
+            r = f'((uint64_t){k} < 64 ? {ua} >> {k} : 0)'
+        elif op == 'LShift' and bt is not T.U64:      # wraps, as on any int
+            r = self.shift(op, a, T.INT, b, T.INT, npf, line, right)
+        elif op == 'LShift':                           # a count held unsigned: past 63 every bit is gone
+            r = f'({ub} < 64 ? {ua} << {ub} : 0)'
+        elif op == 'RShift':                           # an int64 by an unsigned count
+            r = f'({ub} < 64 ? (int64_t)({a}) >> {ub} : ((int64_t)({a}) < 0 ? -1 : 0))'
+        elif op == 'Pow':
+            self.helpers.add('ipow')
+            if const_number(right) is None or const_number(right) < 0:
+                self.emit(f'if ((int64_t)({b}) < 0) SJ_FAIL({VALUE_ERROR}, {line}, 16, 0);')
+            r = f'sj_ipow((int64_t)({a}), (int64_t)({b}))'
+        else:
+            r = f'sj_{op.lower()[:3]}((int64_t)({a}), (int64_t)({b}))'
+        return f'(({rt.ctype})({r}))'
 
     def shift(self, op, a, at, b, rt, npf, line, right):
         """a << b and a >> b. Python raises on a negative count; numpy gives 0 (or -1 for >> of a negative), as it does
@@ -4264,6 +4503,8 @@ class Compiler:
 
     def cmp(self, a, at, b, bt, op):
         af, bf = at.kind == 'float', bt.kind == 'float'
+        if T.U64 in (at, bt):
+            return self.u64_cmp(a, at, b, bt, op)
         ct = T.compare_in(at, bt)
         if ct == 'float':
             return f'({self.coerce(a, at, T.NARROW["float32"])} {op} {self.coerce(b, bt, T.NARROW["float32"])})'
@@ -4281,6 +4522,22 @@ class Compiler:
         code = {'<': 0, '<=': 1, '>': 2, '>=': 3, '==': 4, '!=': 5}[op]
         return (f'((int64_t){a} >= -9007199254740992LL && (int64_t){a} <= 9007199254740992LL ? '
                 f'(double){a} {op} {b} : sj_cmp_test(sj_cmp_if((int64_t){a}, {b}), {code}))')
+
+    def u64_cmp(self, a, at, b, bt, op):
+        """Exact, as Python's are, and as numpy's are with ints. With np.float64 numpy rounds the int to a double first."""
+        if at is not T.U64:
+            a, at, b, bt, op = b, bt, a, at, SWAP[op]
+        if bt is T.U64:
+            return f'((uint64_t)({a}) {op} (uint64_t)({b}))'
+        if bt.kind == 'float':
+            if bt.np:
+                return f'((double)({a}) {op} (double)({b}))'
+            self.helpers.add('cmp_uf')
+            code = {'<': 0, '<=': 1, '>': 2, '>=': 3, '==': 4, '!=': 5}[op]
+            return f'sj_cmp_test(sj_cmp_uf((uint64_t)({a}), (double)({b})), {code})'
+        # a in [0, 2**64) against an int64: a negative one is below everything
+        below = {'<': 0, '<=': 0, '>': 1, '>=': 1, '==': 0, '!=': 1}[op]
+        return f'((int64_t)({b}) < 0 ? {below} : (uint64_t)({a}) {op} (uint64_t)(int64_t)({b}))'
 
     def compare(self, e):
         operands = [e.left] + e.comparators
@@ -4330,6 +4587,8 @@ class Compiler:
         ts = [self.typeof(a) for a in e.args]
         if name == 'abs':
             c, f = self.expr(e.args[0])
+            if ts[0] is T.U64:
+                return c, f
             return (f'fabs({c})' if ts[0].kind == 'float' else f'sj_abs((int64_t)({c}))'), f
         if name in ('min', 'max'):
             t = self.typeof(e)

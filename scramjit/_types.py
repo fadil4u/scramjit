@@ -35,12 +35,18 @@ BOOL = Type('bool', 'int', 'bool')
 NP_INT64 = Type('np.int64', 'int64_t', 'int', np=True)
 NP_FLOAT64 = Type('np.float64', 'double', 'float', np=True)
 NP_BOOL = Type('np.bool', 'int', 'bool', np=True)
+# Elements of uint64 arrays: stored, converted with int() and float(), compared with nothing yet. numpy's arithmetic on them
+# turns int64 into float64, which isn't compiled.
+NP_UINT64 = Type('np.uint64', 'uint64_t', 'int', np=True)
 # A variable that holds a Python number at some times and a numpy scalar of the same kind at
 # others (total = 0.0, then total += x[i]): its C value plus a runtime flag.
 INT_DYN = Type('int | np.int64', 'int64_t', 'int', np='dyn')
 FLOAT_DYN = Type('float | np.float64', 'double', 'float', np='dyn')
 BOOL_DYN = Type('bool | np.bool', 'int', 'bool', np='dyn')
 NONE = Type('None', 'void', 'none')
+# A Python int known to be in [0, 2**64): a literal past int64, a value masked with & 0xFFFFFFFFFFFFFFFF, or a variable that only
+# ever holds such values. Held unsigned, so 64-bit hashes come out as Python's numbers.
+U64 = Type('int (unsigned 64-bit)', 'uint64_t', 'int')
 
 # numpy scalars of the narrow dtypes. Arithmetic on them follows numpy's NEP 50 rules: see narrow_result.
 NARROW = {
@@ -62,7 +68,7 @@ NARROW_DYN = {n: Type(f'{"float" if t.kind == "float" else "int"} | {t.name}', t
 
 
 def is_narrow(t):
-    return t.np is True and t.name not in ('np.int64', 'np.float64', 'np.bool')
+    return t.np is True and t.name not in ('np.int64', 'np.float64', 'np.bool', 'np.uint64')
 
 
 def is_narrow_dyn(t):
@@ -122,6 +128,8 @@ def join(a, b):
     """The type of a variable that is assigned values of types a and b, or None."""
     if a is b:
         return a
+    if a is U64 or b is U64 or a is NP_UINT64 or b is NP_UINT64:
+        return None
     if a.is_number and b.is_number and has_narrow(a, b):
         return None
     if a.is_number and b.is_number and a.kind == b.kind:
@@ -248,6 +256,8 @@ def arith_problem(a, b, op):
     """Why a <op> b doesn't compile, when arith_result says it doesn't."""
     if (a.np and a.kind == 'bool') or (b.np and b.kind == 'bool'):
         return 'arithmetic on numpy bools'
+    if NP_UINT64 in (a, b):
+        return 'arithmetic on np.uint64, which numpy turns into float64 with signed ints: write int(x)'
     if op == 'Pow':
         return f'** on {a.name} and {b.name}: numpy uses the narrow type\'s own pow'
     return f'{a.name} with {b.name}: the type of the result would depend on what the variable holds at run time'
@@ -270,7 +280,7 @@ def arith_result(a, b, op):
 
     Returns None when the combination isn't compiled: see arith_problem.
     """
-    if (a.np and a.kind == 'bool') or (b.np and b.kind == 'bool'):
+    if (a.np and a.kind == 'bool') or (b.np and b.kind == 'bool') or NP_UINT64 in (a, b):
         return None
     if has_narrow(a, b):
         return narrow_result(a, b, op)

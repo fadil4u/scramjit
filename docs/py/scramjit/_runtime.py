@@ -21,7 +21,7 @@ ARANGE_ERROR = 11    # np.arange can't compute a length: its numbers in io[0], i
 LINSPACE_ERROR = 12  # np.linspace of a number of samples, in io[2], that is negative or too many
 MAKE_DTYPES = ['float64', 'int64', 'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
 RETURNS_INT = 2      # a returned float's flag, when the value is really a Python int
-NARROW_INT_DTYPES = ['int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
+NARROW_INT_DTYPES = ['int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8', 'int64', 'uint64']
 
 LIST_INDEX_MESSAGES = ['list index out of range', 'list assignment index out of range']
 
@@ -133,6 +133,14 @@ def exception(status, io):
     if status == LINSPACE_ERROR:        # numpy's own error, for what it was asked
         import numpy
         return _numpys_error(numpy.linspace, (0.0, 1.0, io[2]))
+    if status == INT_BOUNDS_ERROR and io[3] >= 100:     # an int past int64, held unsigned: numpy's own error, worded as it words it
+        import numpy
+        value, dtype = io[2] & 0xFFFFFFFFFFFFFFFF, NARROW_INT_DTYPES[io[3] - 100]
+        try:
+            numpy.zeros(1, dtype)[0] = value
+        except OverflowError as e:
+            return e.with_traceback(None)
+        return SystemError(f'scramjit: {value} fits {dtype}')
     if status == INT_BOUNDS_ERROR:      # numpy (NEP 50): a Python int stored into a narrower dtype
         if not -(1 << 8 * struct.calcsize('l') - 1) <= io[2] < 1 << 8 * struct.calcsize('l') - 1:    # 32 bits on wasm32 and Windows
             return OverflowError('Python int too large to convert to C long')

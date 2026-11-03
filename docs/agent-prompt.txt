@@ -38,7 +38,8 @@ Arguments: int, float, bool; contiguous n-D numpy arrays of int8-int64, uint8-ui
 Compiles: for, while, if, break, continue, ternary; a[i, j], negative indices, a.shape, a.ndim; views a[1:], a[i], a.T; a.sum(), a.max(), np.sqrt(a[i]); np.zeros, np.ones, np.full, np.arange, np.linspace, a.copy(), returned as numpy arrays; tuples; lists of fixed size; comprehensions; range, enumerate, zip, reversed, map, filter, len, abs, min, max, any, all, int, float, round; sum of ints or sum(gen, 0.0); math.*.
 Falls back, with the fix:
 - calling a function without @scram, recursing, default parameter values: decorate it, write a loop, pass every argument. Calling another @scram function at module level compiles, so split a program into functions as usual. So does k.f(x) with k = cimo.compile('...') at module level, for shifts and bit tricks, if its data is const
-- global variables: pass as arguments
+- global variables: pass as arguments (module-level numbers, tuples, arrays and dicts are read at each call)
+- 64-bit hashes: mask each step with & 0xFFFFFFFFFFFFFFFF and they match Python exactly; don't subtract from a masked variable
 - a * 2, a + b, a[a > 0], np.sqrt(a), a.reshape(...): write the loop over a[i, j]
 - on float32: np.sin, np.exp and the like; .std(), .var(); sum() from 0, write sum(..., 0.0). Other arithmetic, ** and reductions on narrow dtypes compile, and wrap or round as numpy's do
 - changing a variable's type, s = 0 then s += 0.5: start with s = 0.0

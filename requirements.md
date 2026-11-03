@@ -211,6 +211,11 @@ Each decision is explicit and tested against CPython:
   `2**63`, and checking every operation would cost every loop. `<<` wraps too, as multiplying by `2**k` does
   (0 from 64 bits on), so a hash masked to 32 bits (`(x << 13) & 0xFFFFFFFF`) is exact; `>>` is always exact, and a
   negative count raises `ValueError` as in Python. On numpy scalars, numpy's: a count outside the width gives 0, or -1.
+  An int that can only be in `[0, 2**64)` (a literal past int64, `& 0xFFFFFFFFFFFFFFFF`, a sum, product, `|` or `^` of such
+  values) is held as `uint64_t`, so 64-bit hashes are exact. Non-negativity is read from the source, following each name to
+  every assignment (`nonneg`); a parameter it relies on is checked on entry, and a negative one reruns the call in Python.
+  Literal-only int expressions are folded at Python's precision (`(1 << 64) - 1`). Rejected: an unsigned flag per value
+  (what `h ^ k` means would depend on k's sign at run time), and 128-bit ints.
 - `//` and `%` round toward negative infinity, as in Python, not truncate as in C.
 - Negative indices count from the end, as in Python.
 - Bounds checks are on by default and raise `IndexError` as Python does; opt out per function with

@@ -23,7 +23,7 @@ Accepted annotations:
 
 | Annotation | Meaning |
 | --- | --- |
-| `int` | a Python `int`, held as `int64` unless narrowed |
+| `int` | a Python `int`, held as `int64` unless narrowed; one that can only be in `[0, 2 ** 64)`, such as a value masked with `& 0xFFFFFFFFFFFFFFFF`, is held as `uint64` |
 | `float` | a Python `float`, held as `float64` |
 | `bool` | a Python `bool` |
 | `np.int8`, `np.float32`, … | a numpy scalar type of that size |

@@ -13,7 +13,7 @@ import re
 
 from . import _lift
 from . import _types as T
-from ._compiler import Callee, Compiler, StaticNumpy
+from ._compiler import Callee, Compiler, StaticNumpy, const_int
 from ._errors import Unsupported
 
 _OTHER = object()     # a module-level name whose value static analysis can't know
@@ -124,7 +124,8 @@ def module_globals(tree):
                     try:
                         out[t.id] = _c_module(s.value) or ast.literal_eval(s.value)
                     except ValueError:
-                        out[t.id] = _OTHER
+                        v = const_int(s.value)                    # (1 << 64) - 1
+                        out[t.id] = _OTHER if v is None else v
     return out
 
 
@@ -365,7 +366,10 @@ def with_globals(fdef, globals_):
         if name not in globals_:
             continue
         v = globals_[name]
-        if type(v) in (int, float, bool):
+        if type(v) is int and (1 << 63) <= v < (1 << 64):        # held unsigned, as a call would pass it
+            added.append(ast.arg(name))
+            tuples[name] = T.U64
+        elif type(v) in (int, float, bool):
             added.append(ast.arg(name, ast.Name(type(v).__name__, ast.Load())))
         elif type(v) is tuple and v and all(type(x) in (int, float, bool) for x in v):
             added.append(ast.arg(name))
@@ -397,6 +401,11 @@ def best_analysis(fdef, globals_, filename, offset, opts, first_only=False):
         if a.compiler is not None:
             return a
         first = first or a
+    if arrays:                         # bytes: int() of them is never negative, which a 64-bit hash needs
+        trial = [T.array(T.NARROW['uint8'], True, t.ndim) if t.kind == 'array' else t for t in sig]
+        a = analyze(fdef, trial, globals_, filename, offset, opts, first_only)
+        if a.compiler is not None:
+            return a
     if not first_only:
         first.loops = lifted_loops(fdef, sig, globals_, filename, offset, opts)
         inside = first.native_lines()

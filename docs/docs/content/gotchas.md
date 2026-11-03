@@ -58,6 +58,8 @@ Python's integers are unbounded. Compiled integers are `int64`, and past that th
 
 `>>` is always exact, and so is a shift masked to fewer than 64 bits, such as `(x << 13) & 0xFFFFFFFF` in a 32-bit hash: masking keeps only the bits wrapping leaves alone. On numpy integers, shifts follow numpy, where a count past the width gives 0.
 
+64-bit hashes are exact too. A value that can only be in `[0, 2 ** 64)` is held as an unsigned 64-bit int: a literal such as `0xCBF29CE484222325`, a result masked with `& 0xFFFFFFFFFFFFFFFF`, a mask written `(1 << 64) - 1`, and a variable that only ever holds such values. So `h = ((h ^ int(b)) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF` gives Python's numbers, and so do xorshift64 and splitmix64 ([example](https://github.com/farizrahman4u/scramjit/blob/main/examples/hash64.py)). A parameter that becomes such a variable, like a seed, is checked when called: a negative one runs as Python. Such a variable mustn't also be assigned something that may be negative, like `h - k`; the function then stays Python and says so. `uint64` arrays can be stored into and read with `int(x)` or `float(x)`. Arithmetic on their elements, as `np.uint64`, stays Python, since numpy gives `float64` when they meet signed ints.
+
 Checking every operation would cost speed on every loop, and numeric code rarely comes near `2 ** 63`. If yours might, leave that function undecorated, or use floats. An argument that doesn't fit in 64 bits is safe: that call runs as Python.
 
 ### On Windows, a NaN's sign can differ

@@ -295,8 +295,9 @@ Spills per line, once cimo can report them.
      ns, against recompiling on every change. Not yet: lists at module level, and a global that is a list of numbers.
    - **Enums: built.** See "Enums" in `containers.md`. Not yet: `.name`, `Cell(1)`, iterating over the class, storing a member into an array, `Flag` and string enums.
    - **Nested tuples: built,** as locals, arguments, results and globals, and loops over tuples. Not yet: a tuple holding arrays as a local or an argument, a tuple indexed with a variable, a comprehension variable that is a tuple, and comparing tuples.
-   - **Lists as arguments, and nested:** `[[1.0, 2.0], [3.0, 4.0]]`; returning one. The spec's copy in and
-     out at the call was never built.
+   - **Lists as arguments, returned, and at module level: built, from 0.0.4** (see `containers.md`). Not yet: lists of lists
+     (`[[1.0, 2.0], [3.0, 4.0]]`, with rows that alias as Python's do), numpy scalars as elements, and a call plan for list
+     arguments (each call takes the general path).
    - **Classes:** attribute reads and writes on instances and dataclasses, then method calls.
    - **Dicts, what's left:** a dict passed in compiles (see "Containers"). Not yet: nested dicts, a dict built in the function, returning
      one, `len(p)` and `'a' in p`, which are known from the keys. A function that could add a key still runs as Python.

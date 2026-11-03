@@ -154,8 +154,11 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
 - **Lists that never change size** become fixed-size C arrays: no `append`, `pop`, `extend`,
   `insert`, `del` or slice assignment on them, and no escape into code that might. Stack-allocated
   when small, constant-sized and not returned; heap otherwise.
-- **Lists passed in from Python:** homogeneous numeric lists are copied into an array at the call
-  boundary and copied back if mutated. That's O(n) per call, so large data should be numpy arrays.
+- **Lists passed in from Python (built 2026-11-03, from 0.0.4):** a list of only ints, floats or bools is copied into an
+  `array.array` at the call, and if the function stores into it, the elements whose value changed are copied back at
+  every exit, so the others keep their identity. The same list twice runs as Python. A returned local list's memory is
+  handed to the caller, copied into a list in C (`memoryview.cast().tolist()`) and released; returning the argument
+  returns it. Copies cost about 10 ms per 200,000 floats, the type check 2 (`set(map(type, x))`).
 - **Python data structures, nested, as much as possible** (decided 2026-11-01): dicts, lists, tuples, classes
   and enums compile when they are **statically sized** (nothing resizes them at runtime) and **statically
   typed** (the element types they start with don't change). Enums and module-level constants are their

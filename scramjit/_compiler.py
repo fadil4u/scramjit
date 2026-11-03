@@ -293,6 +293,18 @@ NP_FUNCS = {'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8', 'u
     | set(NP_REDUCE) | set(NP_FLOAT_ONLY)
 
 
+class ListReturns(ast.NodeTransformer):
+    """return [...] as `sj_list = [...]; return sj_list`: a list is returned from a variable holding it."""
+    def visit_Return(self, node):
+        v = node.value
+        if isinstance(v, (ast.List, ast.ListComp)) or (isinstance(v, ast.BinOp) and isinstance(v.op, ast.Mult)
+                                                        and (isinstance(v.left, ast.List) or isinstance(v.right, ast.List))):
+            name = ast.copy_location(ast.Name('sj_list', ast.Store()), node)
+            return [ast.copy_location(ast.Assign(targets=[name], value=v), node),
+                    ast.copy_location(ast.Return(ast.copy_location(ast.Name('sj_list', ast.Load()), node)), node)]
+        return node
+
+
 class TupleOf:
     """A loop element that is a tuple: nested lists of (C value, flag), and its type."""
     __slots__ = ('vals', 't')
@@ -419,7 +431,10 @@ def exact_int_literal(node):
 
 
 def ret_pairs(ret):
-    """How many pairs of sj_io slots a return value uses beyond the first five: one per number, nested tuples too."""
+    """How many pairs of sj_io slots a return value uses beyond the first five: one per number, nested tuples too, and one
+    for a list (its length, and which argument it is if it's one)."""
+    if ret.kind == 'list':
+        return 1
     return len([et for et in ret.elem if et.kind != 'tuple']) + sum(ret_pairs(et) for et in ret.elem if et.kind == 'tuple') if ret.kind == 'tuple' else 0
 
 
@@ -582,7 +597,7 @@ class Compiler:
         self.array_args = []       # for those: (argument index, dict key or None) of each array parameter
         local = {p.arg for p in fdef.args.posonlyargs + fdef.args.args}
         local |= {n.id for n in ast.walk(fdef) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
-        self.f = Lazy(local, set(globals_)).visit(copy.deepcopy(fdef))
+        self.f = ListReturns().visit(Lazy(local, set(globals_)).visit(copy.deepcopy(fdef)))
         self.exact = parity    # False: C's float semantics where CPython parity costs speed
         self.globals = globals_
         self.filename = filename
@@ -697,6 +712,10 @@ class Compiler:
     def return_type(self, v):
         if v is None:
             return T.NONE
+        if isinstance(v, ast.Name) and self.env.get(v.id) is not None and self.env[v.id].kind == 'list':
+            if self.env[v.id].elem.np is not False:
+                self.fail(v, f'returns {self.env[v.id].name}, whose elements may be numpy scalars')
+            return self.env[v.id]          # handed back whole: copied into a new list, or the one passed in
         if isinstance(v, ast.Tuple) and self.has_views(v):        # only a return can hold arrays in a tuple
             return T.tuple_of([self.typeof(x) for x in v.elts])
         return self.typeof(v)
@@ -866,6 +885,8 @@ class Compiler:
                 e = T.join(at.elem, t) if t.is_number else None
                 if e is None:
                     self.fail(s, f'stores {t.name} into a {at.name}')
+                if target.value.id in self.params and e is not at.elem:
+                    self.fail(s, f'stores {t.name} into a {at.name} passed in, which would then hold {t.name}s too')
                 self.env[target.value.id] = T.list_of(e)
                 return
             if not at.writable:
@@ -2979,6 +3000,8 @@ class Compiler:
                     params += [f'int64_t v_{p}__s{k}' for k in range(t.ndim)]
             elif t.kind == 'tuple':
                 params += [f'{et.ctype} {cv}' for cv, et in self.tuple_leaves(p)]
+            elif t.kind == 'list':                   # a list passed in: a copy of it, written back by the call
+                params += [f'{t.elem.ctype} *v_{p}', f'int64_t v_{p}__n']
             elif p in self.tagged and self.came_as(p) is T.INT:
                 params.append(f'int64_t v_{p}__in')
             elif t is T.U64:
@@ -3006,6 +3029,8 @@ class Compiler:
             elif p in self.tagged:
                 self.emit(f'int v_{p}__int = 0;')
         for name, t in self.env.items():
+            if t.kind == 'list' and name in self.params:
+                continue
             if t.kind == 'list':
                 self.emit(f'{t.elem.ctype} *v_{name} = NULL; int64_t v_{name}__n = 0;')
                 if t.elem.np == 'dyn':
@@ -3045,8 +3070,8 @@ class Compiler:
             self.stmt(s)
         marks = ' '.join(f'if (v_{n}__h) v_{n}__h->mark = 1;' for n, t in self.env.items() if t.kind == 'array' and not n.startswith('sjh__'))
         self.lines = [ln.replace('/*sj_marks*/', marks) for ln in self.lines]
-        frees = [f'free(v_{n});' for n, t in self.env.items() if t.kind == 'list'] + \
-                [f'free(v_{n}__np);' for n, t in self.env.items() if t.kind == 'list' and t.elem.np == 'dyn'] + \
+        frees = [f'free(v_{n});' for n, t in self.env.items() if t.kind == 'list' and n not in self.params] + \
+                [f'free(v_{n}__np);' for n, t in self.env.items() if t.kind == 'list' and t.elem.np == 'dyn' and n not in self.params] + \
                 [f'free({o});' for o, _ in self.owned]
         self.lines[decl_at:decl_at] = ['    ' + f'{ct} *{o} = NULL;' for o, ct in self.owned]
         self.lines.append('sj_done:')
@@ -3300,6 +3325,14 @@ class Compiler:
                 for b in s.orelse:
                     self.stmt(b)
                 self.close()
+        elif isinstance(s, ast.Return) and self.ret.kind == 'list':
+            name = s.value.id
+            if name in self.params:          # the list passed in, which Python returns itself
+                self.emit(f'sj_io[5] = {self.params.index(name) + 1};')
+            else:                            # its memory is the caller's now: copied into a list, then released
+                self.helpers.add('np_make')
+                self.emit(f'sj_io[0] = (int64_t)(uintptr_t)v_{name}; sj_io[4] = v_{name}__n; sj_io[5] = 0; v_{name} = NULL;')
+            self.emit('goto sj_done;')
         elif isinstance(s, ast.Return) and self.ret.kind == 'array':
             self.return_array(s.value, 0)
             self.emit('goto sj_done;')
@@ -3383,6 +3416,12 @@ class Compiler:
             self.stmt(b)
         self.loops.pop()
         self.close()
+
+    def written_lists(self):
+        """The positions of the list parameters this function stores into, which the call copies back."""
+        stored = {n.value.id for n in ast.walk(self.f) if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store)
+                  and isinstance(n.value, ast.Name)}
+        return {i for i, p in enumerate(self.params) if self.env[p].kind == 'list' and p in stored}
 
     def sinkable_flags(self, s):
         """Variables of this for loop whose numpy flag can be set once after it instead of on each iteration, which keeps a

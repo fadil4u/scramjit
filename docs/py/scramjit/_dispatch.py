@@ -1,8 +1,10 @@
 """The @scram decorator: signatures, the compile cache, the call boundary and fallback."""
 
+import array
 import ast
 import copy
 import enum
+import math
 import functools
 import inspect
 import struct
@@ -72,6 +74,13 @@ def _arg_type(x):
         return T.FLOAT
     if t is bool:
         return T.BOOL
+    if t is list:                            # copied into an array at the call, and back if written
+        kinds = set(map(type, x))                 # in C: a list of 200,000 in about 2 ms
+        if len(kinds) != 1 or kinds.pop() not in (int, float, bool):
+            return None
+        if type(x[0]) is int and not (-(1 << 63) <= min(x) and max(x) < 1 << 63):
+            return None
+        return T.list_of({int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(x[0])])
     if t is tuple:
         elems = [_arg_type(v) for v in x]
         if not elems or any(e is None or not T.is_number_tree(e) or e is T.U64 or (e.kind == 'tuple' and T.U64 in T.leaves(e)) for e in elems):
@@ -175,6 +184,8 @@ def _push(cargs, x, t):
     if t.kind == 'enum':
         cargs.append(x._value_)
         return
+    if t.kind == 'list':
+        raise AssertionError('lists are passed by _run, which copies them back')
     if t.kind == 'array' and t.strided:
         cargs.append(x.ctypes.data)
         cargs.extend(x.shape)
@@ -218,13 +229,29 @@ class _Python:
 PYTHON = _Python()
 
 
+_LIST_CODES = {'int': 'q', 'float': 'd', 'bool': 'i'}      # a list's element type -> its array, as the kernel's C type
+
+
+def _copy_back(lst, a, et):
+    """Into a list passed in, the elements the kernel changed: the others stay the very objects they were."""
+    for k, v in enumerate(a):
+        old = lst[k]
+        if et is T.FLOAT:
+            if old == v and math.copysign(1.0, old) == math.copysign(1.0, v) or (old != old and v != v):
+                continue
+        elif old == v:
+            continue
+        lst[k] = bool(v) if et is T.BOOL else v
+
+
 class Compiled:
-    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun', 'outs',
+    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun', 'outs', 'lists',
                  'counts', 'count_lines', 'count_heads', 'count_rest', 'array_args', 'records', 'io_size', 'free', 'frames', 'tb_at')
 
     def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None, stop=False, rerun=False):
         self.rerun = rerun
         self.outs = []                        # written dict keys: (argument index, key, byte in io, type)
+        self.lists = set()                    # the arguments that are lists the kernel writes
         self.counts = None                    # preflight --counts: the int64 counters the kernel adds to
         self.count_lines, self.count_heads, self.count_rest = (), {}, {}
         self.checks, self.hoisted, self.gotchas, self.stop = checks or {}, hoisted, gotchas or {}, stop
@@ -287,7 +314,7 @@ def _make_plan(f, entry, args):
     path. It's generated because a call is where the time goes: what's known from the types is decided
     here, once. Anything it can't vouch for at call time (an int past 64 bits, an array of another
     dtype, dimension or layout, an empty one) goes to f._slow, so plans change only speed."""
-    if entry.counts is not None:
+    if entry.counts is not None or entry.ret.kind == 'list':
         return f._slow_call
     env = {'kernel': entry.kernel, 'slow': f._slow, 'failed': f._failed, 'box': f._box, 'ret': entry.ret, 'pool': [], 'compiled': entry,
            'addressof': ctypes.addressof, 'from_buffer': ctypes.c_char.from_buffer, 'bytearray': bytearray, 'memoryview': memoryview}
@@ -317,7 +344,7 @@ def _make_plan(f, entry, args):
             env[f'd{i}'] = x.dtype
             cargs.append(f'p{i}' if x.flags.writeable else n)
             cargs.extend(f's{i}[{k}]' for k in range(x.ndim))
-        elif t.kind == 'tuple':
+        elif t.kind in ('tuple', 'list'):
             return f._slow_call
         elif t.kind == 'dict':
             if not all(ft.is_number for _, ft in t.elem):
@@ -754,6 +781,7 @@ class Function:
         entry = Compiled(kernel, c.ret, key, source, _libm_table() if c.uses_libm else None,
                          c.shown_types(), c.checks, c.hoisted_lines, c.gotchas, c.uses_stop, c.uses_rerun)
         entry.outs = [(i, k, 8 * c.out_slot(n), c.env[flat]) for n, (flat, i, k) in enumerate(c.outs)]
+        entry.lists = c.written_lists()
         entry.array_args = c.array_args
         entry.records = [(8 * c.record_slot(k), struct.Struct(f'<{array_record_slots(t)}q'), t.elem.name[3:]) for k, t in enumerate(ret_arrays(c.ret))]
         if entry.records:
@@ -765,7 +793,7 @@ class Function:
         if c.calls:                      # room for the trace of a failed call
             entry.tb_at = entry.io_size
             entry.io_size += 8 * (1 + len(c.unit.frames))
-        entry.free = module.sj_release if c.makes else None
+        entry.free = getattr(module, 'sj_release', None) if c.makes or c.ret.kind == 'list' else None
         if counts:
             entry.counts = bytearray(8 * max(len(c.count_lines), 1))
             entry.count_lines, entry.count_heads, entry.count_rest = c.count_lines, c.count_heads, c.count_rest
@@ -774,6 +802,9 @@ class Function:
     def _key(self, args):
         """The signature of a call. A dict's type is the keys this function uses: nothing else in it matters."""
         key = tuple(map(_arg_type, args))
+        lists = [id(x) for x in args if type(x) is list]
+        if len(set(lists)) != len(lists):        # one list under two names: a copy each would hide the writes
+            key = tuple(None if type(x) is list else t for x, t in zip(args, key))
         if not self._dict_keys or dict not in map(type, args):
             return key
         seen, out = set(), list(key)
@@ -799,7 +830,13 @@ class Function:
 
     def _run(self, entry, args):
         cargs = []
-        for x, t in zip(args, entry.types):
+        copies = []
+        for i, (x, t) in enumerate(zip(args, entry.types)):
+            if t.kind == 'list':
+                a = array.array(_LIST_CODES[t.elem.name], x)
+                copies.append((i, a))
+                cargs += [a.buffer_info()[0], len(a)]
+                continue
             _push(cargs, x, t)
         if entry.libm is not None:
             cargs.append(entry.libm)
@@ -809,6 +846,9 @@ class Function:
             cargs.append(entry.counts)
         io = bytearray(entry.io_size)
         status = entry.kernel(*cargs, io)
+        for i, a in copies:                       # what was written, even before an exception, as Python would have
+            if i in entry.lists:
+                _copy_back(args[i], a, entry.types[i].elem)
         if status == RERUN and entry.rerun:
             return self._py(*self._real(args))
         for i, key, at, ot in entry.outs:
@@ -822,7 +862,27 @@ class Function:
             return self._array_result(entry, io, args)
         if r.kind == 'tuple':
             return self._box_tuple(io, r)
+        if r.kind == 'list':
+            return self._list_result(entry, io, args)
         return self._box(io, 0, 16, r)
+
+    def _list_result(self, entry, io, args):
+        """A returned list: the argument itself, or a new list of what the kernel built, whose memory is then released."""
+        q = struct.unpack_from('<6q', io, 0)
+        if q[5]:
+            return args[q[5] - 1]
+        address, n = q[0], q[4]
+        et = entry.ret.elem
+        try:
+            if not n:
+                return []
+            import ctypes
+            code = _LIST_CODES[et.name]
+            values = memoryview((ctypes.c_char * (n * struct.calcsize(code))).from_address(address)).cast('B').cast(code).tolist()
+            return [bool(v) for v in values] if et is T.BOOL else values
+        finally:
+            if address:
+                entry.free(address)
 
     def _box_tuple(self, io, r, at=None):
         """A returned tuple of numbers, nested ones too: each number has its pair of slots, in order."""

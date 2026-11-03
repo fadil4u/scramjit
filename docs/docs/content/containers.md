@@ -122,9 +122,25 @@ def blur3(src, dst):
         dst[i] = w[0] * src[i - 1] + w[1] * src[i] + w[2] * src[i + 1]
 ```
 
-## Lists passed in from Python
+## Lists passed in, returned, and at module level (from 0.0.4)
 
-A homogeneous numeric list argument is copied into an array at the call and copied back if the function mutated it. That is O(n) per call, so pass large data as numpy arrays.
+A list argument whose elements are all ints, all floats or all bools is copied into C memory at the call. If the function writes to it, the elements that changed are copied back, also when it raises, so the caller sees what Python would have left; the others stay the very objects they were. Lists at module level work the same way.
+
+```python
+@scram
+def rolling_max(prices, window: int):
+    out = [0.0] * (len(prices) - window + 1)
+    for i in range(len(out)):
+        m = prices[i]
+        for j in range(i + 1, i + window):
+            m = prices[j] if prices[j] > m else m
+        out[i] = m
+    return out          # a new Python list
+```
+
+Returning a list built in the function gives a new Python list; returning the list passed in gives that list itself. The copies cost about 10 ms per 200,000 floats, so a large list is still better passed as a numpy array, and a call that only adds numbers up may not pay for them.
+
+Still Python: an empty list (its element type isn't known), mixed ints and floats, numpy scalars as elements, the same list passed twice, storing a float into a list of ints, lists of lists, and `append` and the other methods that resize.
 
 ## Dicts with fixed keys
 

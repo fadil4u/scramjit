@@ -179,7 +179,8 @@ def options(fdef):
 def assumed_signature(fdef, globals_=None, seen=()):
     """Argument types from annotations; the rest are assumed to be numbers or float64 arrays, by how
     the function uses them, or by how a function it passes them to does."""
-    ann = {'float': T.FLOAT, 'int': T.INT, 'bool': T.BOOL}
+    ann = {'float': T.FLOAT, 'int': T.INT, 'bool': T.BOOL, 'list[float]': T.list_of(T.FLOAT), 'list[int]': T.list_of(T.INT),
+           'list[bool]': T.list_of(T.BOOL)}
     ndim = {}
     passed_ints = set()
     passed_tuples = {}

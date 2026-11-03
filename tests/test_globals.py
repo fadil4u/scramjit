@@ -328,7 +328,7 @@ def assigns_global(x):
 def test_what_stays_python_stays_right():
     same(uses_text, X, compiled=False)
     same(uses_none, X, compiled=False)
-    same(uses_list, 1, compiled=False)
+    same(uses_list, 1, compiled=True)          # a list of numbers at module level compiles, from 0.0.4
     same(calls_a_global, X, compiled=False)
     same(undefined, X, compiled=False)
     same(conditionally_undefined, X, True, compiled=False)

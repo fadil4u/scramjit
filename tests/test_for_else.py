@@ -281,3 +281,70 @@ def test_lifted_loop_with_an_else():
     for t in (3.0, 99.0):
         g = same(lifted, X, t, 'a')
         assert g._native_loops()
+
+
+# while True: only its breaks lead past it, so what every break has assigned is assigned after it.
+
+def draw(seed):
+    x = seed
+    while True:
+        x = (x * 1103515245 + 12345) % 2147483648
+        ds = x % 31
+        if ds >= 17:
+            break
+    return ds, x
+
+
+def early_break(a, t):             # one break comes before v is assigned: still Python
+    i = 0
+    while True:
+        if i >= len(a):
+            break
+        v = a[i]
+        if v > t:
+            break
+        i += 1
+    return v
+
+
+def inner_break(a, t):             # the inner loop's break doesn't leave the while
+    n = 0
+    while True:
+        for v in a:
+            if v > t:
+                break
+        n += 1
+        last = n * 2
+        if n > 3:
+            break
+    return last, n
+
+
+def only_returns(a, t):
+    i = 0
+    while True:
+        if a[i] > t:
+            return a[i]
+        i += 1
+
+
+def strict(f, *args, compiled=True):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        g = scram(cache=False)(f)
+        assert comparable(outcome(g, list(args))) == comparable(outcome(f, list(args)))
+    assert bool(g.signatures) == compiled, (f.__name__, [str(m.message) for m in w])
+    return [str(m.message) for m in w]
+
+
+def test_while_true_assigns_what_every_break_has():
+    for seed in (1, 5, 99):
+        strict(draw, seed)
+    strict(inner_break, X, 2.5)
+    strict(only_returns, X, 2.5)
+    strict(only_returns, X, 9.0)               # IndexError, as in Python
+
+
+def test_a_break_before_the_assignment_keeps_it_python():
+    msgs = strict(early_break, X, 2.5, compiled=False)
+    assert any('v may be read before it is assigned' in m for m in msgs), msgs

@@ -5301,6 +5301,11 @@ def da_stmt(c, s, assigned):
         c.da_breaks.append([])
         da_block(c, s.body, inside)
         breaks = c.da_breaks.pop()
+        if isinstance(s, ast.While) and isinstance(s.test, ast.Constant) and s.test.value is True:
+            out = ALL                             # while True: only the breaks lead past it, and none means never
+            for b in breaks:
+                out = b if out is ALL else out & b
+            return out
         if not s.orelse:
             return assigned
         out = da_block(c, s.orelse, set(assigned))    # only the else and the breaks lead past this loop

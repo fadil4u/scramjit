@@ -268,6 +268,8 @@ Spills per line, once cimo can report them.
 5. **Loop lifting, what's left:** a loop stays in Python if a variable read afterwards may be unbound
    (`for i ...` then reading `i`, with nothing assigned first), inside `try` or `with`, or containing `return`.
    "Partly compiled" is per function, not per signature. Tracebacks show one extra frame for a loop that raises.
+   The first two are hard for one reason: compiled code has static types. A name the loop may leave unbound has no
+   value of any type to come back as, and a `return` inside means returning either its value or the loop's outputs.
 6. **numpy calls in compiled functions:** `x * 2` and other whole-array arithmetic still run as Python.
    No cimo work is required for any step; its SIMD only adds speed. In this order:
    - **numpy functions on single numbers: built.** See `loops-and-builtins.md`. Left in Python: `np.tanh` and `np.power`, which aren't libm's, and
@@ -340,9 +342,7 @@ Spills per line, once cimo can report them.
     machine. The cause is bounds-check versioning: a planner over the same world is 4,410 lines of C and 205 loops
     with checks (16.4 s in cimo), 1,611 lines and 50 loops without (2.5 s). Limit how many copies versioning makes
     in one function. Compile time decides whether generated code is practical, since each candidate compiles once.
-17. **A name assigned in `while True` isn't seen as assigned after the loop.** `while True: ds = f(); if ds >= 17: break`, then
-    reading `ds`, gives "ds may be read before it is assigned". Every way out of such a loop passes the assignment.
-18. **scramjit against Numba and Cython: measure, then close the gaps.** The README compares with
+17. **scramjit against Numba and Cython: measure, then close the gaps.** The README compares with
     CPython and hand-written C; the question everyone will ask is how it compares with what they use
     today. `bench/compare.py`, run on x86-64 Linux and arm64 Linux (an investor's or a reviewer's machine
     is x86), reported as one table in the README and the site:
@@ -360,7 +360,7 @@ Spills per line, once cimo can report them.
       behind a check at load), bounds checks that Numba drops by proving ranges (#3 above), call overhead
       (1.4 µs against Numba's about 0.3 µs; a typed fast path in `_dispatch`).
     - Keep the script runnable by anyone: `pip install numba cython` are dev extras, never dependencies.
-19. **Compile time.** A first call costs seconds, not the 0.1 s the README's `ema` example suggests: 0.53 s
+18. **Compile time.** A first call costs seconds, not the 0.1 s the README's `ema` example suggests: 0.53 s
     on Gray-Scott, 0.76 s native and 1.75 s in Pyodide for the LLM demo's forward pass, 3 s for a 200-line
     generated loop and up to 15 s with bounds-check versioning (#16). Every candidate in a generated-code
     workflow compiles once, so this decides what's practical. An optimization pass on the compiler
@@ -374,18 +374,16 @@ Spills per line, once cimo can report them.
       previous compile shouldn't redo their work; ask for a per-process cache of parsed headers and the
       prelude, or pass them pre-parsed.
     - Target: under 0.3 s warm for a 100-line function natively, under 1 s in Pyodide.
-20. **Split `_compiler.py` into a package.** 4.8k lines holding every lowering in one file. Make
+19. **Split `_compiler.py` into a package.** 4.8k lines holding every lowering in one file. Make
     `scramjit/_compiler/` with one module per concern, in the order the compile runs: `infer` (types),
     `index` (indexing, views, slices), `checks` (bounds checks and versioning), `calls` (`@scram` and C
     callees, inlining), `reduce` (builtins and numpy reductions), `make` (arrays and containers made
     inside a function), `emit` (C text). No behavior change: the suite and `bench/` are the gate, and
     the `docs/py/scramjit` copy is regenerated, not edited.
-21. **Adversarial code reading before a public launch.** `_compiler.py` (4.8k lines) and `_dispatch.py`
+20. **Adversarial code reading before a public launch.** `_compiler.py` (4.8k lines) and `_dispatch.py`
     were written in days and no one has read them end to end. The parity tests check results; a read
     checks what they can't: a lowering that is right for every tested type combination and wrong for
     one the generator never produces, a bounds check hoisted when it shouldn't be, a fallback that
     silently changes semantics. Read `_compiler.py` by lowering (indexing and views first, then
     bounds-check versioning, then calls), and record what was checked and found here.
-22. **Commit subjects are paragraphs.** `git log --oneline` is unreadable. One line of at most 72
-    characters, then a blank line, then the detail (add the rule to `AGENTS.md`).
-23. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has. Little to win: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, which leaves temporary arrays.
+21. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has. Little to win: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, which leaves temporary arrays.

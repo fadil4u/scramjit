@@ -175,3 +175,20 @@ def comprehensions(p):
 
 def test_comprehensions_over_tuples():
     strict(comprehensions, (1.5, 4.0))
+
+
+@scram
+def corners(x: float):
+    return ((x, 0.0), (x * 2, 1.0)), 7
+
+
+@scram
+def use_corners(x: float):
+    ((a, b), (c, d)), n = corners(x)
+    return a + b + c + d + n
+
+
+def test_a_nested_tuple_from_a_compiled_function():
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', FallbackWarning)
+        assert use_corners(1.5) == use_corners.__wrapped__(1.5)

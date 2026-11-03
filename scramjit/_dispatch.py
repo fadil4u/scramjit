@@ -889,7 +889,7 @@ class Function:
             if k not in d:
                 return None              # Python raises KeyError, at the right moment
             t = _arg_type(d[k])
-            if t is None or t is T.U64:
+            if t is None or t is T.U64 or t.kind == 'list' or T.is_pylist(t):     # a list in a dict: no copy back yet
                 return None
             fields.append((k, t))
         return T.dict_of(fields)

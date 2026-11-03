@@ -492,3 +492,15 @@ def test_the_fast_path_with_big_ints_and_numpy_values():
             warnings.simplefilter('ignore', FallbackWarning)
             assert outcome(g, [a, X])[:2] == outcome(writes, [b, X])[:2]
         assert state(a) == state(b)
+
+
+def test_a_list_in_a_dict_runs_as_python():
+    """A list value can't be copied back through the dict yet: that call runs as Python, with Python's result."""
+    def f(p):
+        p['xs'][0] += 1.0
+        return p['xs'][0]
+    g = scram(cache=False)(f)
+    d1, d2 = {'xs': [1.0, 2.0]}, {'xs': [1.0, 2.0]}
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        assert g(d1) == f(d2) and d1 == d2

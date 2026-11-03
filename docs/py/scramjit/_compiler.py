@@ -1972,14 +1972,29 @@ class Compiler:
         """For a call returning a tuple: for each element, the variable holding its array, or (value, flag)."""
         c, io, arrays = self.emit_call(e)
         out, k = [], 0
+        at = [0]                                   # the pair of slots each number came back in, nested tuples too
+
+        def numbers(t):
+            vals = []
+            for et in t.elem:
+                if et.kind == 'tuple':
+                    vals.append(numbers(et))
+                else:
+                    vals.append(self.number_result(et, io, 4 + 2 * at[0], 5 + 2 * at[0]))
+                    at[0] += 1
+            return vals
         for i, et in enumerate(c.ret.elem):
             if et.kind == 'array':
                 name = self.result_name(e, i)
                 self.take_array(name, et, c, io, k, arrays)
                 out.append(name)
                 k += 1
+                at[0] += 1
+            elif et.kind == 'tuple':
+                out.append(numbers(et))
             else:
-                out.append(self.number_result(et, io, 4 + 2 * i, 5 + 2 * i))
+                out.append(self.number_result(et, io, 4 + 2 * at[0], 5 + 2 * at[0]))
+                at[0] += 1
         return out
 
     def call_statement(self, e):

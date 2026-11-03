@@ -4,43 +4,46 @@ A compiled function returns what CPython returns for the same function undecorat
 
 ## Results that differ from Python
 
-### A negative exponent on `n ** k` raises
+### A negative exponent on `n ** k` raises, in a function that writes
 
-If `n` and `k` are ints and `k` isn't a constant, `n ** k` compiles to an int. A negative `k` raises `ValueError`:
+If `n` and `k` are ints and `k` isn't a constant, `n ** k` compiles to an int, and Python's result is an int or a float depending on the sign of `k`. Compiled code has one type per expression, so a negative `k` can't give Python's float.
+
+In a function that writes nothing (no stores into arrays, lists or dicts, no calls to other compiled functions or C), that call starts again as Python, which gives its own result:
 
 ```python
 @scram
 def power(n: int, k: int):
     return n ** k
 
-power(2, 3)     # 8, as in Python
-power(2, -1)    # ValueError; Python returns 0.5
-power(0, -1)    # ValueError; Python raises ZeroDivisionError
+power(2, 3)     # 8, compiled
+power(2, -1)    # 0.5, as Python: the call ran as Python
+power(0, -1)    # ZeroDivisionError, as Python
 ```
 
-Compiled code has one type per expression, and Python's result here is an int or a float depending on the sign of `k`. We chose to compile it and raise in the rare case, because `n ** k` is too common to run as Python and `k` is almost never negative. numpy makes the same choice for its integers. It's an error, never a wrong answer.
+A function that has written something can't start again, so there a negative `k` raises `ValueError`. We chose to compile it and raise in the rare case, because `n ** k` is too common to run as Python and `k` is almost never negative. numpy makes the same choice for its integers. It's an error, never a wrong answer.
 
 If `k` can be negative, write `float(n) ** k`, which always gives a float and compiles. A constant exponent is exact: `n ** 2` is an int and `n ** -1` is a float, as in Python. `scramjit preflight` adds a note to each line this applies to:
 
 ```text
   ✓ power  compiled
-      note: line 3 raises ValueError if the exponent is negative, where Python gives a float
+      note: line 3 runs as Python if the exponent is negative
 ```
 
-### A negative base to a fractional power raises
+### A negative base to a fractional power raises, in a function that writes
 
-On a Python float, `x ** 0.5` and `x ** y` compile to a float. Where Python's result would be a complex, they raise `ValueError`:
+On a Python float, `x ** 0.5` and `x ** y` compile to a float. Where Python's result would be a complex, a function that writes nothing runs that call as Python, as above, and one that writes raises `ValueError`:
 
 ```python
 @scram
-def root(x: float):
+def root(x: float, out):
+    out[0] = x
     return x ** 0.5
 
-root(4.0)       # 2.0, as in Python
-root(-8.0)      # ValueError; Python returns (1.7319121124709868e-16+2.8284271247461903j)
+root(4.0, a)    # 2.0, as in Python
+root(-8.0, a)   # ValueError; Python returns (1.7319121124709868e-16+2.8284271247461903j)
 ```
 
-As with `n ** k`, compiled code has one type per expression, and this is an error, never a wrong answer. (Where Python's complex result would itself overflow, Python raises `OverflowError`; compiled code still raises `ValueError`.) An integer exponent is exact, as in Python: `x ** 2`, `x ** n` and `(-8.0) ** 3.0` work. So is a nonnegative constant base: `2.0 ** x` never raises this.
+As with `n ** k`, this is an error, never a wrong answer. (Where Python's complex result would itself overflow, Python raises `OverflowError`; compiled code still raises `ValueError`.) An integer exponent is exact, as in Python: `x ** 2`, `x ** n` and `(-8.0) ** 3.0` work. So is a nonnegative constant base: `2.0 ** x` never raises this.
 
 numpy values follow numpy's rules: `a[i] ** 0.5` on a negative element is `nan`, in Python and compiled alike. With `@scram(parity=False)`, `x ** 0.5` is `nan` too. If you need the complex result, leave the function undecorated. `scramjit preflight` adds a note to each line this applies to.
 

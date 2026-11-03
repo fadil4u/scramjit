@@ -5,8 +5,8 @@ A compiled function returns what CPython returns for the same function undecorat
 | Topic | Python | C | scramjit |
 | --- | --- | --- | --- |
 | Integer size | unbounded | fixed | `int64` unless narrowed; overflow wraps ([gotcha](gotchas.md#integers-are-64-bit-and-wrap)) |
-| `n ** k`, `k` a negative variable | a float | a C `pow` or a loop | raises `ValueError` ([gotcha](gotchas.md#a-negative-exponent-on-n-k-raises)) |
-| `x ** 0.5`, `x` a negative float | a complex | `nan` | raises `ValueError` ([gotcha](gotchas.md#a-negative-base-to-a-fractional-power-raises)) |
+| `n ** k`, `k` a negative variable | a float | a C `pow` or a loop | Python's, rerun as Python; raises `ValueError` in a function that writes ([gotcha](gotchas.md#a-negative-exponent-on-n-k-raises-in-a-function-that-writes)) |
+| `x ** 0.5`, `x` a negative float | a complex | `nan` | Python's, rerun as Python; raises `ValueError` in a function that writes ([gotcha](gotchas.md#a-negative-base-to-a-fractional-power-raises-in-a-function-that-writes)) |
 | `//` and `%` | round toward negative infinity | truncate toward zero | Python's rule |
 | Negative indices | count from the end | out of bounds | Python's rule |
 | Bounds checks | always | never | on, raising `IndexError`; `boundscheck=False` drops them |

@@ -7,6 +7,7 @@ import sys
 import warnings
 
 import numpy as np
+import pytest
 
 from scramjit import FallbackWarning, scram
 
@@ -157,7 +158,10 @@ def main():
         for args in cases:
             checked += 1
             a, b = outcome(f, args), outcome(g, args)
-            # the documented difference: an error, never a wrong answer (including where Python's complex overflows)
+            # the documented difference: an error, never a wrong answer (including where Python's complex overflows),
+            # unless the function writes nothing and the call ran as Python
+            if a == b:
+                continue
             if a[0] == 'complex' or a == ('OverflowError', 'complex exponentiation'):
                 if b[0] == 'ValueError' and 'gives a complex' in b[1]:
                     raised += 1
@@ -184,17 +188,42 @@ def test_pow_matches_cpython():
     assert main() == []
 
 
-def test_negative_exponent_is_the_documented_difference():
-    """The one place ** differs from Python: an error, never a wrong answer."""
+def test_negative_exponent_reruns_as_python():
+    """A function that writes nothing runs as Python where ** would differ: Python's float, or its error."""
     for f in (i_var, i_var_aug, i_builtin_var):
         g = scram(f, fallback=False)
-        for n, k in ((2, -1), (0, -1), (-3, -2), (1, -(1 << 62))):
-            try:
-                g(n, k)
-            except ValueError as e:
-                assert 'negative k' in str(e) and 'float(n) ** k' in str(e)
-            else:
-                raise AssertionError((f.__name__, n, k))
+        for n, k in ((2, -1), (0, -1), (-3, -2), (1, -(1 << 62)), (2, 3)):
+            assert outcome(g, [n, k]) == outcome(f, [n, k]), (f.__name__, n, k)
+
+
+def i_var_writes(n: int, k: int, out):
+    out[0] = 1.0
+    return n ** k
+
+
+def f_root_writes(x: float, out):
+    out[0] = 1.0
+    return x ** 0.5
+
+
+def f_root(x: float):
+    return x ** 0.5
+
+
+def test_negative_exponent_is_the_documented_difference():
+    """A function that has written something can't start again: an error, never a wrong answer."""
+    g = scram(i_var_writes, fallback=False)
+    for n, k in ((2, -1), (0, -1), (-3, -2)):
+        try:
+            g(n, k, np.zeros(1))
+        except ValueError as e:
+            assert 'negative k' in str(e) and 'float(n) ** k' in str(e)
+        else:
+            raise AssertionError((n, k))
+    with pytest.raises(ValueError, match='complex'):
+        scram(f_root_writes, fallback=False)(-4.0, np.zeros(1))
+    for x in (-4.0, 4.0, -0.0):
+        assert outcome(scram(f_root, fallback=False), [x]) == outcome(f_root, [x])
 
 
 def test_the_rewrite_in_the_message_works():

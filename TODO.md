@@ -319,9 +319,9 @@ Spills per line, once cimo can report them.
 10. **Rest of M3:** run the M0 kernels in Pyodide as a test, not only through the site; preflight's
    per-loop report once cimo exposes one (cimo's `TODO.md`), and a `disk` label in the compile column,
    which needs cimo to say whether a compile hit its cache.
-11. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x` raise today** (see Gotchas). Rerunning
-   in Python, for functions that write nothing, or resuming in Python alongside loop lifting would remove
-   the difference.
+11. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x`, what's left:** a function that writes nothing
+   reruns the call as Python there. One that writes still raises: resuming in Python alongside loop lifting would remove
+   that difference too.
 12. **A NaN's sign differs from CPython's on Windows** (arm64, and x86-64 under emulation). `inf % 1.0`, `inf // 1.0`
    and `math.atan2(0.0, nan)` give `7ff8...` where CPython gives `fff8...`, and `nan * -1` gives `fff8...`
    where it gives `7ff8...`; `tests/test_m1.py` and `test_m2.py` fail there on these, 7 in all. The values are

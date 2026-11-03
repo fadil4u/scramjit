@@ -250,7 +250,7 @@ def test_a_complex_power_is_flagged_only_when_possible(tmp_path):
     (tmp_path / 'p.py').write_text('from scramjit import scram\n@scram\ndef f(x: float):\n    return x ** 0.5\n'
                                    '@scram\ndef g(x: float):\n    return x ** 2 + 2.0 ** x\n')
     out = run(['-m', 'scramjit', 'preflight', 'p.py'], tmp_path).stdout
-    assert 'line 4 raises ValueError if the base is negative' in out
+    assert 'line 4 runs as Python if the base is negative' in out
     assert 'line 7' not in out and '2 compiled' in out
 
 
@@ -262,12 +262,12 @@ def test_a_function_with_no_loop_is_noted(tmp_path):
 
 
 def test_differences_from_python_are_flagged(tmp_path):
-    (tmp_path / 'p.py').write_text('from scramjit import scram\n@scram\ndef f(n: int, k: int):\n    return n ** k\n')
+    (tmp_path / 'p.py').write_text('from scramjit import scram\n@scram\ndef f(n: int, k: int, out):\n    out[0] = 1\n    return n ** k\n')
     r = run(['-m', 'scramjit', 'preflight', 'p.py'], tmp_path)
-    assert r.returncode == 0 and 'note: line 4 raises ValueError if the exponent is negative' in r.stdout
+    assert r.returncode == 0 and 'note: line 5 raises ValueError if the exponent is negative' in r.stdout
     assert 'raises ValueError' in run(['-m', 'scramjit', 'preflight', 'p.py:f'], tmp_path).stdout
     d = json.loads(run(['-m', 'scramjit', 'preflight', '--json', 'p.py'], tmp_path).stdout)
-    assert d['files'][0]['functions'][0]['differences'][0]['line'] == 4
+    assert d['files'][0]['functions'][0]['differences'][0]['line'] == 5
 
 
 def test_quiet(proj):

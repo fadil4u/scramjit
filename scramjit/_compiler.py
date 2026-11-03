@@ -1208,7 +1208,8 @@ class Compiler:
         exp = const_number(node.right if isinstance(node, ast.BinOp) else node.value)
         if r.kind == 'int':
             if exp is None:
-                self.gotcha(node, 'raises ValueError if the exponent is negative, where Python gives a float')
+                self.gotcha(node, 'runs as Python if the exponent is negative' if self.writes_nothing()
+                            else 'raises ValueError if the exponent is negative, where Python gives a float')
                 return r
             if exp >= 0:
                 return r
@@ -1218,8 +1219,30 @@ class Compiler:
         base = const_number(node.left) if isinstance(node, ast.BinOp) else None
         integral = b.kind != 'float' or (exp is not None and (exp != exp or abs(exp) == math.inf or exp == math.floor(exp)))
         if self.exact and not integral and not (base is not None and base >= 0):
-            self.gotcha(node, 'raises ValueError if the base is negative, where Python gives a complex')
+            self.gotcha(node, 'runs as Python if the base is negative' if self.writes_nothing()
+                        else 'raises ValueError if the base is negative, where Python gives a complex')
         return r
+
+    def writes_nothing(self):
+        """Does this function leave no trace a rerun from the start could double: no stores into arrays, lists or dicts,
+        no calls to compiled functions or C? Then where it would differ from Python it can ask for the call to run as
+        Python instead (RERUN, through sj_fail, which frees what it made). Not a callee: its caller has done things."""
+        if getattr(self, 'cname', 'sj_kernel') != 'sj_kernel' or self.hidden_map or self.counts:
+            return False
+        for n in ast.walk(self.f):
+            if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store):
+                return False
+            if isinstance(n, ast.Call) and (self.callee_of(n) is not None or self.c_function_of(n) is not None):
+                return False
+        return True
+
+    def differs(self, line, message):
+        """The C for where this function's result would differ from Python's (VALUE_ERROR_MESSAGES[message]): run the
+        call as Python if nothing can tell, else raise."""
+        if self.writes_nothing():
+            self.uses_rerun = True
+            return f'SJ_FAIL({RERUN}, {line}, 0, 0);'
+        return f'SJ_FAIL({VALUE_ERROR}, {line}, {message}, 0);'
 
     def gotcha(self, node, text):
         """Note that this line can differ from Python, for preflight."""
@@ -4509,7 +4532,7 @@ class Compiler:
             if rt.kind == 'int':
                 self.helpers.add('ipow')
                 if const_number(right) is None:
-                    self.emit(f'if ((int64_t){b} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 16, 0);')
+                    self.emit(f'if ((int64_t){b} < 0) {self.differs(line, 16)}')
                 self.emit(f'{out} = sj_ipow((int64_t){a}, (int64_t){b});')
             elif not self.exact:
                 fast()
@@ -4519,7 +4542,7 @@ class Compiler:
                 self.emit(f'int {err} = sj_float_pow({table}, {fa}, {fb}, &{out});')
                 self.emit(f'if ({err} == 1) SJ_FAIL({ZERO_DIVISION}, {line}, 6, 0);')
                 self.emit(f'if ({err} == 2) SJ_FAIL({OVERFLOW_ERROR}, {line}, 4, 0);')
-                self.emit(f'if ({err} == 3) SJ_FAIL({VALUE_ERROR}, {line}, 17, 0);')
+                self.emit(f'if ({err} == 3) {self.differs(line, 17)}')
         if npf == '1':
             numpy()
         elif npf == '0':
@@ -4600,7 +4623,7 @@ class Compiler:
         elif op == 'Pow':
             self.helpers.add('ipow')
             if const_number(right) is None or const_number(right) < 0:
-                self.emit(f'if ((int64_t)({b}) < 0) SJ_FAIL({VALUE_ERROR}, {line}, 16, 0);')
+                self.emit(f'if ((int64_t)({b}) < 0) {self.differs(line, 16)}')
             r = f'sj_ipow((int64_t)({a}), (int64_t)({b}))'
         else:
             r = f'sj_{op.lower()[:3]}((int64_t)({a}), (int64_t)({b}))'

@@ -117,8 +117,9 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | numpy functions on single numbers: `np.sqrt(x[i])`, `np.sin`, `np.minimum` | numpy calls that make arrays: `np.sqrt(x)`, `x.sum(axis=0)` |
 | numpy reductions to one number: `x.sum()`, `np.max(m[i])`, `x.std()`, `x.argmax()` | `np.dot`, `np.linalg` |
 
-`**` compiles. Where Python's result would change type, it raises `ValueError`: a negative `k` in
-`n ** k` (Python gives a float) and a negative float `x` in `x ** 0.5` (Python gives a complex).
+`**` compiles. Where Python's result would change type, a negative `k` in `n ** k` (Python gives a
+float) or a negative float `x` in `x ** 0.5` (a complex), the call runs as Python if the function writes
+nothing, and raises `ValueError` if it does.
 
 A function that can't be compiled runs as Python, with a `FallbackWarning` giving the reason:
 
@@ -186,7 +187,7 @@ generated expressions. This covers floor division and modulo on negatives, `Zero
 `IndexError`, `math` domain errors and numpy's scalar rules.
 
 There are three exceptions: integers are 64-bit and wrap, and the two `**` cases above raise
-`ValueError`. Compiled calls also skip numpy's warnings and `errstate`, are invisible to debuggers and
+`ValueError` in a function that writes. Compiled calls also skip numpy's warnings and `errstate`, are invisible to debuggers and
 coverage, and cost about 1.4 µs each from Python, so a loop should be compiled too, not only a small helper. See
 [Gotchas](https://www.scramjit.dev/docs/?p=gotchas).
 

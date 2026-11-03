@@ -140,7 +140,9 @@ def rolling_max(prices, window: int):
 
 Returning a list built in the function gives a new Python list; returning the list passed in gives that list itself. The copies cost about 10 ms per 200,000 floats, so a large list is still better passed as a numpy array, and a call that only adds numbers up may not pay for them.
 
-Still Python: an empty list (its element type isn't known), mixed ints and floats, numpy scalars as elements, the same list passed twice, storing a float into a list of ints, lists of lists, and `append` and the other methods that resize.
+A rectangular list of lists works too, read with `m[i][j]` and written back the same way. A row, `row = m[i]` or `for row in m`, is a reference, as in Python, so writing `row[j]` changes `m`. A row whose numbers changed is replaced in one go, so its unchanged numbers become equal new objects. Copying costs about 100 ns per number each way: Floyd-Warshall on a 150x150 list of lists is 20x Python, while a single cheap pass over one gains nothing.
+
+Still Python: an empty list (its element type isn't known), mixed ints and floats, numpy scalars as elements, the same list passed twice or one row in two places (`[r, r]`), ragged lists of lists, storing a float into a list of ints, `m[i, j]`, slices and `m[i] = new_row` on a list of lists (a copy and a rebinding in Python), returning a list of lists, and `append` and the other methods that resize.
 
 ## Dicts with fixed keys
 

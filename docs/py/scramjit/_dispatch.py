@@ -2,6 +2,7 @@
 
 import array
 import ast
+import itertools
 import copy
 import enum
 import math
@@ -74,6 +75,13 @@ def _arg_type(x):
         return T.FLOAT
     if t is bool:
         return T.BOOL
+    if t is list and x and type(x[0]) is list:   # a list of lists: rectangular, every list its own object
+        shape = _nested_shape(x)
+        if shape is None:
+            return None
+        flat = _flatten(x, len(shape))
+        elem = _arg_type(flat)
+        return None if elem is None else T.array(elem.elem, True, len(shape))
     if t is list:                            # copied into an array at the call, and back if written
         kinds = set(map(type, x))                 # in C: a list of 200,000 in about 2 ms
         if len(kinds) != 1 or kinds.pop() not in (int, float, bool):
@@ -232,6 +240,42 @@ PYTHON = _Python()
 _LIST_CODES = {'int': 'q', 'float': 'd', 'bool': 'i'}      # a list's element type -> its array, as the kernel's C type
 
 
+def _nested_shape(x):
+    """The shape of a rectangular list of lists, or None: ragged, empty, or one list in two places (a write would show
+    through both, which a copy can't do)."""
+    shape, level, seen = [], [x], set()
+    while level and type(level[0]) is list:
+        n = len(level[0])
+        if n == 0 or any(type(r) is not list or len(r) != n for r in level):
+            return None
+        for r in level:
+            if id(r) in seen:
+                return None
+            seen.add(id(r))
+        shape.append(n)
+        level = list(itertools.chain.from_iterable(level))
+    return shape                               # lists among the numbers fail the element check that follows
+
+
+def _flatten(x, depth):
+    for _ in range(depth - 1):
+        x = list(itertools.chain.from_iterable(x))
+    return x
+
+
+def _copy_back_nested(x, a, et, depth):
+    """Into a list of lists passed in, the elements the kernel changed."""
+    rows = [x]
+    for _ in range(depth - 1):
+        rows = [r for row in rows for r in row]
+    n = len(rows[0])
+    code = a.typecode
+    for k, row in enumerate(rows):            # a row that changed is replaced in one go, in C
+        new = a[k * n:(k + 1) * n]
+        if array.array(code, row).tobytes() != new.tobytes():
+            row[:] = [bool(v) for v in new] if et is T.BOOL else new.tolist()
+
+
 def _copy_back(lst, a, et):
     """Into a list passed in, the elements the kernel changed: the others stay the very objects they were."""
     for k, v in enumerate(a):
@@ -338,7 +382,7 @@ def _make_plan(f, entry, args):
             continue
         if t.kind in ('function', 'enumclass'):
             continue
-        if t.kind == 'array' and t.strided:
+        if t.kind == 'array' and (t.strided or T.is_pylist(t)):
             return f._slow_call
         if t.kind == 'array':
             env[f'd{i}'] = x.dtype
@@ -802,7 +846,7 @@ class Function:
     def _key(self, args):
         """The signature of a call. A dict's type is the keys this function uses: nothing else in it matters."""
         key = tuple(map(_arg_type, args))
-        lists = [id(x) for x in args if type(x) is list]
+        lists = [id(y) for x in args if type(x) is list for y in [x] + [r for r in x if type(r) is list]]
         if len(set(lists)) != len(lists):        # one list under two names: a copy each would hide the writes
             key = tuple(None if type(x) is list else t for x, t in zip(args, key))
         if not self._dict_keys or dict not in map(type, args):
@@ -837,6 +881,15 @@ class Function:
                 copies.append((i, a))
                 cargs += [a.buffer_info()[0], len(a)]
                 continue
+            if T.is_pylist(t):                  # a list of lists: one array, row after row, and its extents
+                a = array.array(_LIST_CODES[t.elem.name], _flatten(x, t.ndim))
+                copies.append((i, a))
+                cargs.append(a.buffer_info()[0])
+                level = x
+                for _ in range(t.ndim):
+                    cargs.append(len(level))
+                    level = level[0]
+                continue
             _push(cargs, x, t)
         if entry.libm is not None:
             cargs.append(entry.libm)
@@ -848,7 +901,11 @@ class Function:
         status = entry.kernel(*cargs, io)
         for i, a in copies:                       # what was written, even before an exception, as Python would have
             if i in entry.lists:
-                _copy_back(args[i], a, entry.types[i].elem)
+                t = entry.types[i]
+                if T.is_pylist(t):
+                    _copy_back_nested(args[i], a, t.elem, t.ndim)
+                else:
+                    _copy_back(args[i], a, t.elem)
         if status == RERUN and entry.rerun:
             return self._py(*self._real(args))
         for i, key, at, ot in entry.outs:

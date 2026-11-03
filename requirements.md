@@ -159,6 +159,8 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   every exit, so the others keep their identity. The same list twice runs as Python. A returned local list's memory is
   handed to the caller, copied into a list in C (`memoryview.cast().tolist()`) and released; returning the argument
   returns it. Copies cost about 10 ms per 200,000 floats, the type check 2 (`set(map(type, x))`).
+  A rectangular list of lists is an array of Python numbers (`T.is_pylist`): one buffer, rows as views, so a row is a
+  reference as in Python; `m[i, j]`, slices and replacing a row stay Python. A changed row is copied back in one go.
 - **Python data structures, nested, as much as possible** (decided 2026-11-01): dicts, lists, tuples, classes
   and enums compile when they are **statically sized** (nothing resizes them at runtime) and **statically
   typed** (the element types they start with don't change). Enums and module-level constants are their

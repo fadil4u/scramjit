@@ -712,6 +712,9 @@ class Compiler:
     def return_type(self, v):
         if v is None:
             return T.NONE
+        if v is not None and not isinstance(v, ast.Tuple) and self.is_view(v) and self.typeof(v).kind == 'array' and T.is_pylist(self.typeof(v)) \
+                or isinstance(v, ast.Name) and self.env.get(v.id) is not None and T.is_pylist(self.env[v.id]):
+            self.fail(v, 'returns a list of lists, or a row of one')
         if isinstance(v, ast.Name) and self.env.get(v.id) is not None and self.env[v.id].kind == 'list':
             if self.env[v.id].elem.np is not False:
                 self.fail(v, f'returns {self.env[v.id].name}, whose elements may be numpy scalars')
@@ -876,6 +879,10 @@ class Compiler:
     def infer_target(self, target, t, s):
         if isinstance(target, ast.Name):
             self.assign_type(s, target.id, t)
+        elif isinstance(target, ast.Subscript) and T.is_pylist(self.array_of(target)) and (
+                self.subscript_type(target).kind == 'array' or t is not self.array_of(target).elem):
+            self.fail(s, 'replacing a row of a list of lists' if self.subscript_type(target).kind == 'array'
+                      else f'stores {t.name} into a {self.array_of(target).name}, which would then hold {t.name}s too')
         elif isinstance(target, ast.Subscript) and self.array_of(target).kind == 'array' and self.subscript_type(target).kind == 'array':
             self.check_slice_store(s, self.subscript_type(target), t)
         elif isinstance(target, ast.Subscript):
@@ -1035,6 +1042,15 @@ class Compiler:
         return v
 
     def array_of(self, sub):
+        t = self.array_of_any(sub)
+        if T.is_pylist(t):                    # a list of lists indexes one level at a time, without slices
+            if isinstance(sub.slice, ast.Tuple):
+                self.fail(sub, 'a list indexed with a tuple (TypeError in Python): write m[i][j]')
+            if isinstance(sub.slice, ast.Slice):
+                self.fail(sub, 'a slice of a list of lists (a copy in Python)')
+        return t
+
+    def array_of_any(self, sub):
         v = sub.value
         if self.is_view(v) and not isinstance(v, ast.Name):
             t = self.typeof(v)
@@ -1396,6 +1412,8 @@ class Compiler:
                 return T.FLOAT
             if isinstance(e.value, ast.Name) and e.value.id in self.env and self.env[e.value.id].kind == 'array':
                 t = self.env[e.value.id]
+                if T.is_pylist(t):
+                    self.fail(e, f'.{e.attr} of a list (AttributeError in Python)')
                 if e.attr == 'shape':
                     return T.tuple_of([T.INT] * t.ndim)
                 if e.attr in ('ndim', 'size'):
@@ -1773,6 +1791,8 @@ class Compiler:
         nodes, picked = self.call_args(e, spec, fn)
         ts = [self.typeof(x) for x in nodes]
         for x, t in zip(nodes, ts):
+            if T.is_pylist(t):
+                self.fail(e, f'passes a list of lists to {e.func.id}()')
             if not (t.is_number or t.kind in ('array', 'enum') or (t.kind == 'tuple' and T.is_number_tree(t) and all(et.np != 'dyn' for et in T.leaves(t)))):
                 self.fail(e, f'passes {t.name} to {e.func.id}()')
         types = [ts[k] for k in picked]
@@ -3421,7 +3441,9 @@ class Compiler:
         """The positions of the list parameters this function stores into, which the call copies back."""
         stored = {n.value.id for n in ast.walk(self.f) if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store)
                   and isinstance(n.value, ast.Name)}
-        return {i for i, p in enumerate(self.params) if self.env[p].kind == 'list' and p in stored}
+        any_store = any(isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store) for n in ast.walk(self.f))
+        return {i for i, p in enumerate(self.params) if (self.env[p].kind == 'list' and p in stored)
+                or (T.is_pylist(self.env[p]) and any_store)}     # a row is a view: a store through it writes the list
 
     def sinkable_flags(self, s):
         """Variables of this for loop whose numpy flag can be set once after it instead of on each iteration, which keeps a
@@ -4178,7 +4200,7 @@ class Compiler:
         (naming the axis) for arrays, Python's for lists. Returns (C array, linear index)."""
         sub = self.named(sub)
         name = sub.value.id
-        is_list = self.env[name].kind == 'list'
+        is_list = self.env[name].kind == 'list' or T.is_pylist(self.env[name])
         strided = self.env[name].strided
         idxs = self.indices(sub)
         raws = [self.coerce(self.expr(k)[0], self.typeof(k), T.INT) for k in idxs]
@@ -4268,7 +4290,9 @@ class Compiler:
             if not isinstance(k, ast.Slice):
                 i = self.temp()
                 self.emit(f'int64_t {i} = {v} < 0 ? {v} + {n} : {v};')
-                if self.boundscheck:
+                if T.is_pylist(at):              # a row of a list of lists: Python's error, always checked
+                    self.emit(f'if ((uint64_t){i} >= (uint64_t){n}) SJ_FAIL({LIST_INDEX_ERROR}, {line}, 0, 0);')
+                elif self.boundscheck:
                     self.emit(f'if ((uint64_t){i} >= (uint64_t){n}) {{ sj_io[4] = {axis}; SJ_FAIL({INDEX_ERROR}, {line}, {v}, {n}); }}')
                 self.emit(f'{off} += {i} * ({st});')
                 continue
@@ -4310,7 +4334,7 @@ class Compiler:
     def elem_flag(self, name, idx):
         t = self.env[name]
         if t.kind == 'array':
-            return '1'
+            return flag_of(t.elem) if T.is_pylist(t) else '1'
         return f'v_{name}__np[{idx}]' if t.elem.np == 'dyn' else flag_of(t.elem)
 
     def store_elem(self, target, v, vt):

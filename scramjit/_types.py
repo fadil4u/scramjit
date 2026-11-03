@@ -161,6 +161,11 @@ def join_returns(a, b):
     return join(a, b)
 
 
+def is_pylist(t):
+    """An array that is a list of lists of Python numbers (or a row of one)."""
+    return t.kind == 'array' and t.elem.np is False
+
+
 def is_c_module(x):
     return type(x).__name__ in ('Module', 'WasmModule') and type(x).__module__.startswith('cimo.')
 
@@ -256,6 +261,11 @@ _ARRAYS = {}
 
 def array(elem, writable=True, ndim=1, strided=False):
     key = (elem.name, writable, ndim, strided)
+    if key not in _ARRAYS and elem.np is False:      # a list of lists: Python numbers, rows that are references
+        t = Type('list[' * ndim + elem.name + ']' * ndim, elem.ctype + ' *', 'array', elem=elem, writable=True)
+        t.ndim = ndim
+        t.strided = strided
+        _ARRAYS[key] = t
     if key not in _ARRAYS:
         name = elem.name[3:] + '[' + ', '.join([':'] * ndim) + ']'
         if strided:

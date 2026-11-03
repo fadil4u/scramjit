@@ -23,7 +23,7 @@ Python and through scramjit, and asserts the results are identical. They need nu
 | [`hash64.py`](hash64.py) | FNV-1a 64 over 1 MB, splitmix64 into a `uint64` array, Fibonacci hashing of `uint64` keys | Each step depends on the one before | 0.10 s | 1.8 ms | 57x |
 | [`enums.py`](enums.py) | Breadth-first search through a maze, with an `Enum` for each cell | Each step depends on what was found before | 1.74 s | 4.7 ms | 366x |
 | [`boxes.py`](boxes.py) | The box overlapping a query most, boxes as nested tuples `((x0, y0), (x1, y1))` | A Python function call per box | 4.21 s | 1.1 ms | 3872x |
-| [`lists.py`](lists.py) | A rolling maximum over a plain Python list, returning a list; counters updated in place | Each window is scanned; lists, not arrays | 0.31 s | 28 ms | 11x |
+| [`lists.py`](lists.py) | A rolling maximum over a plain Python list, returning a list; all shortest paths in a list of lists, in place | Each window is scanned; every pair through every vertex | 0.31 s | 23 ms | 13x |
 | [`constants.py`](constants.py) | A filter with its settings at module level: a number, a tuple, an array, a dict | Clips each sample; each pass repeats over its own output | 0.52 s | 1.5 ms | 338x |
 | [`config_dict.py`](config_dict.py) | An epidemic model with its settings and results in dicts | Each day depends on the one before | 0.081 s | 4.4 ms | 18x |
 

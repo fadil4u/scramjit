@@ -567,8 +567,8 @@ class Compiler:
         self.offset = line_offset
         self.boundscheck = boundscheck
         a = fdef.args
-        if a.vararg or a.kwarg or a.kwonlyargs or a.defaults or a.kw_defaults:
-            raise Unsupported(fdef, 'only plain positional parameters are compiled')
+        if a.vararg or a.kwarg or a.kwonlyargs or a.kw_defaults:      # defaults are filled in by the call
+            raise Unsupported(fdef, 'only plain positional parameters, with or without defaults, are compiled')
         self.params = [p.arg for p in a.posonlyargs + a.args]
         if len(self.params) != len(arg_types):
             raise Unsupported(fdef, 'wrong number of arguments')
@@ -1587,8 +1587,9 @@ class Compiler:
         ret, _ = self.c_signature(e)
         return self.hold(self.c_call(e), ret), '0'
 
-    def call_args(self, e, spec):
-        """The arguments in the order Python evaluates them, and for each parameter which of those it gets."""
+    def call_args(self, e, spec, fn=None):
+        """The arguments in the order Python evaluates them, and for each parameter which of those it gets. A
+        parameter left out gets its default, which must be a number: it was evaluated when the function was defined."""
         a = spec.tree.args
         names = [p.arg for p in a.posonlyargs + a.args][:len(a.posonlyargs + a.args) - len(spec.hidden)]
         if any(isinstance(x, ast.Starred) for x in e.args) or any(k.arg is None for k in e.keywords):
@@ -1599,9 +1600,31 @@ class Compiler:
             if k.arg not in names or k.arg in order:
                 self.fail(e, f'calls {spec.tree.name}() with these arguments')
             order[k.arg] = len(e.args) + i
+        defaults = self.callee_defaults(fn, spec) if len(e.args) <= len(names) else ()
+        for i, n in enumerate(names):
+            if n not in order and i >= len(names) - len(defaults):
+                v = defaults[i - (len(names) - len(defaults))]
+                if type(v) not in (int, float, bool):
+                    self.fail(e, f'calls {spec.tree.name}() leaving out {n}, whose default is a {type(v).__name__}')
+                nodes.append(ast.copy_location(ast.Constant(v), e))
+                order[n] = len(nodes) - 1
         if len(order) != len(names) or len(e.args) > len(names):
             self.fail(e, f'calls {spec.tree.name}() with these arguments')
         return nodes, [order[n] for n in names]
+
+    @staticmethod
+    def callee_defaults(fn, spec):
+        """A callee's default values: the function's own, or, read from source (preflight), its literals."""
+        live = getattr(fn, '_fn', None)
+        if live is not None:
+            return live.__defaults__ or ()
+        out = []
+        for d in spec.tree.args.defaults:
+            try:
+                out.append(ast.literal_eval(d))
+            except ValueError:
+                out.append(d)                    # not a literal: reported as what it is
+        return tuple(out)
 
     def compiled_callee(self, e):
         """The Compiler of what this call calls, for these argument types."""
@@ -1610,7 +1633,7 @@ class Compiler:
             spec = fn._callee()
         except Unsupported as u:
             self.fail(e, f'calls {e.func.id}(): {u.reason}')
-        nodes, picked = self.call_args(e, spec)
+        nodes, picked = self.call_args(e, spec, fn)
         ts = [self.typeof(x) for x in nodes]
         for x, t in zip(nodes, ts):
             if not (t.is_number or t.kind == 'array' or (t.kind == 'tuple' and all(et.is_number and et.np != 'dyn' for et in t.elem))):
@@ -1661,7 +1684,7 @@ class Compiler:
         self.uses_libm = self.uses_libm or c.uses_libm
         self.uses_stop = self.uses_stop or c.uses_stop
         spec = c.spec
-        nodes, picked = self.call_args(e, spec)
+        nodes, picked = self.call_args(e, spec, self.callee_of(e))
         done = []
         for x in nodes:
             t = self.typeof(x)

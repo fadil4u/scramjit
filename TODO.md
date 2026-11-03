@@ -335,7 +335,7 @@ Spills per line, once cimo can report them.
     FMA makes them slower on arm64 (a `dot` through cimo: 2.15 ns per element with, 1.81 without;
     `bench/llm.py` through `gcc -O3`: 63 tok/s with, 82 without), probably the latency of the
     instruction the sum's next add waits on (not measured). Measure non-reductions (stencils) before making it fire or removing it.
-15. **Calls between compiled functions, what's left:** recursion, default parameter values, dicts and lists as arguments, a function passed as an argument, `module.f()`, and a line profile of what's called.
+15. **Calls between compiled functions, what's left:** recursion, defaults other than numbers left out by a compiled caller, keyword-only parameters, dicts and lists as arguments, a function passed as an argument, `module.f()`, and a line profile of what's called.
     **Calling C, what's left:** modules with state, which need calling across modules (cimo: a call by address crashes once the callee uses `malloc`), `include_dirs=` and `link=`, returning a pointer or `uint64_t`, a C function's module compiled with `fma=` on alongside exact math in one file (needs `FP_CONTRACT` in cimo).
 16. **Compile time jumps on large functions.** In a generated 200-line training loop, adding a 4-line nested
     copy (`rec[t, y, x] = grid[y, x]` under one `if`) took the compile from about 3 s to 11 to 15 s on a loaded

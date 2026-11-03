@@ -207,9 +207,16 @@ def assumed_signature(fdef, globals_=None, seen=()):
     ints = _assumed_ints(fdef) | passed_ints
     sig = []
     a = fdef.args
-    for p in a.posonlyargs + a.args:
+    params = a.posonlyargs + a.args
+    literal = {}                       # a literal default says what the parameter usually is
+    for p, d in zip(params[len(params) - len(a.defaults):], a.defaults):
+        if isinstance(d, ast.Constant) and type(d.value) in (int, float, bool):
+            literal[p.arg] = {int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(d.value)]
+    for p in params:
         name = ast.unparse(p.annotation) if p.annotation is not None else None
-        if p.arg in keys:
+        if p.arg in literal and name is None and p.arg not in ndim and p.arg not in keys:
+            sig.append(literal[p.arg])
+        elif p.arg in keys:
             sig.append(T.dict_of(sorted(keys[p.arg].items(), key=lambda kv: repr(kv[0]))))
         elif name in ann:
             sig.append(ann[name])

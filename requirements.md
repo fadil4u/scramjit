@@ -353,7 +353,7 @@ the same writes, as CPython.
   written out, and a `step` 9.1 ns against 3 µs from a Python loop. A branchy `clamp` costs more than written out, 4.66 against 2.44 ns. A callee has its own `sj_io` and its own heap: a block it returns moves to the caller's, since its sweeps
   only see its own variables. Each failing caller adds to a trace at the end of the top `sj_io`, for a traceback with every frame. A called function's globals are hidden arguments of the top function, by their own dict, so
   their guards and new values work as at any call; the name holding a function has a type of its own, so rebinding it is a new signature. In a statement with a call, every value read is put in a temporary first, since the
-  call can write arrays; forwarding is off in such a loop. Not built, each staying Python: recursion, which needs return types before inference, default values, dicts and lists as arguments, `module.f()`, and tagged parameters, since a callee can't rerun as Python.
+  call can write arrays; forwarding is off in such a loop. Default values: a call is bound as Python binds it, from `__defaults__` at each call (a default array is the same object; a changed `__defaults__` is seen), and a compiled caller leaving one out passes it as a constant if it's a number. Not built, each staying Python: recursion, which needs return types before inference, other defaults left out by a compiled caller, keyword-only parameters, dicts and lists as arguments, `module.f()`, and tagged parameters, since a callee can't rerun as Python.
 
 ## Visibility and profiling
 

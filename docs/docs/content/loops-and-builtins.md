@@ -137,7 +137,7 @@ A call runs as Python, with the same result, and says why, when:
 - the function isn't decorated with `@scram`, or is in a closure or a method
 - it calls itself, directly or through another (recursion)
 - it doesn't compile for those argument types: the warning gives its reason
-- it has default values for parameters, or is passed a dict or a list, or a function
+- it leaves out a parameter whose default isn't a number, or is passed a dict or a list, or a function
 
 Inside a call there's no profile of its own: time in `step` counts toward `run` in `preflight --run`, and `counts=True` counts the lines of the outer function only.
 

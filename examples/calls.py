@@ -1,5 +1,6 @@
 """A small program as several functions: a cart and pole, with reset, step and a policy, and a function that runs many episodes.
-Each is compiled, the calls between them are C calls, usually inlined, and each can still be called from Python on its own."""
+Each is compiled, the calls between them are C calls, usually inlined, and each can still be called from Python on its own.
+Default values work both ways: average_steps leaves out policy's force, and the call from Python leaves out the seed."""
 
 import math
 import time
@@ -33,15 +34,15 @@ def step(state, push):
 
 
 @scram
-def policy(state, weights):
+def policy(state, weights, force=10.0):
     score = 0.0
     for i in range(4):
         score += state[i] * weights[i]
-    return 10.0 if score > 0.0 else -10.0
+    return force if score > 0.0 else -force
 
 
 @scram
-def average_steps(weights, episodes: int, seed: int):
+def average_steps(weights, episodes: int, seed: int = 42):
     state = np.zeros(4)
     total = 0
     for _ in range(episodes):
@@ -59,7 +60,7 @@ episodes = 2000
 
 def run(f):
     t = time.perf_counter()
-    r = f(weights, episodes, 42)
+    r = f(weights, episodes)
     return time.perf_counter() - t, r
 
 
@@ -68,7 +69,7 @@ run(average_steps)
 compiled_in = time.perf_counter() - t0
 
 
-def plain_average_steps(weights, episodes, seed):         # the same program with nothing compiled
+def plain_average_steps(weights, episodes, seed=42):      # the same program with nothing compiled
     plain_reset, plain_step, plain_policy = reset.__wrapped__, step.__wrapped__, policy.__wrapped__
     state = np.zeros(4)
     total = 0

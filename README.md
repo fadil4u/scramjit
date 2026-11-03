@@ -204,7 +204,7 @@ is no sandbox.
 Pre-release: the API may still change.
 
 - **Releases.** The latest on PyPI is 0.0.2. `main` is ahead of it, and 0.0.3 comes next, after a cimo release it needs. Since 0.0.2,
-  on `main` only: calls between `@scram` functions, calling C from `cimo.compile`, arrays made inside a function, module-level
+  on `main` only: calls between `@scram` functions, default parameter values, calling C from `cimo.compile`, arrays made inside a function, module-level
   constants, arithmetic on `float32`, `uint8`, `uint64` and the other narrow dtypes, `<<` and `>>`, and exact 64-bit hashes. To use them now,
   install both from GitHub:
 

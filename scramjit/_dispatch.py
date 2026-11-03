@@ -472,7 +472,35 @@ class Function:
             raise KeyError(signature)
         return v.source
 
+    def _bind(self, args, kwargs):
+        """args and kwargs as one positional tuple, with the defaults filled in, as Python binds them; None for what
+        isn't a plain call of plain parameters (Python then binds it, or raises its TypeError)."""
+        code = self._fn.__code__
+        if code.co_kwonlyargcount or code.co_flags & 0x0C:      # *args or **kwargs
+            return None
+        n = code.co_argcount
+        if len(args) > n:
+            return None
+        names = code.co_varnames[:n]
+        bound = list(args) + [_MISSING] * (n - len(args))
+        for k, v in kwargs.items():
+            if k not in names or names.index(k) < code.co_posonlyargcount or bound[names.index(k)] is not _MISSING:
+                return None
+            bound[names.index(k)] = v
+        defaults = self._fn.__defaults__ or ()
+        for i in range(n):
+            if bound[i] is _MISSING:
+                if i < n - len(defaults):
+                    return None
+                bound[i] = defaults[i - (n - len(defaults))]
+        return tuple(bound)
+
     def __call__(self, *args, **kwargs):
+        if kwargs or len(args) != self._fn.__code__.co_argcount:     # a default or a keyword: bound as Python binds it
+            full = self._bind(args, kwargs)
+            if full is None:
+                return self._fn(*args, **kwargs)
+            args, kwargs = full, {}
         plan = self._plans.get(tuple(map(type, args)))
         if plan is not None and not kwargs:             # these types were checked when the plan was made
             return plan(*args)
@@ -480,8 +508,6 @@ class Function:
             if i < len(args) and not _contract_ok(args[i], ann):
                 raise TypeError(f'{self.__name__}() argument {p!r} must be {_ANNOTATIONS[ann]}, '
                                 f'not {type(args[i]).__name__}')
-        if kwargs:
-            return self._fn(*args, **kwargs)
         real = args
         args = self._with_globals(args)
         key = self._key(args)

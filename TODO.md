@@ -296,9 +296,10 @@ Spills per line, once cimo can report them.
    - **Enums: built.** See "Enums" in `containers.md`. Not yet: `.name`, `Cell(1)`, iterating over the class, storing a member into an array, `Flag` and string enums.
    - **Nested tuples: built,** as locals, arguments, results and globals, and loops over tuples. Not yet: a tuple holding arrays as a local or an argument, a tuple indexed with a variable, a comprehension variable that is a tuple, and comparing tuples.
    - **Lists as arguments, returned, and at module level: built, from 0.0.4** (see `containers.md`). Lists of lists passed in
-     too: one array, rows as views, so a row is a reference as in Python. Not yet: lists of lists made in the function
-     (`[[0.0] * w for _ in range(h)]`, where `[[0.0] * w] * h` shares one row) and returned, numpy scalars as elements, and a call
-     plan for list arguments (each call takes the general path).
+     too: one array, rows as views, so a row is a reference as in Python. Lists of lists made in the
+     function too, from `[[c] * w for _ in range(h)]` and its comprehension form (`[[c] * w] * h`, one row repeated, stays Python).
+     Not yet: returning a list of lists, more than two levels, numpy scalars as elements, and a call plan for list arguments
+     (each call takes the general path).
    - **Classes:** attribute reads and writes on instances and dataclasses, then method calls.
    - **Dicts, what's left:** a dict passed in compiles (see "Containers"). Not yet: nested dicts, a dict built in the function, returning
      one, `len(p)` and `'a' in p`, which are known from the keys. A function that could add a key still runs as Python.

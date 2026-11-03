@@ -52,7 +52,8 @@ def out_of_range(m, i: int):
 
 def strict(f, *args):
     g = scram(cache=False)(f)
-    copy = lambda: [[list(r) for r in a] if isinstance(a, list) else a for a in args]
+    import copy as copying
+    copy = lambda: copying.deepcopy(list(args))
     plain, mine = copy(), copy()
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter('always')
@@ -122,4 +123,63 @@ def test_what_python_does_differently_stays_python(src):
         warnings.simplefilter('ignore', FallbackWarning)
         a, b = [[1.0, 2.0], [3.0, 4.0]], [[1.0, 2.0], [3.0, 4.0]]
         assert outcome(g, [a])[:3] == outcome(f, [b])[:3] and a == b
+    assert not g.signatures
+
+
+def edit_distance(a, b):
+    n, m = len(a), len(b)
+    d = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        d[i][0] = i
+    for j in range(m + 1):
+        d[0][j] = j
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+    return d[n][m]
+
+
+def lcs(a, b):
+    t = [[0 for _ in range(len(b) + 1)] for _ in range(len(a) + 1)]
+    for i in range(1, len(a) + 1):
+        row, up = t[i], t[i - 1]
+        for j in range(1, len(b) + 1):
+            row[j] = up[j - 1] + 1 if a[i - 1] == b[j - 1] else max(up[j], row[j - 1])
+    return t[len(a)][len(b)]
+
+
+def floats_table(h: int, w: int):
+    g = [[0.5] * w for _ in range(h)]
+    s = 0.0
+    for r in g:
+        for v in r:
+            s += v
+    return s, len(g)
+
+
+@pytest.mark.parametrize('a, b', [('kitten', 'sitting'), ('', 'abc'), ('flaw', 'lawn'), ('a', '')])
+def test_tables_made_in_the_function(a, b):
+    x, y = [ord(c) for c in a], [ord(c) for c in b]
+    if x and y:
+        strict(edit_distance, x, y)
+        strict(lcs, x, y)
+
+
+@pytest.mark.parametrize('h, w', [(3, 4), (0, 5), (2, 0), (-1, 3), (3, -2)])
+def test_table_sizes(h, w):
+    g = scram(cache=False)(floats_table)
+    assert outcome(g, [h, w]) == outcome(floats_table, [h, w])
+    assert g.signatures, g._why
+
+
+def test_one_row_repeated_stays_python():
+    def f(n: int):
+        m = [[0] * 3] * n                      # every row is the same list
+        m[0][0] = 7
+        return m[n - 1][0]
+    g = scram(cache=False)(f)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', FallbackWarning)
+        assert g(3) == f(3) == 7
     assert not g.signatures

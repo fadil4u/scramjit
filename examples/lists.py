@@ -36,6 +36,21 @@ def shortest_paths(d):
 
 
 @scram
+def edit_distance(a: list[int], b: list[int]):
+    """Levenshtein distance, with its table a list of lists made in the function."""
+    d = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
+    for i in range(len(a) + 1):
+        d[i][0] = i
+    for j in range(len(b) + 1):
+        d[0][j] = j
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+    return d[len(a)][len(b)]
+
+
+@scram
 def tally(rolls: list[int], counts: list[int]):
     for r in rolls:
         counts[r - 1] += 1
@@ -69,6 +84,19 @@ if __name__ == '__main__':
     assert got == want and d == plain
     print(f'all shortest paths in a 150x150 list of lists: Python {python_time:.2f} s, scramjit {scramjit_time * 1000:.1f} ms, '
           f'{python_time / scramjit_time:.0f}x, the distances updated in place either way')
+
+    a = [random.randint(97, 100) for _ in range(1500)]
+    b = [random.randint(97, 100) for _ in range(1500)]
+    start = time.perf_counter()
+    want = edit_distance.__wrapped__(a, b)
+    python_time = time.perf_counter() - start
+    edit_distance(a[:3], b[:3])                          # compiles
+    start = time.perf_counter()
+    got = edit_distance(a, b)
+    scramjit_time = time.perf_counter() - start
+    assert got == want
+    print(f'edit distance of two 1,500-long lists, its table a list of lists: Python {python_time:.2f} s, '
+          f'scramjit {scramjit_time * 1000:.1f} ms, {python_time / scramjit_time:.0f}x')
 
     rolls = [random.randint(1, 6) for _ in range(100_000)]
     counts, plain = [0] * 6, [0] * 6

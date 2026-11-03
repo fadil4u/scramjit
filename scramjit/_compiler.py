@@ -76,6 +76,11 @@ def c_int(x):
     return f'{x}LL'
 
 
+def numpy_dtype(elem):
+    """The numpy dtype name of an element type; a list of lists' Python numbers are as numpy would hold them."""
+    return {'int': 'int64', 'float': 'float64', 'bool': 'bool'}.get(elem.name, elem.name[3:])
+
+
 FORWARD_DEPTH = 4     # y[i - 1] to y[i - 4] can be forwarded from temporaries
 # cimo's compile time grows with the square of a function's size (a 60-loop function: 3,140 lines of C in 4.0 s,
 # 6,020 with every loop versioned in 14.7 s), so versioning's copies may bring a function to VERSION_TOTAL syntax nodes
@@ -291,6 +296,40 @@ ARRAY_METHODS = {'sum', 'prod', 'mean', 'max', 'min', 'any', 'all', 'argmax', 'a
 NP_FLOAT_ONLY = {'round': 1, 'around': 1, 'clip': 3, 'degrees': 1, 'rad2deg': 1, 'radians': 1, 'deg2rad': 1}
 NP_FUNCS = {'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8', 'uint64'} | NP_MAKE | set(NP_LIBM1) | set(NP_DIRECT1) | NP_ROUND | NP_KEEPS_INT | set(NP_LIBM2) | {'copysign'} | NP_MINMAX | NP_TESTS | NP_CONVERT \
     | set(NP_REDUCE) | set(NP_FLOAT_ONLY)
+
+
+class Tables(ast.NodeTransformer):
+    """[[c] * w for _ in range(h)] and [[c for _ in range(w)] for _ in range(h)] as sj_table(h, w, c): a list of lists
+    whose rows are separate lists, made as one block. Python's [[c] * w] * h repeats one row, and isn't one of these."""
+    @staticmethod
+    def range_of(g):
+        return g.iter.args[0] if (isinstance(g.target, ast.Name) and not g.ifs and not g.is_async and isinstance(g.iter, ast.Call)
+                                  and isinstance(g.iter.func, ast.Name) and g.iter.func.id == 'range' and len(g.iter.args) == 1
+                                  and not g.iter.keywords) else None
+
+    def visit_ListComp(self, node):
+        self.generic_visit(node)
+        if len(node.generators) != 1 or self.range_of(node.generators[0]) is None:
+            return node
+        h, t = self.range_of(node.generators[0]), node.generators[0].target.id
+        x = node.elt
+        w = c = None
+        if isinstance(x, ast.BinOp) and isinstance(x.op, ast.Mult):
+            one, w = (x.left, x.right) if isinstance(x.left, ast.List) else (x.right, x.left)
+            if isinstance(one, ast.List) and len(one.elts) == 1:
+                c = one.elts[0]
+        elif isinstance(x, ast.ListComp) and len(x.generators) == 1 and self.range_of(x.generators[0]) is not None:
+            w, c = self.range_of(x.generators[0]), x.elt
+            if any(isinstance(n, ast.Name) and n.id == x.generators[0].target.id for n in ast.walk(c)):
+                return node
+        def plain(n):                                 # nothing evaluating it again per row could tell
+            return isinstance(n, (ast.Name, ast.Constant, ast.UnaryOp, ast.BinOp, ast.operator, ast.unaryop, ast.Load)) or (
+                isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'len' and len(n.args) == 1
+                and isinstance(n.args[0], ast.Name) and not n.keywords)
+        if c is None or not all(plain(n) for p in (w, c) for n in ast.walk(p)) \
+                or any(isinstance(n, ast.Name) and n.id == t for p in (w, c) for n in ast.walk(p)):
+            return node                                   # only plain values: each row would evaluate them again
+        return ast.copy_location(ast.Call(ast.Name('sj_table', ast.Load()), [h, w, c], []), node)
 
 
 class ListReturns(ast.NodeTransformer):
@@ -597,7 +636,7 @@ class Compiler:
         self.array_args = []       # for those: (argument index, dict key or None) of each array parameter
         local = {p.arg for p in fdef.args.posonlyargs + fdef.args.args}
         local |= {n.id for n in ast.walk(fdef) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
-        self.f = ListReturns().visit(Lazy(local, set(globals_)).visit(copy.deepcopy(fdef)))
+        self.f = ListReturns().visit(Tables().visit(Lazy(local, set(globals_)).visit(copy.deepcopy(fdef))))
         self.exact = parity    # False: C's float semantics where CPython parity costs speed
         self.globals = globals_
         self.filename = filename
@@ -1994,6 +2033,8 @@ class Compiler:
                 (isinstance(f.value, ast.Name) and self.env.get(f.value.id) is not None and self.env[f.value.id].kind == 'array')
                 or (not isinstance(f.value, ast.Name) and self.is_view(f.value))):
             return 'method_' + f.attr, [f.value] + e.args, e.keywords
+        if isinstance(f, ast.Name) and f.id == 'sj_table' and f.id not in self.env:
+            return 'table', e.args, []
         name = self.numpy_func(f)
         if name in NP_MAKE:
             return name, e.args, e.keywords
@@ -2121,6 +2162,13 @@ class Compiler:
             ndim, elem = t.ndim, self.dtype_elem(args['dtype'], e)
             if elem.kind == 'int' and t.elem.kind == 'float':
                 self.fail(e, '.astype() from float to an integer dtype')
+        elif kind == 'table':                        # a list of lists made in the function
+            h, w, c = made[1]
+            if any(self.typeof(n).kind not in ('int', 'bool') or self.typeof(n).np is not False for n in (h, w)):
+                self.fail(e, 'a list of lists whose size is not a Python int')
+            ndim, elem = 2, self.typeof(c)
+            if elem not in (T.INT, T.FLOAT, T.BOOL):
+                self.fail(e, f'a list of lists of {elem.name}')
         elif kind == 'arange':
             ndim, elem = 1, self.arange_elem(e, made)
         elif kind == 'linspace':
@@ -2334,7 +2382,7 @@ class Compiler:
         self.emit(f'int64_t {dims}[] = {{{", ".join(shape)}}};')
         self.emit(f'sj_block *{b} = sj_make(&sj_h, {len(shape)}, {dims}, sizeof({t.elem.ctype}), {zero});')
         at = [(shape[k] if k < len(shape) else f'(-{-NO_AXIS - 1}LL - 1)') for k in range(MAX_MADE_DIMS)]
-        code = MAKE_ERROR + MAKE_DTYPES.index(t.elem.name[3:])
+        code = MAKE_ERROR + MAKE_DTYPES.index(numpy_dtype(t.elem))
         self.emit(f'if (!{b}) {{ {fail or f"sj_io[0] = {at[0]}; sj_io[4] = {at[3]}; SJ_FAIL({code}, {line}, {at[1]}, {at[2]});"} }}')
         self.emit(f'v_{name} = ({t.ctype.strip()})({b} + 1); v_{name}__h = {b};')
         if self.tracks:
@@ -2382,6 +2430,13 @@ class Compiler:
         name = self.view_name(e)
         t = self.env[name]
         line = self.line(e)
+        if kind == 'table':                          # range(h) first, then each row's size and value, as Python goes
+            h, w, c = (self.expr(x) for x in made[1])
+            shape = [self.hold(f'((int64_t)({v[0]}) > 0 ? (int64_t)({v[0]}) : 0)', T.INT) for v in (h, w)]
+            val = self.hold(self.coerce(c[0], self.typeof(made[1][2]), t.elem), t.elem)
+            self.new_block(name, t, shape, 0, line)
+            self.fill_block(name, t, val)
+            return name
         if kind == 'arange':
             self.make_arange(e, name, t)
             return name

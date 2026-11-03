@@ -104,7 +104,7 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | Compiled | Runs as Python |
 |:---|:---|
 | `for`, `while`, `break`, `continue`, `if`, conditional expressions | Masks and index arrays: `x[x > 0]` |
-| Lists of numbers, and rectangular lists of lists, passed in; lists returned (from 0.0.4) | Lists that grow, lists of lists made in the function |
+| Lists of numbers and rectangular lists of lists, passed in or made in the function; lists returned (from 0.0.4) | Lists that grow, returning a list of lists |
 | Views: `m[i]`, `x[a:b]`, `x[::-1]`, `m[:, j]`, `.T`, `for row in m`, as arguments and results | `x.reshape(...)`, `np.eye(n)` |
 | Making arrays: `np.zeros(n)`, `x.copy()`, `np.arange`, `np.linspace`, as locals and results | `x[1:] += y` |
 | Assigning to a slice: `x[1:3] = 0.0`, `m[i] = row`, overlap included | `np.sqrt(x)` on a whole array |

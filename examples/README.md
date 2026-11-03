@@ -20,7 +20,7 @@ Python and through scramjit, and asserts the results are identical. They need nu
 | [`slices.py`](slices.py) | Heat flow, written with slice assignment and views, returning a view | Each step reads the last | 0.314 s | 0.41 ms | 776x |
 | [`narrow_types.py`](narrow_types.py) | `a * x + y` on `float32`, brightening `uint8` pixels, a `float32` dot product | numpy does this `axpy`; here the loop is yours, with numpy's wrapping and rounding | 0.18 s | 0.28 ms | 636x |
 | [`xorshift.py`](xorshift.py) | A 32-bit xorshift random number generator, from `<<`, `>>`, `^` and masks | Each number comes from the one before | 0.22 s | 3.9 ms | 56x |
-| [`hash64.py`](hash64.py) | FNV-1a 64 over 1 MB, splitmix64 into a `uint64` array, masked to 64 bits as written for Python | Each step depends on the one before | 0.10 s | 1.7 ms | 60x |
+| [`hash64.py`](hash64.py) | FNV-1a 64 over 1 MB, splitmix64 into a `uint64` array, Fibonacci hashing of `uint64` keys | Each step depends on the one before | 0.10 s | 1.8 ms | 57x |
 | [`constants.py`](constants.py) | A filter with its settings at module level: a number, a tuple, an array, a dict | Clips each sample; each pass repeats over its own output | 0.52 s | 1.5 ms | 338x |
 | [`config_dict.py`](config_dict.py) | An epidemic model with its settings and results in dicts | Each day depends on the one before | 0.081 s | 4.4 ms | 18x |
 

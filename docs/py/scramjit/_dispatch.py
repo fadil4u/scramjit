@@ -94,6 +94,8 @@ def _arg_type(x):
             return T.NP_INT64
         if t is np.bool_:
             return T.NP_BOOL
+        if t is np.uint64:
+            return T.NP_UINT64
         if issubclass(t, np.generic) and x.dtype.isnative and x.dtype.name in T.NARROW:     # np.intc too
             return T.NARROW[x.dtype.name]
     return None

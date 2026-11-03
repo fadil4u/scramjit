@@ -32,6 +32,15 @@ def splitmix64(state: int, out):
     return state
 
 
+@scram
+def bucket_counts(keys, counts):
+    """Fibonacci hashing of uint64 keys into a power-of-two table, with numpy's uint64 arithmetic: it wraps."""
+    shift = np.uint64(64 - 10)                       # 1024 buckets
+    for i in range(len(keys)):
+        counts[int((keys[i] * np.uint64(0x9E3779B97F4A7C15)) >> shift)] += 1
+    return counts.max()
+
+
 def timed(f, *args):
     start = time.perf_counter()
     r = f(*args)
@@ -54,3 +63,13 @@ if __name__ == '__main__':
     assert got == want and compiled.tobytes() == plain.tobytes()
     print(f'splitmix64, 1,000,000 numbers: Python {python_time:.2f} s, scramjit {scramjit_time * 1000:.2f} ms, '
           f'{python_time / scramjit_time:.0f}x, same numbers')
+
+    keys = compiled                                      # the splitmix64 numbers, as uint64 keys
+    plain, mine = np.zeros(1024, np.int64), np.zeros(1024, np.int64)
+    with np.errstate(over='ignore'):                     # numpy warns that the multiply wraps; compiled code doesn't
+        want, python_time = timed(bucket_counts.__wrapped__, keys, plain)
+    bucket_counts(keys[:1], np.zeros(1024, np.int64))    # compiles
+    got, scramjit_time = timed(bucket_counts, keys, mine)
+    assert got == want and plain.tobytes() == mine.tobytes()
+    print(f'Fibonacci hashing of 1,000,000 uint64 keys: Python {python_time:.2f} s, scramjit {scramjit_time * 1000:.2f} ms, '
+          f'{python_time / scramjit_time:.0f}x, fullest bucket {got}')

@@ -191,7 +191,8 @@ def test_storing_python_ints(dtype):
 
 
 @pytest.mark.parametrize('expr', ['a[0] + 1', 'a[0] == a[1]', '-a[0]', 'abs(a[0])', 'a.sum()', 'math.floor(a[0])', 'a[0] * k'])
-def test_uint64_arithmetic_stays_python(expr):
+def test_uint64_elements_match_numpy(expr):
+    """tests/test_uint64.py goes further; math.floor() of one is the case that stays Python."""
     import math
     space = {'np': np, 'math': math}
     src = f'def f(a, k):\n    return {expr}\n'
@@ -204,7 +205,7 @@ def test_uint64_arithmetic_stays_python(expr):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         assert outcome(space['f'], [a, 3])[:3] == outcome(g, [a, 3])[:3]
-    assert not g.signatures
+    assert bool(g.signatures) == ('math' not in expr), g._why
 
 
 def test_a_variable_that_may_be_negative_says_so():

@@ -36,8 +36,8 @@ BOOL = Type('bool', 'int', 'bool')
 NP_INT64 = Type('np.int64', 'int64_t', 'int', np=True)
 NP_FLOAT64 = Type('np.float64', 'double', 'float', np=True)
 NP_BOOL = Type('np.bool', 'int', 'bool', np=True)
-# Elements of uint64 arrays: stored, converted with int() and float(), compared with nothing yet. numpy's arithmetic on them
-# turns int64 into float64, which isn't compiled.
+# Elements of uint64 arrays. numpy wraps them in uint64 with Python ints and unsigned dtypes, and makes float64 of them with
+# signed numpy ints and floats (uint64_result).
 NP_UINT64 = Type('np.uint64', 'uint64_t', 'int', np=True)
 # A variable that holds a Python number at some times and a numpy scalar of the same kind at
 # others (total = 0.0, then total += x[i]): its C value plus a runtime flag.
@@ -264,7 +264,7 @@ def arith_problem(a, b, op):
     if (a.np and a.kind == 'bool') or (b.np and b.kind == 'bool'):
         return 'arithmetic on numpy bools'
     if NP_UINT64 in (a, b):
-        return 'arithmetic on np.uint64, which numpy turns into float64 with signed ints: write int(x)'
+        return f'{a.name} and {b.name} with this operator (numpy raises TypeError)'
     if op == 'Pow':
         return f'** on {a.name} and {b.name}: numpy uses the narrow type\'s own pow'
     return f'{a.name} with {b.name}: the type of the result would depend on what the variable holds at run time'
@@ -282,12 +282,26 @@ def compare_in(a, b):
     return r.ctype if r is not None else 'double'
 
 
+def uint64_result(a, b, op):
+    """numpy's type for np.uint64 with another number, or None where numpy raises TypeError (bitwise with a signed int or a
+    float) or the type would depend on a flag."""
+    other = b if a is NP_UINT64 else a
+    if other.np == 'dyn' or (other.np and other.kind == 'bool' and op not in ('BitAnd', 'BitOr', 'BitXor', 'Add', 'Sub', 'Mult')):
+        return None
+    signed_numpy = other.np is True and other.kind == 'int' and other is not NP_UINT64 and not other.ctype.startswith('uint')
+    if other.kind == 'float' or signed_numpy:
+        return None if op in ('BitAnd', 'BitOr', 'BitXor', 'LShift', 'RShift') else NP_FLOAT64
+    return NP_FLOAT64 if op == 'Div' else NP_UINT64
+
+
 def arith_result(a, b, op):
     """The type of a <op> b for numbers, following Python and numpy's promotion (NEP 50).
 
     Returns None when the combination isn't compiled: see arith_problem.
     """
-    if (a.np and a.kind == 'bool') or (b.np and b.kind == 'bool') or NP_UINT64 in (a, b):
+    if NP_UINT64 in (a, b):
+        return uint64_result(a, b, op)
+    if (a.np and a.kind == 'bool') or (b.np and b.kind == 'bool'):
         return None
     if has_narrow(a, b):
         return narrow_result(a, b, op)

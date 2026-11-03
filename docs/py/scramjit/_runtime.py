@@ -133,6 +133,17 @@ def exception(status, io):
     if status == LINSPACE_ERROR:        # numpy's own error, for what it was asked
         import numpy
         return _numpys_error(numpy.linspace, (0.0, 1.0, io[2]))
+    if status == INT_BOUNDS_ERROR and io[3] >= 200:     # an index past int64: what indexing with it raises, as it words it
+        value = io[2] & 0xFFFFFFFFFFFFFFFF
+        try:
+            if io[3] == 201:
+                [0][value]
+            else:
+                import numpy
+                numpy.zeros(1)[value]
+        except (IndexError, OverflowError) as e:
+            return e.with_traceback(None)
+        return SystemError(f'scramjit: {value} is an index')
     if status == INT_BOUNDS_ERROR and io[3] >= 100:     # an int past int64, held unsigned: numpy's own error, worded as it words it
         import numpy
         value, dtype = io[2] & 0xFFFFFFFFFFFFFFFF, NARROW_INT_DTYPES[io[3] - 100]

@@ -564,7 +564,7 @@ static int sj_fsum_end(sj_fsum_t *s, double *out) {
 }
 
 
-TAGS = {'float': 'f32', 'int32_t': 'i32', 'int16_t': 'i16', 'int8_t': 'i8', 'uint32_t': 'u32', 'uint16_t': 'u16', 'uint8_t': 'u8'}
+TAGS = {'uint64_t': 'u64', 'float': 'f32', 'int32_t': 'i32', 'int16_t': 'i16', 'int8_t': 'i8', 'uint32_t': 'u32', 'uint16_t': 'u16', 'uint8_t': 'u8'}
 
 
 def typed(name, ctype):
@@ -579,6 +579,8 @@ def typed(name, ctype):
             code = code.replace('double', 'float')
         else:
             code = code.replace('const int64_t *', f'const {ctype} *').replace(', int64_t, SJ_NP_', f', {ctype}, SJ_NP_')
+            if ctype == 'uint64_t':                    # compared unsigned
+                code = code.replace('    int64_t r = a[0];', '    uint64_t r = a[0];').replace('int64_t at = 0, r = a[0];', 'int64_t at = 0; uint64_t r = a[0];')
         SNIPPETS[key] = (tuple(typed(d, ctype) for d in deps), code)
     return key
 

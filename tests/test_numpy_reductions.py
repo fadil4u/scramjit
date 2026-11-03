@@ -197,17 +197,17 @@ def test_an_axis_in_a_variable_stays_python():
 # Everything else that must stay Python
 
 
-@pytest.mark.parametrize('dtype', ['u8', '?', 'f2'])
+@pytest.mark.parametrize('dtype', ['?', 'f2'])
 @pytest.mark.parametrize('op', OPS)
 def test_other_dtypes_stay_python(dtype, op):
     a = np.arange(1, 5).astype(dtype)
     check(f'x.{op}()', [a], compiled=False)
 
 
-@pytest.mark.parametrize('dtype', ['f4', 'i4', 'u1', 'i1'])
+@pytest.mark.parametrize('dtype', ['f4', 'i4', 'u1', 'i1', 'u8'])
 @pytest.mark.parametrize('op', OPS)
 def test_narrow_dtypes_match(dtype, op):
-    """Narrow dtypes compile, apart from float32 std and var (tests/test_narrow.py goes further)."""
+    """Narrow dtypes and uint64 compile, apart from float32 std and var (tests/test_narrow.py and test_uint64.py go further)."""
     a = np.arange(1, 5).astype(dtype)
     check(f'x.{op}()', [a], compiled=None)
 

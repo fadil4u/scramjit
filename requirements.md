@@ -163,6 +163,11 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   as Python. Loop optimizations and loop lifting come first, so that containers don't hide speedups still to
   be had from loops. Open, apart from dicts below: what a runtime value that breaks the rule does, aliasing, and the
   cost of checking and copying at the call. See `TODO.md`.
+- **Enums (built 2026-11-03).** A member of an `Enum` or `IntEnum` with int values is its value; the class, read from module
+  level, is a hidden argument whose identity is part of the signature, so `Level.HIGH` is a literal. Two members of one class are
+  the same member exactly when their values are equal, since an alias is the member it names; an `Enum` is never equal to anything
+  else, and an `IntEnum` is also an int. A returned member is `cls(value)`. A class that defines its own `__eq__`, `__hash__`,
+  `__bool__` or ordering stays Python. Preflight builds the enum from a class statement of int literals and `auto()`.
 - **Fixed dicts (built 2026-11-02).** A dict argument is flattened in source: `p['a']` becomes a variable and `p` one parameter per key
   the function names, so all loop work applies and the C equals using locals. A dict's type is only those keys, so anything else in it
   can be anything, at no cost: a read took 2.6 µs per call against 2.6 with plain numbers, in a 1000-key dict too, 3.2 with a write (2.6

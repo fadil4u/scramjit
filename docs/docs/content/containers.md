@@ -156,6 +156,33 @@ def apply(x):
 
 They work like arguments, read at each call. A new value needs no recompile, a new type compiles for that type, and writes to a global array or dict reach it. Each one costs about what an argument does, around 0.2 µs per call. One that isn't there raises `NameError` as usual. Any other global, such as a string, a list or `None`, keeps the function or loop in Python, as does assigning to a global with `global`.
 
+## Enums
+
+Members of an `Enum` or `IntEnum` whose values are ints compile, held as their values:
+
+```python
+class Cell(Enum):
+    EMPTY = 0
+    WALL = 1
+    GOAL = 2
+
+@scram
+def cell_of(v):
+    return Cell.WALL if v > 0.5 else Cell.EMPTY
+
+@scram
+def walls(grid):
+    n = 0
+    for v in grid:
+        if cell_of(v) is Cell.WALL:
+            n += 1
+    return n
+```
+
+`Cell.WALL`, comparisons with `==`, `!=`, `is` and `is not`, `.value`, and truth work as in Python: an `Enum` member equals only itself, an alias is the member it names, and an `IntEnum` member is also an int, so it orders, adds and compares with ints. Members are passed in, returned, and passed between compiled functions; what comes back is the member itself. The class is read from module level like the constants above, and a new class compiles for it.
+
+Still Python: storing a member into an array (store `.value`), `.name`, `Cell(1)`, iterating over the class, `Flag` and string enums, and an enum that defines its own `__eq__`, `__hash__`, `__bool__` or ordering.
+
 ## What stays in Python
 
 Growable lists, dicts that gain keys, sets and strings. Each would need allocation and a runtime inside compiled code, so code that uses them runs as Python, and the loops around it that don't are still compiled. See [Fallback and errors](errors.md).

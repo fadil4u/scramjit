@@ -111,7 +111,7 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | `range`, `enumerate`, `zip`, `map`, `filter`, comprehensions | numpy array expressions: `a * 2` |
 | `sum(gen, 0.0)`, `min`, `max`, `abs`, `**`, tuple unpacking | Calls to undecorated Python functions, recursion |
 | Calls to other `@scram` functions and to C from `cimo.compile`, usually inlined | Strings, objects |
-| Numbers and n-D numpy arrays, including dtypes like `uint8` | Classes |
+| Numbers and n-D numpy arrays, including dtypes like `uint8`; `Enum` and `IntEnum` members | Classes |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | Lists that grow with `append` |
 | Dicts passed in, reading and writing keys it names | Dicts that gain keys, or built in the function |
 | numpy functions on single numbers: `np.sqrt(x[i])`, `np.sin`, `np.minimum` | numpy calls that make arrays: `np.sqrt(x)`, `x.sum(axis=0)` |
@@ -205,7 +205,7 @@ is no sandbox.
 Pre-release: the API may still change.
 
 - **Releases.** The latest on PyPI is 0.0.2. `main` is ahead of it, and 0.0.3 comes next, after a cimo release it needs. Since 0.0.2,
-  on `main` only: calls between `@scram` functions, default parameter values, calling C from `cimo.compile`, arrays made inside a function, module-level
+  on `main` only: calls between `@scram` functions, default parameter values, enums, calling C from `cimo.compile`, arrays made inside a function, module-level
   constants, arithmetic on `float32`, `uint8`, `uint64` and the other narrow dtypes, `<<` and `>>`, and exact 64-bit hashes. To use them now,
   install both from GitHub:
 

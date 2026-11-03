@@ -37,6 +37,7 @@ ARITH = {ast.Add: 'Add', ast.Sub: 'Sub', ast.Mult: 'Mult', ast.Div: 'Div', ast.F
          ast.Mod: 'Mod', ast.BitAnd: 'BitAnd', ast.BitOr: 'BitOr', ast.BitXor: 'BitXor', ast.Pow: 'Pow',
          ast.LShift: 'LShift', ast.RShift: 'RShift'}
 CMP = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=', ast.Eq: '==', ast.NotEq: '!='}
+IS = {ast.Is: 'is', ast.IsNot: 'is not'}      # only between enum members
 SWAP = {'<': '>', '<=': '>=', '>': '<', '>=': '<=', '==': '==', '!=': '!='}
 
 # math functions: name -> (kind, can_overflow). 'f1' wraps a one-argument C library function the
@@ -863,7 +864,7 @@ class Compiler:
 
     def check_test(self, test):
         t = self.typeof(test)
-        if not t.is_number:
+        if not t.is_number and t.kind != 'enum':
             self.fail(test, f'a condition of type {t.name}')
 
     def range_args(self, it):
@@ -1069,6 +1070,10 @@ class Compiler:
                 self.fail(sub, f'an index of type {t.name}')
 
     def binop_type(self, a, b, op, node):
+        if a.kind == 'enum' or b.kind == 'enum':
+            if not all(t.kind != 'enum' or T.is_int_enum(t) for t in (a, b)):
+                self.fail(node, f'arithmetic on {(a if a.kind == "enum" else b).name}, an Enum member (write .value)')
+            a, b = (T.INT if a.kind == 'enum' else a), (T.INT if b.kind == 'enum' else b)
         if not (a.is_number and b.is_number):
             self.fail(node, f'{op} on {a.name} and {b.name}')
         if T.NP_UINT64 in (a, b):
@@ -1250,6 +1255,42 @@ class Compiler:
             return f'SJ_FAIL({RERUN}, {line}, 0, 0);'
         return f'SJ_FAIL({VALUE_ERROR}, {line}, {message}, 0);'
 
+    def enum_compare_type(self, e, ts):
+        """Comparisons with an enum member, as Python makes them: == and != are identity for an Enum (another type is
+        never equal), is and is not between members, and an IntEnum orders as an int."""
+        for op, a, b in zip(e.ops, ts, ts[1:]):
+            ints = all(T.is_int_enum(t) or (t.kind in ('int', 'bool') and t.np is False and t is not T.U64) for t in (a, b))
+            if isinstance(op, (ast.Is, ast.IsNot)):
+                if not (a.kind == 'enum' and b.kind == 'enum'):
+                    self.fail(e, f'is between {a.name} and {b.name}')
+            elif isinstance(op, (ast.Eq, ast.NotEq)):
+                if not (a.kind == 'enum' and b.kind == 'enum' or ints or (a.kind == 'enum') != (b.kind == 'enum') and (a.is_number or b.is_number)):
+                    self.fail(e, f'comparing {a.name} with {b.name}')
+                if (a.np or b.np) and not ints:
+                    self.fail(e, f'comparing {a.name} with {b.name}')
+            elif type(op) in CMP:
+                if not ints:
+                    self.fail(e, f'ordering {a.name} and {b.name}')
+            else:
+                self.fail(e, 'in and not in')
+        return T.BOOL
+
+    def enum_attribute(self, e):
+        """The type of Level.HIGH (a member) or member.value (its int), or None for another attribute."""
+        if isinstance(e.value, ast.Name) and self.env.get(e.value.id) is not None and self.env[e.value.id].kind == 'enumclass':
+            cls = self.env[e.value.id].elem
+            if e.attr not in cls.__members__:
+                self.fail(e, f'{cls.__name__}.{e.attr}, which isn\'t a member')
+            return T.enum_member_of(cls)
+        if e.attr in ('value', '_value_') and isinstance(e.value, (ast.Name, ast.Attribute)):
+            try:
+                t = self.typeof(e.value)
+            except Unsupported:
+                return None
+            if t.kind == 'enum':
+                return T.INT
+        return None
+
     def gotcha(self, node, text):
         """Note that this line can differ from Python, for preflight."""
         line, have = self.line(node), self.gotchas.get(self.line(node))
@@ -1288,6 +1329,9 @@ class Compiler:
         if isinstance(e, ast.Attribute):
             if e.attr == 'T' and self.is_view(e):
                 return self.transpose_type(e)
+            enum_type = self.enum_attribute(e)
+            if enum_type is not None:
+                return enum_type
             if isinstance(e.value, ast.Name) and e.value.id not in self.env \
                     and ((self.globals.get(e.value.id) is math and e.attr in MATH_CONSTANTS)
                          or (is_numpy(self.globals.get(e.value.id)) and e.attr in NP_CONSTANTS)):
@@ -1308,6 +1352,10 @@ class Compiler:
             return self.binop_type(self.typeof(e.left), self.typeof(e.right), op, e)
         if isinstance(e, ast.UnaryOp):
             t = self.typeof(e.operand)
+            if t.kind == 'enum' and isinstance(e.op, ast.Not):
+                return T.BOOL
+            if T.is_int_enum(t):                         # an IntEnum member is an int
+                return T.INT
             if not t.is_number:
                 self.fail(e, f'a unary operator on {t.name}')
             if isinstance(e.op, ast.Not):
@@ -1324,9 +1372,11 @@ class Compiler:
                 return t
             return T.INT if t is T.BOOL else t
         if isinstance(e, ast.Compare):
+            ts = [self.typeof(x) for x in [e.left] + e.comparators]
+            if any(t.kind == 'enum' for t in ts):
+                return self.enum_compare_type(e, ts)
             if not all(type(o) in CMP for o in e.ops):
                 self.fail(e, 'in, not in, is and is not')
-            ts = [self.typeof(x) for x in [e.left] + e.comparators]
             if not all(t.is_number for t in ts):
                 self.fail(e, 'comparisons of non-numbers')
             for a, b in zip(ts, ts[1:]):
@@ -1347,7 +1397,7 @@ class Compiler:
         if isinstance(e, ast.IfExp):
             self.check_test(e.test)
             t = self.join_all(e, [self.typeof(e.body), self.typeof(e.orelse)], 'a conditional expression')
-            if not t.is_number:
+            if not t.is_number and t.kind != 'enum':
                 self.fail(e, f'a conditional expression of type {t.name}')
             return t
         if isinstance(e, ast.Subscript):
@@ -1665,7 +1715,7 @@ class Compiler:
         nodes, picked = self.call_args(e, spec, fn)
         ts = [self.typeof(x) for x in nodes]
         for x, t in zip(nodes, ts):
-            if not (t.is_number or t.kind == 'array' or (t.kind == 'tuple' and all(et.is_number and et.np != 'dyn' for et in t.elem))):
+            if not (t.is_number or t.kind in ('array', 'enum') or (t.kind == 'tuple' and all(et.is_number and et.np != 'dyn' for et in t.elem))):
                 self.fail(e, f'passes {t.name} to {e.func.id}()')
         types = [ts[k] for k in picked]
         for h in spec.hidden:
@@ -1727,7 +1777,7 @@ class Compiler:
         chosen = [done[k] for k in picked] + [(self.env[self.hidden_param(h)], self.hidden_param(h)) for h in spec.hidden]
         cargs, arrays = [], []
         for t, v in chosen:
-            if t.kind == 'function':
+            if t.kind in ('function', 'enumclass'):
                 continue
             if t.kind == 'array':
                 arrays.append(v)
@@ -2880,7 +2930,7 @@ class Compiler:
         params = []
         for p in self.params:
             t = self.env[p]
-            if t.kind == 'function':
+            if t.kind in ('function', 'enumclass'):
                 continue
             if t.kind == 'array':
                 params += [f'{t.ctype}v_{p}', f'int64_t v_{p}__n'] + [f'int64_t v_{p}__n{k}' for k in range(1, t.ndim)]
@@ -4417,6 +4467,8 @@ class Compiler:
         return f'({to.ctype})({c})'
 
     def truth(self, c, t):
+        if t.kind == 'enum':                          # Enum members are always true; IntEnum's are ints
+            return f'({c}) != 0' if T.is_int_enum(t) else '1'
         if t.kind == 'float':
             return f'({c}) != 0.0'
         if t.kind == 'int':
@@ -4462,6 +4514,10 @@ class Compiler:
                 return self.cnames[e.id]
             t = self.env[e.id]
             return f'v_{e.id}', (f'v_{e.id}__np' if t.np == 'dyn' else flag_of(t))
+        if isinstance(e, ast.Attribute) and self.enum_attribute(e) is not None:
+            if self.enum_attribute(e).kind == 'enum':
+                return c_int(getattr(self.env[e.value.id].elem, e.attr)._value_), '0'
+            return self.expr(e.value)[0], '0'
         if isinstance(e, ast.Attribute):
             if e.attr in ('ndim', 'size') and isinstance(e.value, ast.Name) and e.value.id in self.env:
                 t = self.env[e.value.id]
@@ -4596,6 +4652,7 @@ class Compiler:
     def arith(self, op, left, at, right, node):
         """left <op> right, where left (already emitted, of type at) is the left operand."""
         bt = self.typeof(right)
+        at, bt = (T.INT if at.kind == 'enum' else at), (T.INT if bt.kind == 'enum' else bt)      # IntEnum: its value
         rt = self.binop_type(at, bt, op, node)
         a, af = self.hold(left[0], at), self.hold_flag(left[1])
         bv = self.expr(right)
@@ -4749,6 +4806,8 @@ class Compiler:
         return f'({fb} == 0.0 ? fmod({fa}, {fb}) : sj_fmod_py({fa}, {fb}))'
 
     def cmp(self, a, at, b, bt, op):
+        if at.kind == 'enum' or bt.kind == 'enum':
+            return self.enum_cmp(a, at, b, bt, op)
         af, bf = at.kind == 'float', bt.kind == 'float'
         if T.U64 in (at, bt) or T.NP_UINT64 in (at, bt):
             return self.u64_cmp(a, at, b, bt, op)
@@ -4769,6 +4828,21 @@ class Compiler:
         code = {'<': 0, '<=': 1, '>': 2, '>=': 3, '==': 4, '!=': 5}[op]
         return (f'((int64_t){a} >= -9007199254740992LL && (int64_t){a} <= 9007199254740992LL ? '
                 f'(double){a} {op} {b} : sj_cmp_test(sj_cmp_if((int64_t){a}, {b}), {code}))')
+
+    def enum_cmp(self, a, at, b, bt, op):
+        """Members are their values. Two of the same class are the same member exactly when their values are equal (an
+        alias is the member it names); of different classes, or with a number, an Enum is never equal."""
+        if op in ('is', 'is not'):
+            same = at is bt
+            return f'(({a}) {"==" if op == "is" else "!="} ({b}))' if same else ('0' if op == 'is' else '1')
+        if T.is_int_enum(at) and T.is_int_enum(bt) or (T.is_int_enum(at) or T.is_int_enum(bt)) and at.kind != 'float' and bt.kind != 'float' \
+                and not (at.kind == 'enum' and bt.kind == 'enum' and not (T.is_int_enum(at) and T.is_int_enum(bt))):
+            return f'((int64_t)({a}) {op} (int64_t)({b}))'        # IntEnum: an int
+        if at is bt:
+            return f'(({a}) {op} ({b}))'
+        if T.is_int_enum(at) or T.is_int_enum(bt):                # IntEnum with a float
+            return self.cmp(a, T.INT if at.kind == 'enum' else at, b, T.INT if bt.kind == 'enum' else bt, op)
+        return '0' if op == '==' else '1'
 
     def u64_cmp(self, a, at, b, bt, op):
         """Exact, as Python's are, and as numpy's are with ints. With np.float64 numpy rounds the int to a double first."""
@@ -4794,7 +4868,7 @@ class Compiler:
         if len(e.ops) == 1:
             second = self.expr(operands[1])
             b = self.hold(second[0], types[1])
-            return self.cmp(a, types[0], b, types[1], CMP[type(e.ops[0])]), flag_or(af, second[1])
+            return self.cmp(a, types[0], b, types[1], CMP.get(type(e.ops[0])) or IS[type(e.ops[0])]), flag_or(af, second[1])
         r, rf = self.temp(), self.temp()
         self.emit(f'int {r} = 1, {rf} = 0;')
         closes = 0
@@ -4804,7 +4878,7 @@ class Compiler:
                 closes += 1
             nxt = self.expr(operands[i + 1])
             b = self.hold(nxt[0], types[i + 1])
-            self.emit(f'{r} = {self.cmp(a, types[i], b, types[i + 1], CMP[type(op)])}; {rf} = {flag_or(af, nxt[1])};')
+            self.emit(f'{r} = {self.cmp(a, types[i], b, types[i + 1], CMP.get(type(op)) or IS[type(op)])}; {rf} = {flag_or(af, nxt[1])};')
             a, af = b, nxt[1]
         for _ in range(closes):
             self.close()

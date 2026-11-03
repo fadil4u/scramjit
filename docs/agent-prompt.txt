@@ -45,7 +45,7 @@ Falls back, with the fix:
 - changing a variable's type, s = 0 then s += 0.5: start with s = 0.0
 - sum(floats) without a start: sum(gen, 0.0)
 - x ** 0.5 on a float: math.sqrt(x); int ** variable int: use a loop
-- dict, set, str, print, append, class, self, try, raise, assert, nested def, lambda outside map/filter, keyword-only parameters: move outside the function
+- dict, set, str, print, append, class (Enum and IntEnum members with int values compile), self, try, raise, assert, nested def, lambda outside map/filter, keyword-only parameters: move outside the function
 
 ## Semantics
 Matches CPython bit for bit: // and % on negatives, negative indices, IndexError, ZeroDivisionError, math. Exception: ints are 64-bit and wrap silently. No sandbox; compiled code has the process's privileges.

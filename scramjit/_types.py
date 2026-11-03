@@ -177,6 +177,45 @@ def function_of(fn):
     return t
 
 
+_ENUMS = {}
+
+
+def enum_ok(cls):
+    """An Enum or IntEnum class compiled code can hold members of as their values: int values in int64, and equality,
+    hashing and truth as Enum and IntEnum define them."""
+    import enum
+    if not (isinstance(cls, type) and issubclass(cls, enum.Enum)) or issubclass(cls, (enum.Flag, str)):
+        return False
+    base = enum.IntEnum if issubclass(cls, int) else enum.Enum
+    for c in cls.__mro__:                     # a class between it and Enum or IntEnum defining these changes them
+        if c is base:
+            break
+        if any(m in vars(c) for m in ('__eq__', '__ne__', '__hash__', '__bool__', '__lt__', '__le__', '__gt__', '__ge__')):
+            return False
+    vals = [m.value for m in cls]
+    return bool(vals) and all(type(v) is int and -(1 << 63) <= v < 1 << 63 for v in vals)
+
+
+def enum_class_of(cls):
+    """An enum class, as a global names it: no C value; a new class is a new signature."""
+    key = ('class', cls)
+    if key not in _ENUMS:
+        _ENUMS[key] = Type(f'enum {cls.__name__}', None, 'enumclass', elem=cls)
+    return _ENUMS[key]
+
+
+def enum_member_of(cls):
+    """A member of an enum class, held as its value. An IntEnum member is also an int."""
+    key = ('member', cls)
+    if key not in _ENUMS:
+        _ENUMS[key] = Type(cls.__name__, 'int64_t', 'enum', elem=cls)
+    return _ENUMS[key]
+
+
+def is_int_enum(t):
+    return t.kind == 'enum' and issubclass(t.elem, int)
+
+
 _DICTS = {}
 
 

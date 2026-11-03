@@ -2,6 +2,7 @@
 
 import ast
 import copy
+import enum
 import functools
 import inspect
 import struct
@@ -76,6 +77,10 @@ def _arg_type(x):
         if not elems or any(e is None or not e.is_number or e is T.U64 for e in elems):
             return None
         return T.tuple_of(elems)
+    if isinstance(x, enum.Enum) and T.enum_ok(t):       # a member: passed as its value
+        return T.enum_member_of(t)
+    if isinstance(x, type) and issubclass(x, enum.Enum):
+        return T.enum_class_of(x) if T.enum_ok(x) else None
     np = sys.modules.get('numpy')
     if np is not None:
         if t is np.ndarray:
@@ -165,7 +170,10 @@ def _dict_keys(fdef):
 
 def _push(cargs, x, t):
     """The C arguments for one Python argument."""
-    if t.kind == 'function':
+    if t.kind in ('function', 'enumclass'):
+        return
+    if t.kind == 'enum':
+        cargs.append(x._value_)
         return
     if t.kind == 'array' and t.strided:
         cargs.append(x.ctypes.data)
@@ -290,14 +298,17 @@ def _make_plan(f, entry, args):
         i = len(real) + k
         env[f'gname{k}'], env[f'gtype{k}'], env[f'G{k}'] = gname, type(args[i]), g
         hidden.append(f'    a{i} = G{k}.get(gname{k}, MISSING)\n    if type(a{i}) is not gtype{k}:\n        return slow({again})')
-        if entry.types[i].kind == 'function':     # a new function is a new signature
+        if entry.types[i].kind in ('function', 'enumclass'):     # a new function or enum class is a new signature
             env[f'gval{k}'] = args[i]
             hidden.append(f'    if a{i} is not gval{k}:\n        return slow({again})')
     if hidden:
         env.update(MISSING=_MISSING)
     cargs = []
     for i, (x, t, n) in enumerate(zip(args, entry.types, names)):
-        if t.kind == 'function':
+        if t.kind == 'enum':
+            cargs.append(f'{n}._value_')
+            continue
+        if t.kind in ('function', 'enumclass'):
             continue
         if t.kind == 'array' and t.strided:
             return f._slow_call
@@ -855,6 +866,8 @@ class Function:
         return out
 
     def _box(self, io, at, flag_at, r):
+        if r.kind == 'enum':                      # its value, back as the member
+            return r.elem(int.from_bytes(io[at:at + 8], 'little', signed=True))
         if r.np == 'dyn' and r.kind == 'float' and io[flag_at] == RETURNS_INT:
             return int(struct.unpack_from('<d', io, at)[0])
         np = r.np if r.np != 'dyn' else io[flag_at] != 0

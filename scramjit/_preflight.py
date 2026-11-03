@@ -116,6 +116,8 @@ def module_globals(tree):
                     else StaticNumpy(a.name) if s.module == 'numpy' else _OTHER
         elif isinstance(s, ast.FunctionDef) and any(is_scram(d) for d in s.decorator_list):
             out[s.name] = StaticCallee(s, out)
+        elif isinstance(s, ast.ClassDef) and _static_enum(s) is not None:
+            out[s.name] = _static_enum(s)
         elif isinstance(s, (ast.FunctionDef, ast.ClassDef)):
             out[s.name] = _OTHER
         elif isinstance(s, ast.Assign):
@@ -127,6 +129,36 @@ def module_globals(tree):
                         v = const_int(s.value)                    # (1 << 64) - 1
                         out[t.id] = _OTHER if v is None else v
     return out
+
+
+def _static_enum(cls):
+    """The enum a class statement makes, built from source, when it's an Enum or IntEnum of int literals and auto():
+    the same members a run would have. None for any other class."""
+    import enum
+    bases = [ast.unparse(b) for b in cls.bases]
+    if len(bases) != 1 or bases[0] not in ('Enum', 'IntEnum', 'enum.Enum', 'enum.IntEnum') or cls.keywords or cls.decorator_list:
+        return None
+    members, last = [], 0
+    for st in cls.body:
+        if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant) and isinstance(st.value.value, str):
+            continue                                   # a docstring
+        if not (isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name)):
+            return None
+        v = st.value
+        if isinstance(v, ast.Call) and ast.unparse(v.func) in ('auto', 'enum.auto') and not v.args and not v.keywords:
+            value = last + 1
+        else:
+            try:
+                value = ast.literal_eval(v)
+            except ValueError:
+                return None
+        if type(value) is not int:
+            return None
+        members.append((st.targets[0].id, value))
+        last = value
+    if not members:
+        return None
+    return (enum.IntEnum if bases[0].endswith('IntEnum') else enum.Enum)(cls.name, members)
 
 
 def is_scram(d):
@@ -373,7 +405,10 @@ def with_globals(fdef, globals_):
         if name not in globals_:
             continue
         v = globals_[name]
-        if type(v) is int and (1 << 63) <= v < (1 << 64):        # held unsigned, as a call would pass it
+        if isinstance(v, type) and T.enum_ok(v):                # an enum class: what Level.HIGH needs
+            added.append(ast.arg(name))
+            tuples[name] = T.enum_class_of(v)
+        elif type(v) is int and (1 << 63) <= v < (1 << 64):      # held unsigned, as a call would pass it
             added.append(ast.arg(name))
             tuples[name] = T.U64
         elif type(v) in (int, float, bool):

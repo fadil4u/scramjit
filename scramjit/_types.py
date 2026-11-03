@@ -202,7 +202,7 @@ def array(elem, writable=True, ndim=1, strided=False):
     return _ARRAYS[key]
 
 
-def _bits(t):
+def bits(t):
     return {'int8_t': 8, 'uint8_t': 8, 'int16_t': 16, 'uint16_t': 16, 'int32_t': 32, 'uint32_t': 32}.get(t.ctype, 64)
 
 
@@ -212,16 +212,16 @@ def promote(a, b):
         x, y = (a, b) if a.kind == 'float' else (b, a)
         if x is NP_FLOAT64 or y is NP_FLOAT64:
             return NP_FLOAT64
-        return x if y.kind == 'float' or _bits(y) <= 16 else NP_FLOAT64
+        return x if y.kind == 'float' or bits(y) <= 16 else NP_FLOAT64
     if a is NP_INT64 or b is NP_INT64:
         return NP_INT64
     ua, ub = a.ctype[0] == 'u', b.ctype[0] == 'u'
-    bits = max(_bits(a), _bits(b))
+    width = max(bits(a), bits(b))
     if ua != ub:                            # the signed one must hold the unsigned one's values
-        unsigned_bits, signed_bits = (_bits(a), _bits(b)) if ua else (_bits(b), _bits(a))
-        bits = signed_bits if signed_bits > unsigned_bits else unsigned_bits * 2
-        return NP_INT64 if bits > 32 else NARROW[f'int{bits}']
-    return NARROW[f'{"u" if ua else ""}int{bits}']
+        unsigned_bits, signed_bits = (bits(a), bits(b)) if ua else (bits(b), bits(a))
+        width = signed_bits if signed_bits > unsigned_bits else unsigned_bits * 2
+        return NP_INT64 if width > 32 else NARROW[f'int{width}']
+    return NARROW[f'{"u" if ua else ""}int{width}']
 
 
 def narrow_result(a, b, op):

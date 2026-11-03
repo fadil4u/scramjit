@@ -54,6 +54,9 @@ Python's integers are unbounded. Compiled integers are `int64`, and past that th
 | `2 ** 70` | `1180591620717411303424` | `0` |
 | `math.factorial(25)` | `15511210043330985984000000` | `7034535277573963776` |
 | `int(1e22)`, `math.floor(1e22)` | `10000000000000000000000` | `1864712049423024128` |
+| `1 << 63`, `1 << 64` | `9223372036854775808`, `18446744073709551616` | `-9223372036854775808`, `0` |
+
+`>>` is always exact, and so is a shift masked to fewer than 64 bits, such as `(x << 13) & 0xFFFFFFFF` in a 32-bit hash: masking keeps only the bits wrapping leaves alone. On numpy integers, shifts follow numpy, where a count past the width gives 0.
 
 Checking every operation would cost speed on every loop, and numeric code rarely comes near `2 ** 63`. If yours might, leave that function undecorated, or use floats. An argument that doesn't fit in 64 bits is safe: that call runs as Python.
 

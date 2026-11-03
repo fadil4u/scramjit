@@ -143,7 +143,7 @@ Inside a call there's no profile of its own: time in `step` counts toward `run` 
 
 ## Calling C
 
-For what's awkward in Python, such as a hash built from shifts and overflow, write that part in C with [cimo](https://www.cimo.dev/) and call it:
+`<<` and `>>` compile, so a 32-bit hash written in Python, with each step masked, is exact ([gotcha](gotchas.md#integers-are-64-bit-and-wrap)). For what's awkward in Python, such as a 64-bit hash that relies on unsigned overflow, write that part in C with [cimo](https://www.cimo.dev/) and call it:
 
 ```python
 import cimo

@@ -208,7 +208,9 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
 Each decision is explicit and tested against CPython:
 
 - `int` is int64 unless narrowed; overflow wraps. No checked mode: numeric code rarely nears
-  `2**63`, and checking every operation would cost every loop.
+  `2**63`, and checking every operation would cost every loop. `<<` wraps too, as multiplying by `2**k` does
+  (0 from 64 bits on), so a hash masked to 32 bits (`(x << 13) & 0xFFFFFFFF`) is exact; `>>` is always exact, and a
+  negative count raises `ValueError` as in Python. On numpy scalars, numpy's: a count outside the width gives 0, or -1.
 - `//` and `%` round toward negative infinity, as in Python, not truncate as in C.
 - Negative indices count from the end, as in Python.
 - Bounds checks are on by default and raise `IndexError` as Python does; opt out per function with

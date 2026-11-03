@@ -60,6 +60,7 @@ VALUE_ERROR_MESSAGES = [
     'zero-size array to reduction operation minimum which has no identity',
     'attempt to get argmax of an empty sequence',
     'attempt to get argmin of an empty sequence',
+    'negative shift count',
 ]
 OVERFLOW_ERROR_MESSAGES = [
     'cannot convert float infinity to integer',

@@ -37,12 +37,14 @@ Spills per line, once cimo can report them.
 
 ## Next
 
-1. **Shift operators:** `>>` and `<<` fall back ("the RShift operator"). Hash, RNG and bit-packing loops use
-    them constantly, and a model writing code reaches for them first. Python's ints don't wrap on `<<`, so decide
-    how that fits the 64-bit rule in Gotchas.
-2. **Narrow dtypes, what's left:** arithmetic compiles (see "Narrow dtypes" in `types.md`). Not yet: `**` (numpy calls `powf`, so the libm table needs it; int powers wrap in the dtype), `sum()`,
+1. **Narrow dtypes, what's left:** arithmetic compiles (see "Narrow dtypes" in `types.md`). Not yet: `**` (numpy calls `powf`, so the libm table needs it; int powers wrap in the dtype), `sum()`,
    numpy functions and reductions on them, and `uint64`. A literal becoming narrow must fit exactly: not `s = 0` then `s += x[i]` on float32, nor `s = 0.1`, nor a parameter, and such a variable can't meet a Python number afterwards, since the type depends on its flag.
    Speed, all in cimo's `TODO.md`: byte and short lanes (`uint8` brighten 0.24 ns per element against int32's 0.12) and the flag written in the loop.
+2. **64-bit hashes:** a literal past int64 (`0xFFFFFFFFFFFFFFFF`, FNV-1a 64's `14695981039346656037`) falls back, and so does
+   `uint64`. 32-bit hashes and xorshift compile (`examples/xorshift.py`). A uint64 type would need its own rules: Python masks a
+   negative int64 into a large positive number, numpy's uint64 with int64 gives float64.
+   `examples/xorshift.py` takes 3.9 ms per million numbers against 2.05 for the same loop written in C on `uint32_t` through cimo:
+   the masks sit on the chain each number waits on, and storing into `uint32` checks the range.
 3. **Bounds-check hoisting, what's left:** versioning covers `arr[i + c]` and, in innermost loops, `arr[base + i]`
    with `base` built from Python ints that don't change in the loop. Not yet: steps other than 1 (RoPE's
    `range(0, dim, 2)` in `bench/llm.py`), a start that isn't a literal or `len()`, numpy int bases, and outer
@@ -127,4 +129,32 @@ Spills per line, once cimo can report them.
     in one function. Compile time decides whether generated code is practical, since each candidate compiles once.
 17. **A name assigned in `while True` isn't seen as assigned after the loop.** `while True: ds = f(); if ds >= 17: break`, then
     reading `ds`, gives "ds may be read before it is assigned". Every way out of such a loop passes the assignment.
-18. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has. Little to win: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, which leaves temporary arrays.
+18. **Compile time.** A first call costs seconds, not the 0.1 s the README's `ema` example suggests: 0.53 s
+    on Gray-Scott, 0.76 s native and 1.75 s in Pyodide for the LLM demo's forward pass, 3 s for a 200-line
+    generated loop and up to 15 s with bounds-check versioning (#16). Every candidate in a generated-code
+    workflow compiles once, so this decides what's practical. An optimization pass on the compiler
+    itself, measured with `cProfile` on `bench/` and `bench/llm.py` in both runtimes, before and after:
+    - Split the time between scramjit (parse, type inference, C generation) and cimo (preprocessor,
+      front end, middle end, backend, encoder, link). Record the split here; cimo's share goes to its
+      `TODO.md` ("Compile time").
+    - In scramjit: generate less C (smaller versioned copies, no dead helpers, one prelude shared across
+      compiles), and cache type inference per signature.
+    - Across the boundary: cimo's compile of a kernel that reuses the prelude and libm table from a
+      previous compile shouldn't redo their work; ask for a per-process cache of parsed headers and the
+      prelude, or pass them pre-parsed.
+    - Target: under 0.3 s warm for a 100-line function natively, under 1 s in Pyodide.
+19. **Split `_compiler.py` into a package.** 4.8k lines holding every lowering in one file. Make
+    `scramjit/_compiler/` with one module per concern, in the order the compile runs: `infer` (types),
+    `index` (indexing, views, slices), `checks` (bounds checks and versioning), `calls` (`@scram` and C
+    callees, inlining), `reduce` (builtins and numpy reductions), `make` (arrays and containers made
+    inside a function), `emit` (C text). No behavior change: the suite and `bench/` are the gate, and
+    the `docs/py/scramjit` copy is regenerated, not edited.
+20. **Adversarial code reading before a public launch.** `_compiler.py` (4.8k lines) and `_dispatch.py`
+    were written in days and no one has read them end to end. The parity tests check results; a read
+    checks what they can't: a lowering that is right for every tested type combination and wrong for
+    one the generator never produces, a bounds check hoisted when it shouldn't be, a fallback that
+    silently changes semantics. Read `_compiler.py` by lowering (indexing and views first, then
+    bounds-check versioning, then calls), and record what was checked and found here.
+21. **Commit subjects are paragraphs.** `git log --oneline` is unreadable. One line of at most 72
+    characters, then a blank line, then the detail (add the rule to `AGENTS.md`).
+22. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has. Little to win: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, which leaves temporary arrays.

@@ -33,7 +33,8 @@ BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'round', 'sum',
 MATH_CONSTANTS = {'pi': math.pi, 'e': math.e, 'tau': math.tau, 'inf': math.inf, 'nan': math.nan}
 INT64_MIN, INT64_MAX = -(1 << 63), (1 << 63) - 1
 ARITH = {ast.Add: 'Add', ast.Sub: 'Sub', ast.Mult: 'Mult', ast.Div: 'Div', ast.FloorDiv: 'FloorDiv',
-         ast.Mod: 'Mod', ast.BitAnd: 'BitAnd', ast.BitOr: 'BitOr', ast.BitXor: 'BitXor', ast.Pow: 'Pow'}
+         ast.Mod: 'Mod', ast.BitAnd: 'BitAnd', ast.BitOr: 'BitOr', ast.BitXor: 'BitXor', ast.Pow: 'Pow',
+         ast.LShift: 'LShift', ast.RShift: 'RShift'}
 CMP = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=', ast.Eq: '==', ast.NotEq: '!='}
 SWAP = {'<': '>', '<=': '>=', '>': '<', '>=': '<=', '==': '==', '!=': '!='}
 
@@ -1014,10 +1015,10 @@ class Compiler:
             self.fail(node, f'{op} on {a.name} and {b.name}')
         if op == 'Pow':
             return self.pow_type(a, b, node)
-        if op in ('BitAnd', 'BitOr', 'BitXor'):
+        if op in ('BitAnd', 'BitOr', 'BitXor', 'LShift', 'RShift'):
             if a.kind == 'float' or b.kind == 'float':
                 self.fail(node, 'a bitwise operator on a float')
-            if a is T.BOOL and b is T.BOOL:
+            if a is T.BOOL and b is T.BOOL and op not in ('LShift', 'RShift'):
                 return T.BOOL
         r = T.arith_result(a, b, op)
         if r is None:
@@ -4060,12 +4061,32 @@ class Compiler:
         for n, py, v in ((at, bt, b), (bt, at, a)):       # numpy: a Python int must fit the scalar's dtype, except for /
             if op != 'Div' and T.is_narrow(n) and n.kind == 'int' and py.kind != 'float' and py.np is False:
                 self.check_fits(node, n, (v, '0'), py)
+        if op in ('LShift', 'RShift'):
+            return self.shift(op, a, at, b, rt, npf, line, right), npf
         if not (T.is_narrow(rt) and rt.kind == 'int'):
             return self.arith_as(op, a, at, b, bt, right, rt, npf, line, node), npf
         if op in ('Add', 'Sub', 'Mult'):   # 32 bits rather than 64, so that the vectorizer keeps its lanes
             sym = {'Add': '+', 'Sub': '-', 'Mult': '*'}[op]
             return f'(({rt.ctype})((uint32_t){a} {sym} (uint32_t){b}))', npf
         return f'(({rt.ctype})({self.arith_as(op, a, at, b, bt, right, rt, npf, line, node)}))', npf
+
+    def shift(self, op, a, at, b, rt, npf, line, right):
+        """a << b and a >> b. Python raises on a negative count; numpy gives 0 (or -1 for >> of a negative), as it does
+        for a count past the width. Python's << is unbounded: here it wraps, as * does, so past 64 bits it's 0."""
+        bits = T.bits(rt)
+        x = self.hold(f'(int64_t)({self.coerce(a, at, rt)})', T.INT)
+        if isinstance(right, ast.Constant) and type(right.value) is int and 0 <= right.value < bits:   # nothing to check
+            if op == 'LShift':
+                return f'(({rt.ctype})((uint64_t){x} << {right.value}))'
+            return f'(({rt.ctype})({x} >> {right.value}))'
+        k = self.hold(f'(int64_t)({b})', T.INT)
+        if npf != '1':
+            cond = f'{k} < 0' if npf == '0' else f'!{npf} && {k} < 0'
+            self.emit(f'if ({cond}) SJ_FAIL({VALUE_ERROR}, {line}, {VALUE_ERROR_MESSAGES.index("negative shift count")}, 0);')
+        within = f'(uint64_t){k} < {bits}'
+        if op == 'LShift':
+            return f'({within} ? ({rt.ctype})((uint64_t){x} << {k}) : 0)'
+        return f'({within} ? ({rt.ctype})({x} >> {k}) : ({x} < 0 ? -1 : 0))'
 
     def arith_as(self, op, a, at, b, bt, right, rt, npf, line, node):
         """The C for a <op> b, whose result type is rt; integers are computed in 64 bits."""

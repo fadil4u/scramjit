@@ -78,7 +78,7 @@ def c_int(x):
 
 def numpy_dtype(elem):
     """The numpy dtype name of an element type; a list of lists' Python numbers are as numpy would hold them."""
-    return {'int': 'int64', 'float': 'float64', 'bool': 'bool'}.get(elem.name, elem.name[3:])
+    return {'int': 'int64', 'float': 'float64', 'bool': 'int32'}.get(elem.name, elem.name[3:])     # a list's bools are C ints
 
 
 FORWARD_DEPTH = 4     # y[i - 1] to y[i - 4] can be forwarded from temporaries
@@ -751,9 +751,8 @@ class Compiler:
     def return_type(self, v):
         if v is None:
             return T.NONE
-        if v is not None and not isinstance(v, ast.Tuple) and self.is_view(v) and self.typeof(v).kind == 'array' and T.is_pylist(self.typeof(v)) \
-                or isinstance(v, ast.Name) and self.env.get(v.id) is not None and T.is_pylist(self.env[v.id]):
-            self.fail(v, 'returns a list of lists, or a row of one')
+        if isinstance(v, ast.Subscript) and self.typeof(v).kind == 'array' and T.is_pylist(self.typeof(v)):
+            self.fail(v, 'returns a row of a list of lists (write the name of the whole list)')
         if isinstance(v, ast.Name) and self.env.get(v.id) is not None and self.env[v.id].kind == 'list':
             if self.env[v.id].elem.np is not False:
                 self.fail(v, f'returns {self.env[v.id].name}, whose elements may be numpy scalars')

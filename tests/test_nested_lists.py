@@ -107,7 +107,7 @@ def test_one_row_twice_stays_python():
 
 
 @pytest.mark.parametrize('src', ['def f(m):\n    return m[0, 1]\n', 'def f(m):\n    return m[0][1:]\n', 'def f(m):\n    m[0] = [1.0, 2.0]\n    return 0\n',
-                                 'def f(m):\n    return len(m.shape)\n', 'def f(m):\n    return m\n'])
+                                 'def f(m):\n    return len(m.shape)\n', 'def f(m):\n    return m[0]\n'])
 def test_what_python_does_differently_stays_python(src):
     space = {}
     exec(src, space)
@@ -183,3 +183,45 @@ def test_one_row_repeated_stays_python():
         warnings.simplefilter('ignore', FallbackWarning)
         assert g(3) == f(3) == 7
     assert not g.signatures
+
+
+def make_table(h: int, w: int):
+    t = [[0] * w for _ in range(h)]
+    for i in range(h):
+        for j in range(w):
+            t[i][j] = i * w + j
+    return t
+
+
+def make_floats(h: int):
+    return [[0.5] * 3 for _ in range(h)]
+
+
+def returns_its_argument(m):
+    m[0][0] += 1
+    return m
+
+
+def bool_table(h: int, w: int):
+    t = [[False] * w for _ in range(h)]
+    t[0][0] = True
+    return t
+
+
+@pytest.mark.parametrize('h, w', [(3, 4), (1, 1), (2, 0), (0, 3)])
+def test_returning_tables(h, w):
+    g = scram(cache=False)(make_table)
+    got = g(h, w)
+    want = make_table(h, w)
+    assert got == want and all(type(r) is list for r in got), (got, want)
+    if got and got[0]:
+        assert got[0] is not got[-1] or len(got) == 1                # separate rows
+    assert g.signatures, g._why
+
+
+def test_returning_floats_bools_and_the_argument():
+    strict(make_floats, 2)
+    strict(bool_table, 2, 2)
+    m = [[1, 2], [3, 4]]
+    g = scram(cache=False)(returns_its_argument)
+    assert g(m) is m and m == [[2, 2], [3, 4]]

@@ -142,9 +142,9 @@ Returning a list built in the function gives a new Python list; returning the li
 
 A rectangular list of lists works too, read with `m[i][j]` and written back the same way. A row, `row = m[i]` or `for row in m`, is a reference, as in Python, so writing `row[j]` changes `m`. A row whose numbers changed is replaced in one go, so its unchanged numbers become equal new objects. Copying costs about 100 ns per number each way: Floyd-Warshall on a 150x150 list of lists is 20x Python, while a single cheap pass over one gains nothing.
 
-A table made in the function, `[[0] * w for _ in range(h)]` or `[[0.0 for _ in range(w)] for _ in range(h)]`, is one block of memory with nothing to copy: an edit distance on two lists of 1,500 is 25x Python. `[[0] * w] * h` repeats one row, as in Python, so it stays Python.
+A table made in the function, `[[0] * w for _ in range(h)]` or `[[0.0 for _ in range(w)] for _ in range(h)]`, is one block of memory with nothing to copy: an edit distance on two lists of 1,500 is 25x Python. `[[0] * w] * h` repeats one row, as in Python, so it stays Python. Such a table can be returned, as new Python lists; returning the list of lists passed in returns that list itself.
 
-Still Python: an empty list (its element type isn't known), mixed ints and floats, numpy scalars as elements, the same list passed twice or one row in two places (`[r, r]`), ragged lists of lists, storing a float into a list of ints, `m[i, j]`, slices and `m[i] = new_row` on a list of lists (a copy and a rebinding in Python), returning a list of lists, a list of lists whose row value or size is more than a plain expression, and `append` and the other methods that resize.
+Still Python: an empty list (its element type isn't known), mixed ints and floats, numpy scalars as elements, the same list passed twice or one row in two places (`[r, r]`), ragged lists of lists, storing a float into a list of ints, `m[i, j]`, slices and `m[i] = new_row` on a list of lists (a copy and a rebinding in Python), returning a row of one, a list of lists whose row value or size is more than a plain expression, and `append` and the other methods that resize.
 
 ## Dicts with fixed keys
 

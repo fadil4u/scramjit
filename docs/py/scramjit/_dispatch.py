@@ -263,6 +263,27 @@ def _flatten(x, depth):
     return x
 
 
+def _lists_from(address, shape, et):
+    """Nested Python lists of the numbers at address, of this shape, read in C."""
+    import ctypes
+    code = _LIST_CODES[et.name]
+    n = 1
+    for s in shape:
+        n *= s
+    flat = memoryview((ctypes.c_char * max(1, n * struct.calcsize(code))).from_address(address)).cast('B')[:n * struct.calcsize(code)].cast(code).tolist() if n else []
+    if et is T.BOOL:
+        flat = [bool(v) for v in flat]
+
+    def nest(values, dims):
+        if len(dims) == 1:
+            return values
+        size = 1
+        for s in dims[1:]:
+            size *= s
+        return [nest(values[k * size:(k + 1) * size], dims[1:]) for k in range(dims[0])]
+    return nest(flat, list(shape))
+
+
 def _copy_back_nested(x, a, et, depth):
     """Into a list of lists passed in, the elements the kernel changed."""
     rows = [x]
@@ -827,11 +848,12 @@ class Function:
         entry.outs = [(i, k, 8 * c.out_slot(n), c.env[flat]) for n, (flat, i, k) in enumerate(c.outs)]
         entry.lists = c.written_lists()
         entry.array_args = c.array_args
-        entry.records = [(8 * c.record_slot(k), struct.Struct(f'<{array_record_slots(t)}q'), t.elem.name[3:]) for k, t in enumerate(ret_arrays(c.ret))]
-        if entry.records:
+        entry.records = [(8 * c.record_slot(k), struct.Struct(f'<{array_record_slots(t)}q'), t.elem.name[3:] if not T.is_pylist(t) else t)
+                         for k, t in enumerate(ret_arrays(c.ret))]
+        if any(not isinstance(name, T.Type) for _, _, name in entry.records):
             import numpy
             self._np = numpy
-            entry.records = [(at, layout, numpy.dtype(name).str) for at, layout, name in entry.records]
+            entry.records = [(at, layout, name if isinstance(name, T.Type) else numpy.dtype(name).str) for at, layout, name in entry.records]
         entry.io_size = 8 * c.record_slot(len(entry.records))
         entry.frames = c.unit.frames if c.calls else None
         if c.calls:                      # room for the trace of a failed call
@@ -971,6 +993,13 @@ class Function:
             for at, layout, typestr in entry.records:
                 value = layout.unpack_from(io, at)
                 address, which, same, block, data, ndim = value[:6]
+                if isinstance(typestr, T.Type):          # a list of lists: the one passed in, or new lists of what was made
+                    if block:
+                        out.append(_lists_from(address, value[10::2][:typestr.ndim], typestr.elem))
+                    else:
+                        i, key = entry.array_args[which]
+                        out.append(args[i] if key is None else args[i][key])
+                    continue
                 if block:
                     if made is None:
                         made = {}

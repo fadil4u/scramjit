@@ -104,7 +104,7 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | Compiled | Runs as Python |
 |:---|:---|
 | `for`, `while`, `break`, `continue`, `if`, conditional expressions | Masks and index arrays: `x[x > 0]` |
-| Lists of numbers and rectangular lists of lists, passed in or made in the function; lists returned (from 0.0.4) | Lists that grow, returning a list of lists |
+| Lists of numbers and rectangular lists of lists, passed in, made in the function and returned (from 0.0.4) | Lists that grow with `append` |
 | Views: `m[i]`, `x[a:b]`, `x[::-1]`, `m[:, j]`, `.T`, `for row in m`, as arguments and results | `x.reshape(...)`, `np.eye(n)` |
 | Making arrays: `np.zeros(n)`, `x.copy()`, `np.arange`, `np.linspace`, as locals and results | `x[1:] += y` |
 | Assigning to a slice: `x[1:3] = 0.0`, `m[i] = row`, overlap included | `np.sqrt(x)` on a whole array |
@@ -113,7 +113,7 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | `sum(gen, 0.0)`, `min`, `max`, `abs`, `**`, tuple unpacking | Calls to undecorated Python functions, recursion |
 | Calls to other `@scram` functions and to C from `cimo.compile`, usually inlined | Strings, objects |
 | Numbers and n-D numpy arrays, including dtypes like `uint8`; `Enum` and `IntEnum` members | Classes |
-| All of `math`, natively and in Pyodide (float `sumprod` excepted) | Lists that grow with `append` |
+| All of `math`, natively and in Pyodide (float `sumprod` excepted) | Sets, `str` |
 | Dicts passed in, reading and writing keys it names | Dicts that gain keys, or built in the function |
 | numpy functions on single numbers: `np.sqrt(x[i])`, `np.sin`, `np.minimum` | numpy calls that make arrays: `np.sqrt(x)`, `x.sum(axis=0)` |
 | numpy reductions to one number: `x.sum()`, `np.max(m[i])`, `x.std()`, `x.argmax()` | `np.dot`, `np.linalg` |

@@ -298,8 +298,8 @@ Spills per line, once cimo can report them.
    - **Lists as arguments, returned, and at module level: built, from 0.0.4** (see `containers.md`). Lists of lists passed in
      too: one array, rows as views, so a row is a reference as in Python. Lists of lists made in the
      function too, from `[[c] * w for _ in range(h)]` and its comprehension form (`[[c] * w] * h`, one row repeated, stays Python).
-     Not yet: returning a list of lists, more than two levels, numpy scalars as elements, and a call plan for list arguments
-     (each call takes the general path).
+     Returned too. Not yet: making more than two levels, returning a row, numpy scalars as elements, and a call plan for list
+     arguments (each call takes the general path).
    - **Classes:** attribute reads and writes on instances and dataclasses, then method calls.
    - **Dicts, what's left:** a dict passed in compiles (see "Containers"). Not yet: nested dicts, a dict built in the function, returning
      one, `len(p)` and `'a' in p`, which are known from the keys. A function that could add a key still runs as Python.

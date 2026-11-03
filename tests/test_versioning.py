@@ -1,6 +1,7 @@
 """Loop versioning of var + base indexes: one test before the loop must never change a result, an
 exception, or how far a loop got before raising."""
 
+import ast
 import random
 
 import numpy as np
@@ -265,3 +266,34 @@ def test_stepped_and_runtime_start_loops_are_versioned(a):
         c = g.c()
         assert '} else {' in c, f.__name__
         assert 'sj_io[4]' not in c[:c.index('} else {')], f.__name__     # the fast copy has no index check
+
+
+def many_loops(a, b, n, lo):
+    s = 0.0
+    for i in range(lo, n):
+        s += a[i + 1] * b[i]
+    for i in range(lo, n):
+        s += a[i + 2] - b[i]
+    for r in range(3):
+        for i in range(lo, n):           # the most deeply nested: versioned first
+            s += a[i + 1] * r
+    for i in range(lo, n):
+        s += a[i] * b[i + 1]
+    return s
+
+
+def test_a_budget_limits_the_copies(monkeypatch):
+    import scramjit._compiler as C
+    monkeypatch.setattr(C, 'VERSION_TOTAL', 0)
+    monkeypatch.setattr(C, 'VERSION_MIN', 30)                  # room for one small loop
+    g = scram(fallback=False, cache=False)(many_loops)
+    a, b = np.arange(12.0), np.arange(12.0) * 2
+    for n, lo in ((10, 0), (11, 2), (12, 0), (3, 5)):
+        assert outcome(g, [a, b, n, lo])[:3] == outcome(many_loops, [a, b, n, lo])[:3]
+    assert g.c().count('} else {') == 1                        # one loop copied, not four
+    chosen = []
+    plan = C.Compiler.plan_versioning
+    monkeypatch.setattr(C.Compiler, 'plan_versioning', lambda self: chosen.append(
+        sorted(n.lineno for n in ast.walk(self.f) if id(n) in (r := plan(self)))) or r)
+    scram(fallback=False, cache=False)(many_loops)(a, b, 10, 0)
+    assert chosen == [[8]]                                      # line 8 of the function: the loop inside the r loop

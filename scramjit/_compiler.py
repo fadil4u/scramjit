@@ -76,6 +76,11 @@ def c_int(x):
 
 
 FORWARD_DEPTH = 4     # y[i - 1] to y[i - 4] can be forwarded from temporaries
+# cimo's compile time grows with the square of a function's size (a 60-loop function: 3,140 lines of C in 4.0 s,
+# 6,020 with every loop versioned in 14.7 s), so versioning's copies may bring a function to VERSION_TOTAL syntax nodes
+# (about 3 s), with VERSION_MIN at least for its innermost loops; past that a loop keeps its checks.
+VERSION_TOTAL = 3200
+VERSION_MIN = 400
 
 
 def const_int(node):
@@ -585,6 +590,7 @@ class Compiler:
         self.slow_copy = 0     # inside that slow copy
         self.forwards = {}     # array -> (loop variable, temps holding its elements at var - 1, var - 2, ...)
         self.no_forwarding = False  # emitting the copy of a loop for when the arrays it stores to share memory
+        self.versionable = None    # ids of the loops versioning may copy, planned at the first one (plan_versioning)
         self.view_names = {}   # id of a view expression -> the variable that holds it while it's used
         self.rebound = set()   # arrays assigned somewhere: their extents aren't fixed, so facts mustn't name them
         self.broke = []        # for each open Python loop, the flag its else tests, or None
@@ -3302,7 +3308,7 @@ class Compiler:
             # loop versioning: if no access var + c can leave its array during this loop, run a
             # copy without those checks; otherwise the checked copy raises where Python would
             extra = self.version_candidates(s, var, fact)
-            if extra:
+            if extra and self.may_version(s):
                 cond = ' && '.join(self.version_test(key, c, te) for key, c in sorted(extra.items(), key=str))
                 self.open(f'if ({te} > {ts} && {cond})')
                 self.unit_loop(s, var, ts, te, fact + (extra,), short)
@@ -3350,7 +3356,7 @@ class Compiler:
         lo, hi, slack = known
         fast = (lo if lo is not None and lo >= 0 else 0, hi, slack)
         extra = self.version_candidates(s, var, fast)
-        if not extra:
+        if not extra or not self.may_version(s):
             return False
         tests = [] if lo is not None and lo >= 0 else [f'{ts} >= 0']
         if step is None:
@@ -3379,6 +3385,35 @@ class Compiler:
         self.open_counted('uint64_t', tk, '0', tn)
         self.emit(f'v_{var} = (int64_t)((uint64_t){ts} + {tk} * {step}ULL);')
         self.loop_body(s, var, fact)
+
+    def may_version(self, s):
+        """Is this loop one versioning may copy (plan_versioning)?"""
+        if self.versionable is None:
+            self.versionable = self.plan_versioning()
+        return id(s) in self.versionable
+
+    def plan_versioning(self):
+        """The loops whose bodies versioning may copy, within a budget of syntax nodes: the most deeply nested
+        first, since they run most often, and of those the first. A loop's cost includes the copies of loops chosen
+        inside it, which a copy of it copies again."""
+        loops = []
+
+        def walk(node, depth):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.For):
+                    loops.append((depth, len(loops), child))
+                walk(child, depth + isinstance(child, (ast.For, ast.While)))
+        walk(self.f, 0)
+        chosen, cost = set(), {}
+        budget = max(VERSION_MIN, VERSION_TOTAL - sum(1 for _ in ast.walk(self.f)))
+        for depth, _, loop in sorted(loops, key=lambda x: (-x[0], x[1])):
+            inner = sum(cost[id(n)] for n in ast.walk(ast.Module(body=loop.body, type_ignores=[])) if id(n) in chosen)
+            size = sum(1 for _ in ast.walk(ast.Module(body=loop.body, type_ignores=[]))) + inner
+            if size <= budget:
+                chosen.add(id(loop))
+                cost[id(loop)] = size
+                budget -= size
+        return chosen
 
     def iter_prep(self, d):
         """Evaluate an iterable's operands (in Python's order); return (trip count, elem(k)),
@@ -3490,6 +3525,8 @@ class Compiler:
     def unit_loop(self, s, var, ts, te, fact, short=False):
         ti = self.temp()
         found = None if self.no_forwarding else self.forwarded(s, var, fact)
+        if found and found[2] and not self.may_version(s):
+            found = None                       # no room for a second copy
         if found and found[2]:                 # other arrays are stored to: forward only where none shares y's memory
             y = found[0]
             def span(a):

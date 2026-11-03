@@ -337,11 +337,10 @@ Spills per line, once cimo can report them.
     instruction the sum's next add waits on (not measured). Measure non-reductions (stencils) before making it fire or removing it.
 15. **Calls between compiled functions, what's left:** recursion, defaults other than numbers left out by a compiled caller, keyword-only parameters, dicts and lists as arguments, a function passed as an argument, `module.f()`, and a line profile of what's called.
     **Calling C, what's left:** modules with state, which need calling across modules (cimo: a call by address crashes once the callee uses `malloc`), `include_dirs=` and `link=`, returning a pointer or `uint64_t`, a C function's module compiled with `fma=` on alongside exact math in one file (needs `FP_CONTRACT` in cimo).
-16. **Compile time jumps on large functions.** In a generated 200-line training loop, adding a 4-line nested
-    copy (`rec[t, y, x] = grid[y, x]` under one `if`) took the compile from about 3 s to 11 to 15 s on a loaded
-    machine. The cause is bounds-check versioning: a planner over the same world is 4,410 lines of C and 205 loops
-    with checks (16.4 s in cimo), 1,611 lines and 50 loops without (2.5 s). Limit how many copies versioning makes
-    in one function. Compile time decides whether generated code is practical, since each candidate compiles once.
+16. **Compile time on large functions, what's left:** versioning's copies are capped (`VERSION_TOTAL`, `VERSION_MIN` in
+    `_compiler.py`), most deeply nested loops first: a generated 60-loop function 14.7 to 5.1 s, `bench/llm.py` unchanged.
+    The cost is cimo's, which grows with the square of a function's size (its `TODO.md`); raise the cap when that's linear.
+    Depth is a guess at which loops run most: a profile (`counts=True`) would know.
 17. **scramjit against Numba and Cython: measure, then close the gaps.** The README compares with
     CPython and hand-written C; the question everyone will ask is how it compares with what they use
     today. `bench/compare.py`, run on x86-64 Linux and arm64 Linux (an investor's or a reviewer's machine

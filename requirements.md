@@ -457,7 +457,9 @@ non-negative, below `len(a)`) drop negative-index adjustment and bounds checks, 
 `IndexError` is raised. In innermost loops the test also covers a positive literal step, using the
 last value the variable takes, and a start not known to be nonnegative (`start >= 0` joins the
 test): `y[i] = x[i] + x[i + 1]` over `range(0, n, 2)` 1.53 to 0.79 ms, over `range(lo, n)` 1.97 to
-0.63 ms (2M elements, arm64), for 5% more compile time on `bench/llm.py`'s forward pass. With those, parity and bounds checks cost nothing measurable on the M1 kernels:
+0.63 ms (2M elements, arm64), for 5% more compile time on `bench/llm.py`'s forward pass. Versioning's copies are capped per function, since cimo's compile
+time grows with the square of a function's size (60 loops: 3,140 lines of C in 4.0 s, 6,020 versioned in 14.7 s): they
+may bring it to 3,200 syntax nodes, at least 400, the most deeply nested loops first (14.7 to 5.1 s, `bench/llm.py` unchanged). With those, parity and bounds checks cost nothing measurable on the M1 kernels:
 `bench/m1.py`, arm64, ns per element, all modes within 3%:
 
 | kernel | CPython | scramjit | speedup |

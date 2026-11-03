@@ -2260,10 +2260,10 @@ class Compiler:
         if t.kind != 'array':
             self.fail(e, f'np.{op}() of {t.name}: only arrays compile')
         if t.elem not in (T.NP_FLOAT64, T.NP_INT64):
-            if not T.is_narrow(t.elem) or op in ('std', 'var'):
+            if not T.is_narrow(t.elem) or (op in ('std', 'var') and t.elem.kind == 'float'):
                 self.fail(e, f'{op}() of {t.elem.name[3:]} elements')
-            if op in ('sum', 'prod') and t.elem.kind == 'int' and (t.elem.ctype[0] == 'u' or self.default_int() is not T.NP_INT64):
-                self.fail(e, f'{op}() of {t.elem.name[3:]} elements, which numpy adds up as {"uint64" if t.elem.ctype[0] == "u" else "its default int"}')
+            if op in ('sum', 'prod') and t.elem.kind == 'int' and t.elem.ctype[0] != 'u' and self.default_int() is not T.NP_INT64:
+                self.fail(e, f'{op}() of {t.elem.name[3:]} elements, which numpy adds up as its default int')
         if t.strided and t.ndim > 1:
             self.fail(e, f'{op}() of a multi-dimensional view with gaps')
         if len(rest) > 1 or any(isinstance(x, ast.Starred) for x in rest):
@@ -2297,13 +2297,13 @@ class Compiler:
         r = T.narrow_result(st, el, 'Add')
         if st.np is True:
             return r
-        if not T.is_narrow(r) or r.kind != st.kind:
-            self.fail(e, f'sum() of {el.name} from a Python {st.kind}, whose type would depend on the data'
-                      + ('; write sum(..., 0.0)' if r.kind == 'float' else ''))
+        float32_from_int = r is T.NARROW['float32'] and st.kind == 'int'
+        if not T.is_narrow(r) or (r.kind != st.kind and not float32_from_int):
+            self.fail(e, f'sum() of {el.name} from a Python {st.kind}, whose type would depend on the data')
         value = 0 if start is None else const_number(start)
         if not T.holds_exactly(r, value):
             self.fail(e, f'sum() of {el.name} from a start that isn\'t a literal {r.name} holds exactly')
-        return T.NARROW_DYN[r.name[3:]]
+        return T.INT_OR_F32 if float32_from_int else T.NARROW_DYN[r.name[3:]]
 
     def numpy_type(self, e, name):
         if name in NP_REDUCE:
@@ -2385,7 +2385,9 @@ class Compiler:
         if T.is_narrow(t.elem) and op in ('sum', 'prod', 'mean'):
             if t.elem.kind == 'float':
                 return t.elem
-            return T.NP_FLOAT64 if op == 'mean' else T.NP_INT64
+            if op == 'mean':
+                return T.NP_FLOAT64
+            return T.NP_UINT64 if t.elem.ctype[0] == 'u' else T.NP_INT64     # numpy totals unsigned ints in uint64
         if op in ('mean', 'std', 'var'):
             return T.NP_FLOAT64
         return t.elem
@@ -2453,6 +2455,12 @@ class Compiler:
         if op == 'mean':
             self.helpers.add(_mathlib.typed('np_stats', elem.ctype))
             return self.hold(f'{pre}sum_as_float({p}, {n}, {st}) / (double){n}', T.FLOAT), '1'
+        if op in ('std', 'var'):                      # ints: in float64, as numpy does for int64
+            self.helpers.add(_mathlib.typed('np_stats', elem.ctype))
+            ddof = next((k.value for k in e.keywords if k.arg == 'ddof'), None)
+            d = '0LL' if ddof is None else self.hold(self.coerce(self.expr(ddof)[0], self.typeof(ddof), T.INT), T.INT)
+            v = self.hold(f'{pre}var_i({p}, {n}, {st}, {sum_chunk() or 0}, {d})', T.FLOAT)
+            return (self.hold(f'sqrt({v})', T.FLOAT) if op == 'std' else v), '1'
         self.helpers.add(_mathlib.typed('np_folds', elem.ctype))
         if op in ('sum', 'prod'):
             return self.hold(f'{pre}{op}_{suffix}({p}, {n}, {st})', rt), '1'

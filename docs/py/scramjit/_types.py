@@ -9,7 +9,7 @@ import struct
 
 
 class Type:
-    __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable', 'ndim', 'strided')
+    __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable', 'ndim', 'strided', 'py')
 
     def __init__(self, name, ctype, kind, np=False, elem=None, writable=True):
         self.name = name          # how signatures print it
@@ -20,6 +20,7 @@ class Type:
         self.writable = writable  # arrays
         self.ndim = 0             # arrays: dimensions
         self.strided = False      # arrays: a view whose elements aren't next to each other
+        self.py = None            # a narrow-or-literal variable: the kind of its Python number, when it isn't the narrow one's
 
     def __repr__(self):
         return self.name
@@ -65,6 +66,10 @@ INT_RANGE = {'int32': (-(1 << 31), (1 << 31) - 1), 'int16': (-(1 << 15), (1 << 1
 # A variable that starts as a literal and becomes a narrow scalar (total = 0.0, then total += x[i], which is
 # np.float32 from then on): held in the narrow type, since the literal fits it exactly, plus the runtime flag.
 NARROW_DYN = {n: Type(f'{"float" if t.kind == "float" else "int"} | {t.name}', t.ctype, t.kind, np='dyn', elem=t) for n, t in NARROW.items()}
+# s = 0, then s += x[i] on float32: the int 0 until the first addition. A float holds a small int exactly; returned while
+# the flag says it's still Python's, it comes back as an int.
+INT_OR_F32 = Type('int | np.float32', 'float', 'float', np='dyn', elem=NARROW['float32'])
+INT_OR_F32.py = 'int'
 
 
 def is_narrow(t):
@@ -97,13 +102,15 @@ def holds_exactly(t, v):
 def narrow_or_literal(a, b):
     """The type of a variable assigned a Python number and a narrow scalar of the same kind, or None."""
     if is_narrow_dyn(a):
-        return a if b in (a.elem, INT if a.kind == 'int' else FLOAT) else None
+        return a if b in (a.elem, INT if a.kind == 'int' or a.py == 'int' else FLOAT) else None
     if is_narrow_dyn(b):
         return narrow_or_literal(b, a)
     if is_narrow(b):
         a, b = b, a
     if is_narrow(a) and b is (INT if a.kind == 'int' else FLOAT):
         return NARROW_DYN[a.name[3:]]
+    if a is NARROW['float32'] and b is INT:
+        return INT_OR_F32
     return None
 
 _BY_KIND = {('int', False): INT, ('int', True): NP_INT64, ('int', 'dyn'): INT_DYN,

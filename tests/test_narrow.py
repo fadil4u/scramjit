@@ -125,8 +125,8 @@ def test_a_literal_that_becomes_narrow(d, init):
     f, g = make(f'def f(x):\n    s = {init}\n    for i in range(len(x)):\n        s += x[i] * x[i]\n    return s\n')
     for n in (0, 1, 2, 7):
         x = np.resize(np.array(EDGE[d][1:5], d), n)
-        # 0.5 can't start an int's variable, and the int-then-float cases stay as Python
-        agree(f, g, [x], compiled=None if not kind_matches else True)
+        # a float can't start an int's variable; an int can start a float32's, and is the int it was if nothing is added
+        agree(f, g, [x], compiled=True if kind_matches or d == 'float32' else None)
 
 
 def test_a_literal_narrow_cannot_hold_stays_python():
@@ -322,7 +322,7 @@ def test_float32_power_is_powf():
 @pytest.mark.parametrize('expr', ['sum(a)', 'sum(a, 0.0)', 'sum(v * v for v in a)', 'sum(a, a[0])', 'sum(a[i] * 2 for i in range(len(a)))'])
 def test_builtin_sum(d, expr):
     f, g = fresh(f'def f(a):\n    return {expr}\n')
-    compiles = ('0.0' in expr) == (d == 'float32') or 'a[0])' in expr
+    compiles = '0.0' not in expr or d == 'float32'     # 0.0 with an int dtype gives float64, which isn't compiled here
     for n in (0, 1, 2, 5, 300):
         a = np.resize(np.array([v for v in EDGE[d] if v == v][1:], d), n)
         if 'a[0])' in expr and n == 0:
@@ -359,7 +359,7 @@ def test_numpy_functions_of_two(name):
 
 
 @pytest.mark.parametrize('d', NARROW)
-@pytest.mark.parametrize('op', ['sum', 'prod', 'mean', 'max', 'min', 'argmax', 'argmin', 'any', 'all'])
+@pytest.mark.parametrize('op', ['sum', 'prod', 'mean', 'max', 'min', 'argmax', 'argmin', 'any', 'all', 'std', 'var'])
 def test_reductions(d, op):
     f, g = fresh(f'def f(a):\n    return a.{op}()\n')
     rng = np.random.default_rng(5)
@@ -374,5 +374,44 @@ def test_reductions(d, op):
     for a in arrays:
         agree(f, g, [a], compiled=None)
         agree(f, g, [a[::2]], compiled=None)
-    unsigned_total = op in ('sum', 'prod') and d.startswith('u')
-    assert bool(g.signatures) == (not unsigned_total), g._why
+    assert bool(g.signatures) == (not (op in ('std', 'var') and 'float' in d)), g._why
+
+
+@scram
+def int_start_uses(x, y):
+    s = 0
+    for i in range(len(x)):
+        s += x[i]
+    first = s
+    return s, first == y[0], s < y[0], abs(s), float(s), int(s)
+
+
+@scram
+def add_one(v):
+    return v + np.float32(1)
+
+
+@scram
+def int_start_through_a_call(x):
+    s = 0
+    for v in x:
+        s = add_one(s) + v
+    return s
+
+
+@pytest.mark.parametrize('n', [0, 1, 3])
+def test_an_int_start_on_float32(n):
+    x = np.array([0.1, 2.5, -1.0][:n], 'float32')
+    y = np.array([0.0], 'float32')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', FallbackWarning)
+        for f in (int_start_uses, int_start_through_a_call):
+            got, want = f(x, y) if f is int_start_uses else f(x), f.__wrapped__(x, y) if f is int_start_uses else f.__wrapped__(x)
+            assert repr(got) == repr(want), (f.__name__, got, want)
+
+
+def test_an_int_start_float32_cannot_hold_stays_python():
+    f, g = make('def f(x):\n    s = 16777217\n    for v in x:\n        s += v\n    return s\n')
+    for x in (np.array([1.5], 'float32'), np.array([], 'float32')):
+        agree(f, g, [x], compiled=None)
+    assert not g.signatures

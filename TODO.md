@@ -249,8 +249,8 @@ Spills per line, once cimo can report them.
 
 1. **Narrow dtypes, what's left:** arithmetic, `**`, `sum()`, the exact numpy functions and most reductions compile (see "Narrow dtypes" in `types.md`).
    Not yet: `np.sin`, `np.exp` and the like on float32 (numpy's own SIMD versions: check them against numpy per CPU first), float functions of narrow ints (float16 results),
-   `.std()` and `.var()`, `.sum()` of unsigned ints and of any int on wasm32 (numpy totals in uint64, or int32 there), `uint64`, and `np.int8(x)` of a float.
-   A literal becoming narrow must fit exactly: not `s = 0` then `s += x[i]` on float32, nor `s = 0.1`, nor a parameter, and such a variable can't meet a Python number afterwards, since the type depends on its flag.
+   `.std()` and `.var()` on float32 (numpy computes them in float32), `.sum()` of signed ints on wasm32 (numpy totals in int32 there), and `np.int8(x)` of a float.
+   A literal becoming narrow must fit exactly: not `s = 0.1` on float32, nor a parameter, and such a variable can't meet a Python number afterwards, since the type depends on its flag.
    Speed, all in cimo's `TODO.md`: byte and short lanes (`uint8` brighten 0.24 ns per element against int32's 0.12) and the flag written in the loop.
 2. **64-bit ints, what's left:** hashes masked with `& 0xFFFFFFFFFFFFFFFF` compile (`examples/hash64.py`). Not yet: arithmetic
    and comparisons on `np.uint64` elements (numpy gives float64 with signed ints), such ints in tuples, dicts, as `/`, passed to compiled

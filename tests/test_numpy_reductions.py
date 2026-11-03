@@ -207,7 +207,7 @@ def test_other_dtypes_stay_python(dtype, op):
 @pytest.mark.parametrize('dtype', ['f4', 'i4', 'u1', 'i1'])
 @pytest.mark.parametrize('op', OPS)
 def test_narrow_dtypes_match(dtype, op):
-    """Narrow dtypes compile, apart from std, var and unsigned totals (tests/test_narrow.py goes further)."""
+    """Narrow dtypes compile, apart from float32 std and var (tests/test_narrow.py goes further)."""
     a = np.arange(1, 5).astype(dtype)
     check(f'x.{op}()', [a], compiled=None)
 

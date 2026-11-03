@@ -70,14 +70,14 @@ for i in range(len(x)):
     total += x[i] * y[i]     # np.float32 from here on
 ```
 
-The literal must have the same kind as the array and fit its dtype exactly: `0.0` or `0.5`, not `0.1`, on `float32`, and not `0` either. Such a variable can then only meet numpy scalars, or be compared with an int if it holds ints. Anything else keeps the function in Python.
+The literal must fit the dtype exactly: `0`, `0.0` or `0.5` on `float32`, not `0.1` or `16777217`, and on an integer dtype an int, not a float. Starting from `0` on `float32`, the result is the int `0` when the loop doesn't run, as in Python. Such a variable can then only meet numpy scalars, or be compared with an int if it holds ints. Anything else keeps the function in Python.
 
 Also compiled, with numpy's result:
 
 - `**`: an integer dtype wraps, and a negative exponent raises `ValueError`. `float32` uses the C library's `powf`, as numpy does.
-- `sum()`: the total wraps or rounds at each step, as in Python with numpy scalars. Starting from Python's `0`, it's `0` when there's nothing to add. On `float32` start from `0.0`, since `0` would make the type depend on the data.
+- `sum()`: the total wraps or rounds at each step, as in Python with numpy scalars. Starting from Python's `0`, it's `0` when there's nothing to add, on `float32` too.
 - On `float32` scalars: `np.sqrt`, `np.abs`, `np.square`, `np.sign`, `np.floor`, `np.ceil`, `np.trunc`, `np.rint`, `np.copysign`, `np.minimum` and `np.maximum`, the tests such as `np.isnan`, and conversions such as `np.float32(x)` or `np.uint8(n)`. On integer dtypes, the same functions apart from those numpy gives a float for, since it picks a float as narrow as the int (`np.sqrt` of a `uint8` is a `float16`).
-- Reductions: `.max()`, `.min()`, `.argmax()`, `.argmin()`, `.any()` and `.all()`; `.sum()`, `.prod()` and `.mean()` on `float32` and signed ints. On unsigned ints numpy totals in `uint64`, which stays Python, as do `.std()` and `.var()`.
+- Reductions: `.max()`, `.min()`, `.argmax()`, `.argmin()`, `.any()` and `.all()`; `.sum()`, `.prod()` and `.mean()`, with an unsigned int's total as `np.uint64`, as numpy gives it; `.std()` and `.var()` on integer dtypes. On `float32`, `.std()` and `.var()` stay Python.
 
 Other numpy functions, such as `np.sin` or `np.exp` on `float32`, stay in Python: numpy has its own versions, whose last bits vary by CPU.
 

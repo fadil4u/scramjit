@@ -835,6 +835,8 @@ class Function:
             self._np = numpy
         if r.kind == 'float':
             v = struct.unpack_from('<d', io, at)[0]
+            if not np and r.py == 'int':           # still the int it started as
+                return int(v)
         else:
             v = int.from_bytes(io[at:at + 8], 'little', signed=r is not T.U64 and r is not T.NP_UINT64)
         if np:

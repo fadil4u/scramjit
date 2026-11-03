@@ -41,7 +41,7 @@ Falls back, with the fix:
 - global variables: pass as arguments (module-level numbers, tuples, arrays and dicts are read at each call)
 - 64-bit hashes: mask each step with & 0xFFFFFFFFFFFFFFFF and they match Python exactly; don't subtract from a masked variable
 - a * 2, a + b, a[a > 0], np.sqrt(a), a.reshape(...): write the loop over a[i, j]
-- on float32: np.sin, np.exp and the like; .std(), .var(); sum() from 0, write sum(..., 0.0). Other arithmetic, ** and reductions on narrow dtypes compile, and wrap or round as numpy's do
+- on float32: np.sin, np.exp and the like; .std(), .var(). Other arithmetic, ** and reductions on narrow dtypes compile, and wrap or round as numpy's do
 - changing a variable's type, s = 0 then s += 0.5: start with s = 0.0
 - sum(floats) without a start: sum(gen, 0.0)
 - x ** 0.5 on a float: math.sqrt(x); int ** variable int: use a loop

@@ -8,6 +8,10 @@ Python at native speed.
 
 [Live demo](https://www.scramjit.dev/#lab) · [Docs](https://www.scramjit.dev/docs/)
 
+[![PyPI](https://img.shields.io/pypi/v/scramjit)](https://pypi.org/project/scramjit/)
+[![Docs](https://img.shields.io/badge/docs-scramjit.dev-blue)](https://www.scramjit.dev/docs/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/farizrahman4u/scramjit/blob/main/LICENSE)
+
 <img src="https://raw.githubusercontent.com/farizrahman4u/scramjit/main/docs/readme/race.gif" alt="The same Mandelbrot function rendered side by side on one clock, as plain Python and through scramjit." width="486">
 
 <sub>The same function on one clock, native on arm64. scramjit is capped at one fractal frame per GIF frame; uncapped, it does 21x the iterations. <a href="https://github.com/farizrahman4u/scramjit/blob/main/tools/readme_gif.py">Script.</a></sub>

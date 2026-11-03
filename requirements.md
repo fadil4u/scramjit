@@ -447,10 +447,13 @@ with `boundscheck=False`. A constant `base` stays with `a[i + c]`, or `a[i - 1]`
 checked copy. `y[i - 1]` reads a temporary when `y[i] = ...` is the loop's only array store, on every iteration, in a
 float64 or int64 array: with no other store, no view can change that element, so overlap needs no test.
 `ema` 3.09 to 2.39 ns (hand C 3.06, which cimo can't forward), `edit_distance` 2.22 to 1.71; in Pyodide
-`ema` 4.20 to 3.55. Facts from unit-step `range` loops (index non-negative, below
-`len(a)`) drop negative-index adjustment and bounds checks, and loop versioning (one test before
-the loop, checked copy otherwise) removes the rest without changing where an `IndexError` is
-raised. With those, parity and bounds checks cost nothing measurable on the M1 kernels:
+`ema` 4.20 to 3.55. Facts from `range` loops with a step of 1 or another positive literal (index
+non-negative, below `len(a)`) drop negative-index adjustment and bounds checks, and loop versioning
+(one test before the loop, checked copy otherwise) removes the rest without changing where an
+`IndexError` is raised. In innermost loops the test also covers a positive literal step, using the
+last value the variable takes, and a start not known to be nonnegative (`start >= 0` joins the
+test): `y[i] = x[i] + x[i + 1]` over `range(0, n, 2)` 1.53 to 0.79 ms, over `range(lo, n)` 1.97 to
+0.63 ms (2M elements, arm64), for 5% more compile time on `bench/llm.py`'s forward pass. With those, parity and bounds checks cost nothing measurable on the M1 kernels:
 `bench/m1.py`, arm64, ns per element, all modes within 3%:
 
 | kernel | CPython | scramjit | speedup |

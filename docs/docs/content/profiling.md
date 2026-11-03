@@ -229,4 +229,4 @@ One line per compile or fallback. A function that keeps compiling new signatures
 | an argument arrives as several types | one compile and one specialization per type | annotate it, such as `a: float` |
 | a list is copied in and out | O(n) work on every call | pass a numpy array |
 | an array is strided | every index multiplies by a stride | `np.ascontiguousarray` once, outside the loop |
-| a bounds check stays in a hot loop | a compare and branch per access | index with the loop variable over `range(len(a))`, or `@scram(boundscheck=False)` once verified |
+| a bounds check stays in a hot loop | a compare and branch per access | index with the loop variable over `range(len(a))`, or plus a constant or a value fixed in an innermost loop (`range(lo, n, 2)` works too), or `@scram(boundscheck=False)` once verified |

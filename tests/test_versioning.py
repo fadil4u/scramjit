@@ -217,3 +217,51 @@ def test_random(a):
         same(read, a, b, c, n)
         same(offsets, a, b, c, n)
         same(write, a, b, n)
+
+
+# A positive literal step, and a start that isn't known to be nonnegative: the test uses the last value the
+# variable takes, and checks the start, so the outcome never depends on which copy ran.
+
+def pairs(q, n):
+    for i in range(0, n, 2):
+        a, b = q[i], q[i + 1]
+        q[i] = a - b
+        q[i + 1] = a + b
+    return q[0]
+
+
+def strided_read(a, lo, n, k3):
+    s = 0.0
+    for i in range(lo, n, 3):
+        s += a[i] * 2.0 + a[i + k3]
+    return s
+
+
+def from_start(a, lo, n):
+    s = 0.0
+    for i in range(lo, n):
+        s += a[i + 1] - a[i]
+    return s
+
+
+@pytest.mark.parametrize('n', [0, 1, 2, 3, 8, 9, 10, 11, 12])
+def test_stepped_loops(a, n):
+    same(pairs, a, n)
+    for lo in (-4, -1, 0, 1, 2, 7):
+        for k3 in (0, 1, 2, 5):
+            same(strided_read, a, lo, n, k3)
+
+
+@pytest.mark.parametrize('lo', [-12, -10, -3, -1, 0, 1, 4, 9, 10, 15])
+@pytest.mark.parametrize('n', [0, 3, 9, 10, 11])
+def test_runtime_starts(a, lo, n):
+    same(from_start, a, lo, n)
+
+
+def test_stepped_and_runtime_start_loops_are_versioned(a):
+    for f, args in ((pairs, (a.copy(), 10)), (from_start, (a, 2, 9)), (strided_read, (a, 1, 7, 1))):
+        g = scram(fallback=False, cache=False)(f)
+        g(*args)
+        c = g.c()
+        assert '} else {' in c, f.__name__
+        assert 'sj_io[4]' not in c[:c.index('} else {')], f.__name__     # the fast copy has no index check

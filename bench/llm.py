@@ -1,6 +1,6 @@
 """A llama2.c forward pass as one function of plain Python loops, on stories15M: tokens per second
 undecorated, through scramjit with default options, and with boundscheck=False, parity=False.
-Weights are float64 because scramjit doesn't compile float32 arithmetic yet.
+Weights are float64, as the published numbers were measured; float32 compiles too (TODO.md).
 
 Needs two files in one directory (not in the repository):
   https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin

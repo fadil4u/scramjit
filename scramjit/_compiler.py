@@ -3246,6 +3246,8 @@ class Compiler:
         short = None not in bounds and (bounds[1] - bounds[0] if len(bounds) > 1 else bounds[0]) <= 65536 \
             and (len(bounds) < 3 or bounds[2] > 0)
         fact = self.range_fact(s) if unit else None
+        if self.innermost(s) and (not unit or (fact is None or fact[0] is None)) and self.version_wider(s, var, ts, te, unit, short):
+            return
         if unit and fact:
             # loop versioning: if no access var + c can leave its array during this loop, run a
             # copy without those checks; otherwise the checked copy raises where Python would
@@ -3272,7 +3274,61 @@ class Compiler:
         self.short_range = short
         self.open_counted('uint64_t', tk, '0', tn)
         self.emit(f'v_{var} = (int64_t)((uint64_t){ts} + {tk} * (uint64_t){tp});')
-        self.loop_body(s, var, None)
+        k = s.iter.args[2]                    # a positive literal step keeps range()'s facts: var starts at start, stays below stop
+        positive = isinstance(k, ast.Constant) and type(k.value) is int and k.value > 0
+        self.loop_body(s, var, self.range_fact(s) if positive else None)
+
+    @staticmethod
+    def innermost(s):
+        return not any(isinstance(n, (ast.For, ast.While, ast.comprehension)) for n in ast.walk(ast.Module(body=s.body, type_ignores=[])))
+
+    def version_wider(self, s, var, ts, te, unit, short):
+        """Versioning for an innermost loop with a positive literal step, or a start that isn't known to be nonnegative: the fast
+        copy may assume var >= 0 when the test checks start >= 0, and the test uses the last value var takes, not stop
+        (range(0, n, 2) with q[i + 1] is in bounds because i stops at n - 2). Emits both copies and returns True, or emits
+        nothing and returns False."""
+        args = s.iter.args
+        step = None
+        if not unit:
+            k = args[2]
+            if not (isinstance(k, ast.Constant) and type(k.value) is int and k.value > 0):
+                return False
+            step = k.value
+        known = self.range_bounds(s)
+        if known is None:
+            return False
+        lo, hi, slack = known
+        fast = (lo if lo is not None and lo >= 0 else 0, hi, slack)
+        extra = self.version_candidates(s, var, fast)
+        if not extra:
+            return False
+        tests = [] if lo is not None and lo >= 0 else [f'{ts} >= 0']
+        if step is None:
+            last = te
+        else:                                     # one past the last value var takes
+            last = self.temp()
+            self.emit(f'int64_t {last} = {te} > {ts} ? (int64_t)((uint64_t){ts} + ((uint64_t){te} - (uint64_t){ts} - 1) / {step}ULL * {step}ULL) + 1 : {ts};')
+        tests += [self.version_test(key, c, last) for key, c in sorted(extra.items(), key=str)]
+        self.open(f'if ({te} > {ts} && {" && ".join(tests)})')
+        self.stepped_loop(s, var, ts, te, step, fast + (extra,), short)
+        self.close('} else {')
+        self.depth += 1
+        self.slow_copy += 1
+        self.stepped_loop(s, var, ts, te, step, self.range_fact(s) if step is None else None, short)
+        self.slow_copy -= 1
+        self.close()
+        return True
+
+    def stepped_loop(self, s, var, ts, te, step, fact, short):
+        if step is None:
+            self.unit_loop(s, var, ts, te, fact, short)
+            return
+        tn, tk = self.temp(), self.temp()
+        self.emit(f'uint64_t {tn} = {ts} < {te} ? ((uint64_t){te} - (uint64_t){ts} - 1) / {step}ULL + 1 : 0;')
+        self.short_range = short
+        self.open_counted('uint64_t', tk, '0', tn)
+        self.emit(f'v_{var} = (int64_t)((uint64_t){ts} + {tk} * {step}ULL);')
+        self.loop_body(s, var, fact)
 
     def iter_prep(self, d):
         """Evaluate an iterable's operands (in Python's order); return (trip count, elem(k)),
@@ -3554,6 +3610,12 @@ class Compiler:
     def range_fact(self, s):
         """What a unit-step range() loop proves about its variable, if the body never assigns it:
         a lower bound, and an array A with var < len(A) - slack."""
+        b = self.range_bounds(s)
+        return b if b is not None and (b[0] is not None or b[1]) else None
+
+    def range_bounds(self, s):
+        """(lower bound or None, array or None, slack) for a range() loop whose body never assigns its variable, else None.
+        A positive step keeps both: var starts at start and stays below stop."""
         var = s.target.id
         for n in ast.walk(ast.Module(body=s.body, type_ignores=[])):
             if isinstance(n, ast.Name) and n.id == var and isinstance(n.ctx, ast.Store):
@@ -3576,7 +3638,7 @@ class Compiler:
                 isinstance(n, ast.Name) and n.id == hi[0] and isinstance(n.ctx, ast.Store)
                 for n in ast.walk(ast.Module(body=s.body, type_ignores=[]))):
             hi = None                          # a list rebound in the loop can change length
-        return (lo, hi, slack) if lo is not None or hi else None
+        return lo, hi, slack
 
     def len_of(self, e):
         """The (array, axis) whose extent e is, if that can't change: nothing is known about an array that's assigned."""

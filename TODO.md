@@ -247,30 +247,37 @@ Spills per line, once cimo can report them.
 
 ## Next
 
-1. **Narrow dtypes, what's left:** arithmetic, `**`, `sum()`, the exact numpy functions and most reductions compile (see "Narrow dtypes" in `types.md`).
+1. **SIMD through cimo, what's left:** what vectorizes was checked loop by loop (cimo's `vectorize.plan`, wrapped):
+   `saxpy`, scaling, `a + b + c`, stencils, int `+`, `^`, `&`, 2-D rows, offset bases and float32 do, and int sums now that a
+   variable's numpy flag is set after the loop, not in it (`sinkable_flags`; int32 sum about 2x, int64 1.2x, memory-bound).
+   Not yet: anything with a condition (`relu`, `clip`, `max`), which needs cimo to vectorize them (its `TODO.md`); `math.sqrt`
+   and other functions that check their domain on every element, which only `parity=False` lets vectorize (a check after the
+   loop would need its stores undone); float sums and `dot`, kept scalar on purpose, since their order is Python's. Re-run the
+   probe on `bench/` and the examples when cimo lands conditions.
+2. **Narrow dtypes, what's left:** arithmetic, `**`, `sum()`, the exact numpy functions and most reductions compile (see "Narrow dtypes" in `types.md`).
    Not yet: `np.sin`, `np.exp` and the like on float32 (numpy's own SIMD versions: check them against numpy per CPU first), float functions of narrow ints (float16 results),
    `.std()` and `.var()` on float32 (numpy computes them in float32), `.sum()` of signed ints on wasm32 (numpy totals in int32 there), and `np.int8(x)` of a float.
    A literal becoming narrow must fit exactly: not `s = 0.1` on float32, nor a parameter, and such a variable can't meet a Python number afterwards, since the type depends on its flag.
    Speed, all in cimo's `TODO.md`: byte and short lanes (`uint8` brighten 0.24 ns per element against int32's 0.12) and the flag written in the loop.
    `bench/llm.py` still runs on float64 weights, from before float32 compiled: measure float32 (half the memory the matrix products read), with `bench/gcc.py` on `float` alongside.
-2. **64-bit ints, what's left:** hashes masked with `& 0xFFFFFFFFFFFFFFFF` compile (`examples/hash64.py`). `np.uint64`
+3. **64-bit ints, what's left:** hashes masked with `& 0xFFFFFFFFFFFFFFFF` compile (`examples/hash64.py`). `np.uint64`
    elements compile with numpy's rules (`tests/test_uint64.py`). Not yet: unsigned 64-bit Python ints in tuples, dicts, as `/`, passed to
    compiled functions or `math`, compared with float32, as slice bounds, or choosing a row (`m[int(h)]` of a 2-D array).
    `examples/xorshift.py` takes 3.9 ms per million numbers against 2.05 for the same loop written in C on `uint32_t` through cimo:
    the masks sit on the chain each number waits on, and storing into `uint32` checks the range.
-3. **Bounds-check hoisting, what's left:** versioning covers `arr[i + c]` and, in innermost loops, `arr[base + i]`
+4. **Bounds-check hoisting, what's left:** versioning covers `arr[i + c]` and, in innermost loops, `arr[base + i]`
    with `base` built from Python ints that don't change in the loop, also with a positive literal step and a start
    checked at run time. Not yet: negative steps, numpy int bases, `arr[i // 2]` and `arr[2 * i]`, and outer loops,
    where a second copy of everything inside costs more than it wins.
-4. **Store-to-load forwarding, what's left:** `y[i - 1]` to `y[i - 4]` come from temporaries when `y[i] = ...` is y's
+5. **Store-to-load forwarding, what's left:** `y[i - 1]` to `y[i - 4]` come from temporaries when `y[i] = ...` is y's
    only store in the loop and runs every iteration, with other arrays stored to behind a test that they don't share
    y's memory. Not yet: 2-D rows (`m[r, j - 1]`), strided views among the other stores, and stores inside an `if`.
-5. **Loop lifting, what's left:** a loop stays in Python if a variable read afterwards may be unbound
+6. **Loop lifting, what's left:** a loop stays in Python if a variable read afterwards may be unbound
    (`for i ...` then reading `i`, with nothing assigned first), inside `try` or `with`, or containing `return`.
    "Partly compiled" is per function, not per signature. Tracebacks show one extra frame for a loop that raises.
    The first two are hard for one reason: compiled code has static types. A name the loop may leave unbound has no
    value of any type to come back as, and a `return` inside means returning either its value or the loop's outputs.
-6. **numpy calls in compiled functions:** `x * 2` and other whole-array arithmetic still run as Python.
+7. **numpy calls in compiled functions:** `x * 2` and other whole-array arithmetic still run as Python.
    No cimo work is required for any step; its SIMD only adds speed. In this order:
    - **numpy functions on single numbers: built.** See `loops-and-builtins.md`. Left in Python: `np.tanh` and `np.power`, which aren't libm's, and
      combinations whose result depends on the platform or numpy version. Bit for bit checked on arm64, wasm and x86-64 with AVX2 (Windows, emulated). Check AVX-512, where numpy
@@ -286,7 +293,7 @@ Spills per line, once cimo can report them.
    - **Not `np.dot`, and no MKL or BLAS:** they would break "standard library plus cimo", and their results depend on the library, CPU and thread count.
      `A @ B` and `np.linalg` already run at full speed in Python. An opt-in through cimo's `link=` for BLAS inside a hot loop is possible
      later; untried.
-7. **Python data structures, nested, when statically sized and statically typed, after the loop work above:** so
+8. **Python data structures, nested, when statically sized and statically typed, after the loop work above:** so
    that containers don't hide speedups we can still get from loops, each step must leave `bench/` unchanged.
    Dicts, lists, tuples, classes and enums that don't resize at runtime and whose element types don't change. See "Containers" in
    `requirements.md`. Today only flat tuples of numbers and flat local lists compile. In this order, simplest
@@ -305,43 +312,43 @@ Spills per line, once cimo can report them.
    (an `int` slot given a float); two names for one object (`[[0] * 3] * 2`, one list passed twice),
    since writes must show through both; the cost of checking and copying a whole structure on every call; and
    results that must come back as real Python objects.
-8. **Call boundary cost:** about 1.4 µs with numbers (was 3.2) and 2.4 µs with an array (was 6.6), through
+9. **Call boundary cost:** about 1.4 µs with numbers (was 3.2) and 2.4 µs with an array (was 6.6), through
    a function generated per signature (`_make_plan`). For numbers: ctypes about 450 ns (the floor), cimo's
    `Kernel.__call__` about 450 (see cimo's `TODO.md`), scramjit about 500. In Pyodide about 13 µs, not yet
    broken down. Break-even is 30 to 50 loop iterations per call. A Gymnasium-style `step` is below it, with no loop
    at all: CartPole from a Python loop does 396k steps/s compiled against 698k plain, and 53M with the loop compiled too, which calls between compiled functions now allow without pasting. Rejected: caching an array's address (saves
    200 ns, but `resize(refcheck=False)` would corrupt memory silently); `__call__` by argument count (100 to
    150 ns, not worth its keyword edge cases).
-9. **Variables that change type, what's left:** a name used for separate things compiles (each web is its own
+10. **Variables that change type, what's left:** a name used for separate things compiles (each web is its own
    variable), and so does an int that becomes a float, where the int is a literal up to 2^53 or a parameter, and it's only
    returned or combined with a float. Not yet: other uses of such a variable (`-s`, `s + 1`, `t = s`, `a[s]`, `if s:`), and
    `s = n` from an int variable, each of which keeps the function in Python.
-10. **Rest of M3:** run the M0 kernels in Pyodide as a test, not only through the site; preflight's
+11. **Rest of M3:** run the M0 kernels in Pyodide as a test, not only through the site; preflight's
    per-loop report once cimo exposes one (cimo's `TODO.md`), and a `disk` label in the compile column,
    which needs cimo to say whether a compile hit its cache.
-11. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x`, what's left:** a function that writes nothing
+12. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x`, what's left:** a function that writes nothing
    reruns the call as Python there. One that writes still raises: resuming in Python alongside loop lifting would remove
    that difference too.
-12. **A NaN's sign differs from CPython's on Windows** (arm64, and x86-64 under emulation). `inf % 1.0`, `inf // 1.0`
+13. **A NaN's sign differs from CPython's on Windows** (arm64, and x86-64 under emulation). `inf % 1.0`, `inf // 1.0`
    and `math.atan2(0.0, nan)` give `7ff8...` where CPython gives `fff8...`, and `nan * -1` gives `fff8...`
    where it gives `7ff8...`; `tests/test_m1.py` and `test_m2.py` fail there on these, 7 in all. The values are
    all NaN, and only `math.copysign` or the raw bytes can tell. Likely fix: call the CRT's `fmod` through the
    libm table, as for `sin`, and make the `* -1` negation depend on the platform. Nothing runs scramjit's tests
    on Windows automatically yet.
-13. **Test Ctrl-C on macOS.** `tests/test_interrupt.py` has run on Linux and Windows arm64, not macOS. It
+14. **Test Ctrl-C on macOS.** `tests/test_interrupt.py` has run on Linux and Windows arm64, not macOS. It
    should work, since it uses `signal.set_wakeup_fd` and sockets, but nothing has checked it.
-14. **`parity=False` asks cimo for FMA, and it never happens.** cimo contracts `a * b + c` within one C
+15. **`parity=False` asks cimo for FMA, and it never happens.** cimo contracts `a * b + c` within one C
     expression, and scramjit gives each operation its own temporary. Nothing is lost on reductions:
     FMA makes them slower on arm64 (a `dot` through cimo: 2.15 ns per element with, 1.81 without;
     `bench/llm.py` through `gcc -O3`: 63 tok/s with, 82 without), probably the latency of the
     instruction the sum's next add waits on (not measured). Measure non-reductions (stencils) before making it fire or removing it.
-15. **Calls between compiled functions, what's left:** recursion, defaults other than numbers left out by a compiled caller, keyword-only parameters, dicts and lists as arguments, a function passed as an argument, `module.f()`, and a line profile of what's called.
+16. **Calls between compiled functions, what's left:** recursion, defaults other than numbers left out by a compiled caller, keyword-only parameters, dicts and lists as arguments, a function passed as an argument, `module.f()`, and a line profile of what's called.
     **Calling C, what's left:** modules with state, which need calling across modules (cimo: a call by address crashes once the callee uses `malloc`), `include_dirs=` and `link=`, returning a pointer or `uint64_t`, a C function's module compiled with `fma=` on alongside exact math in one file (needs `FP_CONTRACT` in cimo).
-16. **Compile time on large functions, what's left:** versioning's copies are capped (`VERSION_TOTAL`, `VERSION_MIN` in
+17. **Compile time on large functions, what's left:** versioning's copies are capped (`VERSION_TOTAL`, `VERSION_MIN` in
     `_compiler.py`), most deeply nested loops first: a generated 60-loop function 14.7 to 5.1 s, `bench/llm.py` unchanged.
     The cost is cimo's, which grows with the square of a function's size (its `TODO.md`); raise the cap when that's linear.
     Depth is a guess at which loops run most: a profile (`counts=True`) would know.
-17. **scramjit against Numba and Cython: measure, then close the gaps.** The README compares with
+18. **scramjit against Numba and Cython: measure, then close the gaps.** The README compares with
     CPython and hand-written C; the question everyone will ask is how it compares with what they use
     today. `bench/compare.py`, run on x86-64 Linux and arm64 Linux (an investor's or a reviewer's machine
     is x86), reported as one table in the README and the site:
@@ -359,7 +366,7 @@ Spills per line, once cimo can report them.
       behind a check at load), bounds checks that Numba drops by proving ranges (#3 above), call overhead
       (1.4 µs against Numba's about 0.3 µs; a typed fast path in `_dispatch`).
     - Keep the script runnable by anyone: `pip install numba cython` are dev extras, never dependencies.
-18. **Compile time.** A first call costs seconds, not the 0.1 s the README's `ema` example suggests: 0.53 s
+19. **Compile time.** A first call costs seconds, not the 0.1 s the README's `ema` example suggests: 0.53 s
     on Gray-Scott, 0.76 s native and 1.75 s in Pyodide for the LLM demo's forward pass, 3 s for a 200-line
     generated loop and up to 15 s with bounds-check versioning (#16). Every candidate in a generated-code
     workflow compiles once, so this decides what's practical. An optimization pass on the compiler
@@ -373,16 +380,16 @@ Spills per line, once cimo can report them.
       previous compile shouldn't redo their work; ask for a per-process cache of parsed headers and the
       prelude, or pass them pre-parsed.
     - Target: under 0.3 s warm for a 100-line function natively, under 1 s in Pyodide.
-19. **Split `_compiler.py` into a package.** 4.8k lines holding every lowering in one file. Make
+20. **Split `_compiler.py` into a package.** 4.8k lines holding every lowering in one file. Make
     `scramjit/_compiler/` with one module per concern, in the order the compile runs: `infer` (types),
     `index` (indexing, views, slices), `checks` (bounds checks and versioning), `calls` (`@scram` and C
     callees, inlining), `reduce` (builtins and numpy reductions), `make` (arrays and containers made
     inside a function), `emit` (C text). No behavior change: the suite and `bench/` are the gate, and
     the `docs/py/scramjit` copy is regenerated, not edited.
-20. **Adversarial code reading before a public launch.** `_compiler.py` (4.8k lines) and `_dispatch.py`
+21. **Adversarial code reading before a public launch.** `_compiler.py` (4.8k lines) and `_dispatch.py`
     were written in days and no one has read them end to end. The parity tests check results; a read
     checks what they can't: a lowering that is right for every tested type combination and wrong for
     one the generator never produces, a bounds check hoisted when it shouldn't be, a fallback that
     silently changes semantics. Read `_compiler.py` by lowering (indexing and views first, then
     bounds-check versioning, then calls), and record what was checked and found here.
-21. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has. Little to win: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, which leaves temporary arrays.
+22. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has. Little to win: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, which leaves temporary arrays.

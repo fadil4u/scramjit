@@ -607,6 +607,8 @@ class Compiler:
         self.slow_copy = 0     # inside that slow copy
         self.forwards = {}     # array -> (loop variable, temps holding its elements at var - 1, var - 2, ...)
         self.no_forwarding = False  # emitting the copy of a loop for when the arrays it stores to share memory
+        self.sunk = []             # per loop being emitted: variables whose numpy flag is set after it, not in it
+        self.trips = []            # per loop being emitted: the C test that it ran at least once
         self.versionable = None    # ids of the loops versioning may copy, planned at the first one (plan_versioning)
         self.view_names = {}   # id of a view expression -> the variable that holds it while it's used
         self.rebound = set()   # arrays assigned somewhere: their extents aren't fixed, so facts mustn't name them
@@ -3187,7 +3189,7 @@ class Compiler:
     def assign(self, name, v, vt):
         t = self.env[name]
         self.emit(f'v_{name} = {self.coerce(v[0], vt, t)};')
-        if t.np == 'dyn':
+        if t.np == 'dyn' and not any(name in s for s in self.sunk):
             self.emit(f'v_{name}__np = {v[1]};')
         if name in self.tagged:
             self.emit(f'v_{name}__int = {1 if vt.kind == "int" else 0};')
@@ -3278,12 +3280,20 @@ class Compiler:
             if flag:
                 self.emit(f'int {flag} = 0;')
             self.broke.append(flag)
+            sunk = self.sinkable_flags(s) if isinstance(s, ast.For) else set()
+            self.sunk.append(sunk)
+            self.trips.append(None)
             if isinstance(s, ast.While):
                 self.while_loop(s)
             elif self.iterable(s.iter)[0] == 'range':
                 self.for_range(s)
             else:
                 self.for_iter(s, self.iterable(s.iter))
+            self.sunk.pop()
+            trip = self.trips.pop()
+            if sunk:                         # each was assigned a numpy value on every iteration, if there was one
+                assert trip is not None
+                self.emit(f'if ({trip}) {{ ' + ' '.join(f'v_{n}__np = 1;' for n in sorted(sunk)) + ' }')
             self.broke.pop()
             if flag:
                 self.open(f'if (!{flag})')
@@ -3374,6 +3384,41 @@ class Compiler:
         self.loops.pop()
         self.close()
 
+    def sinkable_flags(self, s):
+        """Variables of this for loop whose numpy flag can be set once after it instead of on each iteration, which keeps a
+        constant store out of the loop so cimo can vectorize it (s = 0, then s += x[i]): every assignment in the loop gives a
+        numpy value, one at the top of the body runs on every iteration, and the loop never reads the flag, since every read
+        meets another numpy value. No break, continue or return, so an iteration that ran made the assignment."""
+        body = list(ast.walk(ast.Module(body=s.body, type_ignores=[])))
+        if any(isinstance(n, (ast.Break, ast.Continue, ast.Return)) for n in body):
+            return set()
+        outs = {flat for flat, _, _ in self.outs} if getattr(self, 'outs', None) else set()
+        parents = {id(ch): p for p in body for ch in ast.iter_child_nodes(p)}
+        top = {x.id for st in s.body for x in ([st.target] if isinstance(st, ast.AugAssign) else st.targets if isinstance(st, ast.Assign) else [])
+               if isinstance(x, ast.Name)}
+        found = set()
+        for name in top:
+            t = self.env.get(name)
+            if t is None or t.np != 'dyn' or name in self.tagged or name in outs or name in self.params:
+                continue
+            ok = True
+            for n in body:
+                binds = [n.target] if isinstance(n, (ast.For, ast.comprehension, ast.NamedExpr, ast.AugAssign)) else \
+                    n.targets if isinstance(n, ast.Assign) else [i.optional_vars for i in n.items] if isinstance(n, ast.With) else []
+                if isinstance(n, ast.Assign) and any(isinstance(x, ast.Name) and x.id == name for x in n.targets):
+                    ok = ok and len(n.targets) == 1 and self.typeof(n.value).np is True
+                elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) and n.target.id == name:
+                    ok = ok and self.typeof(n.value).np is True
+                elif any(x is not None and any(isinstance(y, ast.Name) and y.id == name for y in ast.walk(x)) for x in binds):
+                    ok = False                       # a loop target, unpacking...
+                elif isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load):
+                    p = parents.get(id(n))
+                    other = (p.right if p.left is n else p.left) if isinstance(p, ast.BinOp) else None
+                    ok = ok and other is not None and self.typeof(other).np is True
+            if ok:
+                found.add(name)
+        return found
+
     def ret_flag(self, e, flag):
         """A returned value's flag: 0 a Python float or int, 1 numpy, RETURNS_INT an int held as a double."""
         if isinstance(e, ast.Name) and e.id in self.tagged:
@@ -3388,6 +3433,9 @@ class Compiler:
         ts, te = self.temp(), self.temp()
         self.emit(f'int64_t {ts} = {start}, {te} = {stop};')
         unit = step is None or (isinstance(s.iter.args[2], ast.Constant) and s.iter.args[2].value == 1)
+        k = s.iter.args[2] if len(s.iter.args) == 3 else None
+        if unit or (isinstance(k, ast.Constant) and type(k.value) is int and k.value > 0):
+            self.trips[-1] = f'{te} > {ts}'
         bounds = [const_number(a) for a in s.iter.args]
         short = None not in bounds and (bounds[1] - bounds[0] if len(bounds) > 1 else bounds[0]) <= 65536 \
             and (len(bounds) < 3 or bounds[2] > 0)
@@ -3417,6 +3465,7 @@ class Compiler:
         self.emit(f'if ({tp} == 0) SJ_FAIL({VALUE_ERROR}, {self.line(s)}, 1, 0);')
         self.emit(f'uint64_t {tn} = {tp} > 0 ? ({ts} < {te} ? ((uint64_t){te} - (uint64_t){ts} - 1) / (uint64_t){tp} + 1 : 0)'
                   f' : ({ts} > {te} ? ((uint64_t){ts} - (uint64_t){te} - 1) / (0 - (uint64_t){tp}) + 1 : 0);')
+        self.trips[-1] = f'{tn} > 0'
         self.short_range = short
         self.open_counted('uint64_t', tk, '0', tn)
         self.emit(f'v_{var} = (int64_t)((uint64_t){ts} + {tk} * (uint64_t){tp});')
@@ -3612,6 +3661,8 @@ class Compiler:
 
     def for_iter(self, s, d):
         n, elem = self.iter_prep(d)
+        n = self.hold(n, T.U64)                   # the trip count, also for the test after the loop
+        self.trips[-1] = f'{n} > 0'
         k = self.temp()
         self.open_counted('uint64_t', k, '0', n)
         self.bind_values(s.target, elem(k))

@@ -167,6 +167,9 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   of (value, flag) following the type, and results take one pair of `sj_io` slots per number. A loop over a tuple holds every
   element first, as Python builds it, then selects element k by index: one counted loop, so `break` and `continue` need nothing
   new. Elements must share a type. Preflight takes a parameter's tuple shape from how it's unpacked, or what it's passed to.
+- **SIMD (2026-11-03):** cimo vectorizes straight loops of 4- and 8-byte lanes, so the generated C keeps loop bodies free of
+  stores that don't vary: a variable's numpy flag (`total = 0` then `total += x[i]`) is set once after a counted loop that ran,
+  when every assignment gives a numpy value, one runs every iteration and nothing in the loop reads the flag.
 - **Enums (built 2026-11-03).** A member of an `Enum` or `IntEnum` with int values is its value; the class, read from module
   level, is a hidden argument whose identity is part of the signature, so `Level.HIGH` is a literal. Two members of one class are
   the same member exactly when their values are equal, since an alias is the member it names; an `Enum` is never equal to anything

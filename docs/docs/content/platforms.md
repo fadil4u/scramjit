@@ -11,6 +11,10 @@ scramjit is pure Python and runs wherever cimo does: CPython 3.9 or newer, and P
 
 The same decorated function runs unchanged on all of them; scramjit generates the same C, and cimo compiles it for the machine it is on.
 
+## Tested
+
+scramjit is developed and benchmarked on arm64 Linux and in Pyodide, where its whole test suite runs: about 2,300 differential tests against CPython and numpy. It has been run by hand on Windows arm64 and on Windows x86-64 under emulation, where a NaN's sign can differ from CPython's (`inf % 1.0` gives `nan` with the other sign bit). cimo runs on x86-64 Linux and macOS, but scramjit's tests haven't been run on them yet, and nothing runs in CI yet.
+
 ## Security
 
 Compiled code runs with the full privileges of your Python process, like an extension module or ctypes. There is no sandbox.

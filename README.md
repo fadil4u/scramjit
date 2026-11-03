@@ -201,12 +201,22 @@ is no sandbox.
 
 ## Status
 
-Pre-release.
+Pre-release: the API may still change.
 
-- About 1,600 tests pass. Developed and benchmarked on arm64 Linux and in Pyodide, and run by hand on arm64 Windows and on x86-64 Windows
-  (emulated), where a NaN's sign can differ. macOS is a cimo target that scramjit hasn't been run on, and none of these run in CI yet.
+- **Releases.** The latest on PyPI is 0.0.2. `main` is ahead of it, and 0.0.3 comes next, after a cimo release it needs. Since 0.0.2,
+  on `main` only: calls between `@scram` functions, calling C from `cimo.compile`, arrays made inside a function, module-level
+  constants, arithmetic on `float32`, `uint8` and the other narrow dtypes, `<<` and `>>`, and exact 64-bit hashes. To use them now,
+  install both from GitHub:
+
+  ```
+  pip install "cimo @ git+https://github.com/farizrahman4u/cimo#subdirectory=python" "scramjit @ git+https://github.com/farizrahman4u/scramjit"
+  ```
+- **Tests.** About 2,300 differential tests compare each compiled function with CPython and numpy, bit for bit. Developed and
+  benchmarked on arm64 Linux and in Pyodide. Run by hand on arm64 Windows and x86-64 Windows (emulated), where a NaN's sign can
+  differ. cimo also targets x86-64 Linux and macOS, where scramjit's tests haven't been run yet, and nothing runs in CI yet.
 - A function that doesn't compile whole has its loops compiled on their own, where they fit.
-- Dicts compile when passed in with keys that don't change. Next, the rest of the data structures: see `TODO.md`.
+- Data structures: dicts passed in with keys that don't change, flat tuples and lists, and module-level numbers, tuples, arrays and
+  dicts compile. Nested ones and classes are next.
 - Next: see [`TODO.md`](https://github.com/farizrahman4u/scramjit/blob/main/TODO.md).
 
 ## Development

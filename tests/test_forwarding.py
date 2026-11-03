@@ -240,10 +240,12 @@ def test_it_happens_where_it_should():
     x, y = X.copy(), np.zeros(40)
     assert ' - 1 < v_y__n ?' in reads_of(ema, x, y, 0.3)
     assert ' - 1 < v_y__n ?' in reads_of(ema, x, y, 0.3, boundscheck=False)
+    c = reads_of(two_stores, X.copy(), np.zeros(40), np.zeros(40))     # behind a test that z and y don't share memory
+    assert ' - 1 < v_y__n ?' in c and '<= (char *)v_y ||' in c
 
 
 @pytest.mark.parametrize('f, args', [
-    (two_stores, 3), (conditional_store, 2), (skips, 2), (read_after, 2), (stores_previous, 2), (from_zero, 1),
+    (conditional_store, 2), (skips, 2), (read_after, 2), (stores_previous, 2), (from_zero, 1),
 ])
 def test_it_stays_away_where_it_must(f, args):
     pool = (X.copy(), np.zeros(40), np.zeros(40))
@@ -288,3 +290,27 @@ def test_further_back_happens():
     assert ' - 2 < v_y__n ?' in c and ' - 1 < v_y__n ?' in c
     assert ' - 4 < v_y__n ?' in reads_of(four_back, X.copy())
     assert ' - 2 < v_y__n ?' not in reads_of(two_back_from_one, X.copy())
+
+
+def outputs_three(x, y, m, n):
+    acc = [0.0] * len(x)
+    for i in range(1, len(x)):
+        y[i] = 0.5 * x[i] + 0.5 * y[i - 1]
+        m[i % 2, i % 3] = y[i] * 2
+        acc[i] = y[i]
+        n[i] = i * 3 + 1             # an int: over y's float64 memory, it changes y[i - 1]
+    return acc[len(x) - 1]
+
+
+@pytest.mark.parametrize('shift', [-2, -1, 0, 1, 2])
+def test_other_stores_sharing_memory(shift):
+    """n is y's memory under another name and dtype (int64 over float64), or not; m is 2-D."""
+    def apart():
+        return [X.copy(), np.zeros(40), np.zeros((2, 3)), np.zeros(40)]
+
+    def shared():
+        y = np.zeros(60)
+        lo = 10 + shift
+        return [X.copy(), y[10:50], np.zeros((2, 3)), y[lo:lo + 40].view(np.int64)]
+    same(outputs_three, apart)
+    same(outputs_three, shared)

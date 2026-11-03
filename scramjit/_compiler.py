@@ -583,7 +583,8 @@ class Compiler:
         self.gotchas = {}      # Python line -> a way this line can differ from Python
         self.hoisted_lines = set()   # Python lines whose checks live only in a versioned loop's slow copy
         self.slow_copy = 0     # inside that slow copy
-        self.forwards = {}     # array -> (loop variable, temp holding its element at var - 1)
+        self.forwards = {}     # array -> (loop variable, temps holding its elements at var - 1, var - 2, ...)
+        self.no_forwarding = False  # emitting the copy of a loop for when the arrays it stores to share memory
         self.view_names = {}   # id of a view expression -> the variable that holds it while it's used
         self.rebound = set()   # arrays assigned somewhere: their extents aren't fixed, so facts mustn't name them
         self.broke = []        # for each open Python loop, the flag its else tests, or None
@@ -3442,7 +3443,26 @@ class Compiler:
 
     def unit_loop(self, s, var, ts, te, fact, short=False):
         ti = self.temp()
-        found = self.forwarded(s, var, fact)
+        found = None if self.no_forwarding else self.forwarded(s, var, fact)
+        if found and found[2]:                 # other arrays are stored to: forward only where none shares y's memory
+            y = found[0]
+            def span(a):
+                n = ' * '.join(['1LL'] + [self.extent(a, k) for k in range(self.env[a].ndim)])
+                return f'(char *)v_{a}', f'(char *)v_{a} + ({n}) * (int64_t)sizeof({self.env[a].elem.ctype})'
+            y0, y1 = span(y)
+            apart = ' && '.join(f'({o1} <= {y0} || {y1} <= {o0})' for o0, o1 in map(span, found[2]))
+            self.open(f'if ({apart})')
+            self.forwarding_loop(s, var, ts, te, fact, short, ti, found)
+            self.close('} else {')
+            self.depth += 1
+            self.no_forwarding = True
+            self.unit_loop(s, var, ts, te, fact, short)
+            self.no_forwarding = False
+            self.close()
+            return
+        self.forwarding_loop(s, var, ts, te, fact, short, ti, found)
+
+    def forwarding_loop(self, s, var, ts, te, fact, short, ti, found):
         name = found[0] if found else None
         if found:                              # the first y[i - 1] to y[i - k] really are read from memory
             temps = []
@@ -3459,20 +3479,34 @@ class Compiler:
         self.forwards.pop(name, None)
 
     def forwarded(self, s, var, fact):
-        """(y, k) when this loop can read y[var - 1] to y[var - k] from temporaries instead of memory, because
-        earlier iterations just stored them: the one array store in the loop is y[var] = ..., on every
-        iteration, and no array store means no other name for that memory can change it. They're read
-        only up to that store. The dtype holds exactly what the C value does. Otherwise None."""
+        """(y, k, others) when this loop can read y[var - 1] to y[var - k] from temporaries instead of memory,
+        because earlier iterations just stored them: y's one store in the loop is y[var] = ..., on every
+        iteration. Another store could change those elements only through an array sharing y's memory:
+        others are the arrays stored to, which a test before the loop must find apart from y (contiguous,
+        and not assigned in the loop, so their memory is known there). They're read only up to y's store.
+        The dtype holds exactly what the C value does. Otherwise None."""
         if not fact or fact[0] is None:
             return None
         body = list(ast.walk(ast.Module(body=s.body, type_ignores=[])))
         if any(isinstance(n, (ast.For, ast.While, ast.comprehension, ast.Continue)) or self.calls_out(n) for n in body):
             return None                        # a call can write any array it's given
         stores = [n for n in body if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store)]
-        if len(stores) != 1 or not isinstance(stores[0].value, ast.Name):
+        if not stores or not all(isinstance(n.value, ast.Name) for n in stores):
             return None
-        target = stores[0]
-        name = target.value.id
+        assigned = {n.id for n in body if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        read_back = [n.value.id for n in stores if any(self.is_previous(r, n.value.id, var) for r in body)]
+        if len(read_back) != 1:
+            return None
+        name = read_back[0]
+        if sum(n.value.id == name for n in stores) != 1:
+            return None
+        target = next(n for n in stores if n.value.id == name)
+        others = sorted({n.value.id for n in stores} - {name})
+        for o in others:
+            ot = self.env.get(o)
+            if ot is None or o in assigned or o in self.rebound or (ot.kind == 'array' and ot.strided) or ot.kind not in ('array', 'list'):
+                return None
+        others = [o for o in others if self.env[o].kind == 'array']     # a list is memory of its own
         t = self.env.get(name)
         if t is None or t.kind != 'array' or t.ndim != 1 or t.strided or name in self.rebound \
                 or t.elem.name not in ('np.float64', 'np.int64') \
@@ -3494,7 +3528,7 @@ class Compiler:
                     return None
         finally:
             self.facts.pop(var, None)
-        return name, max(self.is_previous(r, name, var) for r in reads(s.body))
+        return name, max(self.is_previous(r, name, var) for r in reads(s.body)), others
 
     def is_previous(self, e, name, var):
         """How far back e is, if it's the element name[var - k] for k from 1 to FORWARD_DEPTH: k, else 0."""

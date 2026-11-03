@@ -447,7 +447,9 @@ with `boundscheck=False`. A constant `base` stays with `a[i + c]`, or `a[i - 1]`
 checked copy. `y[i - 1]` reads a temporary when `y[i] = ...` is the loop's only array store, on every iteration, in a
 float64 or int64 array: with no other store, no view can change that element, so overlap needs no test. Up to `y[i - 4]`,
 each in its own temporary, shifted after the store; past `y[i - 1]` it gains little (a biquad 5.80 to 5.68 ns per sample),
-since those loads are issued iterations before they're needed.
+since those loads are issued iterations before they're needed. With stores to other arrays, a test before the loop
+checks that none shares y's bytes (contiguous arrays, not assigned in the loop; lists have memory of their own), with
+the plain loop otherwise: `y[i] = a * x[i] + (1 - a) * y[i - 1]; d[i] = x[i] - y[i]` 5.1 to 2.4 ns (arm64).
 `ema` 3.09 to 2.39 ns (hand C 3.06, which cimo can't forward), `edit_distance` 2.22 to 1.71; in Pyodide
 `ema` 4.20 to 3.55. Facts from `range` loops with a step of 1 or another positive literal (index
 non-negative, below `len(a)`) drop negative-index adjustment and bounds checks, and loop versioning

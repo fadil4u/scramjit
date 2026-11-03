@@ -204,20 +204,15 @@ is no sandbox.
 
 Pre-release: the API may still change.
 
-- **Releases.** The latest on PyPI is 0.0.2. `main` is ahead of it, and 0.0.3 comes next, after a cimo release it needs. Since 0.0.2,
-  on `main` only: calls between `@scram` functions, default parameter values, enums, nested tuples, calling C from `cimo.compile`, arrays made inside a function, module-level
-  constants, arithmetic on `float32`, `uint8`, `uint64` and the other narrow dtypes, `<<` and `>>`, and exact 64-bit hashes. To use them now,
-  install both from GitHub:
-
-  ```
-  pip install "cimo @ git+https://github.com/farizrahman4u/cimo#subdirectory=python" "scramjit @ git+https://github.com/farizrahman4u/scramjit"
-  ```
-- **Tests.** About 2,300 differential tests compare each compiled function with CPython and numpy, bit for bit. Developed and
+- **Releases.** 0.0.3 is on PyPI. New since 0.0.2: calls between `@scram` functions, default parameter values, enums,
+  nested tuples, calling C from `cimo.compile`, arrays made inside a function, module-level constants, arithmetic on
+  `float32`, `uint8`, `uint64` and the other narrow dtypes, `<<` and `>>`, exact 64-bit hashes, and int sums that vectorize.
+- **Tests.** About 2,500 differential tests compare each compiled function with CPython and numpy, bit for bit. Developed and
   benchmarked on arm64 Linux and in Pyodide. Run by hand on arm64 Windows and x86-64 Windows (emulated), where a NaN's sign can
   differ. cimo also targets x86-64 Linux and macOS, where scramjit's tests haven't been run yet, and nothing runs in CI yet.
 - A function that doesn't compile whole has its loops compiled on their own, where they fit.
-- Data structures: dicts passed in with keys that don't change, flat tuples and lists, and module-level numbers, tuples, arrays and
-  dicts compile. Nested ones and classes are next.
+- Data structures: dicts passed in with keys that don't change, tuples to any depth, enums, local lists, and module-level
+  numbers, tuples, arrays and dicts compile. Lists passed in, nested lists and classes are next.
 - Next: see [`TODO.md`](https://github.com/farizrahman4u/scramjit/blob/main/TODO.md).
 
 ## Development

@@ -4,16 +4,9 @@ Biggest first. `requirements.md` is the spec; this is the work queue.
 
 ## Release
 
-0. **PyPI is behind the docs: release 0.0.3 now.** `v0.0.2` on PyPI can't call one `@scram`
-   function from another, or C from `cimo.compile`; both landed after the tag (`f9faed9`, `9af355d`,
-   14 commits on `main` since), and the README, the site and `docs/agent-prompt.txt` describe them
-   as available. A reader who installs from PyPI and follows the docs hits a `FallbackWarning` or a
-   `CompileError` on a documented feature. Bump `pyproject.toml`, tag, publish, and check the pin on
-   cimo covers what the release needs.
-   **Rule from now on:** the README, site and docs describe the *released* version. A feature that
-   is on `main` but not on PyPI is either released the same day or marked `> [!PLANNED]` /
-   "from 0.0.3" in every place it's mentioned. Add the rule to `AGENTS.md`, and a test that
-   `pyproject.toml`'s version matches the latest tag when the README's feature table changes.
+0. **0.0.3 released (2026-11-03),** with cimo 0.0.3, which it needs for calling C. The rule stays: the README, site and
+   docs describe the released version, and a feature on `main` but not on PyPI is released the same day or marked
+   "from 0.0.4" wherever it's mentioned (`AGENTS.md`). `tests/test_version.py` checks the version agrees everywhere it's written.
 
 ## Demos
 

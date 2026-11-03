@@ -75,6 +75,9 @@ def c_int(x):
     return f'{x}LL'
 
 
+FORWARD_DEPTH = 4     # y[i - 1] to y[i - 4] can be forwarded from temporaries
+
+
 def const_int(node):
     """The Python value of an int expression made only of literals ((1 << 64) - 1, 2 ** 63), or None. Kept small."""
     if isinstance(node, ast.Constant):
@@ -3439,12 +3442,16 @@ class Compiler:
 
     def unit_loop(self, s, var, ts, te, fact, short=False):
         ti = self.temp()
-        name = self.forwarded(s, var, fact)
-        if name:                               # the first y[i - 1] really is read from memory
-            t = self.temp()
-            self.emit(f'{self.env[name].elem.ctype} {t} = {te} > {ts} && {ts} - 1 < {self.extent(name, 0)} '
-                      f'? v_{name}[{ts} - 1] : 0;')
-            self.forwards[name] = (var, t)
+        found = self.forwarded(s, var, fact)
+        name = found[0] if found else None
+        if found:                              # the first y[i - 1] to y[i - k] really are read from memory
+            temps = []
+            for k in range(1, found[1] + 1):
+                t = self.temp()
+                self.emit(f'{self.env[name].elem.ctype} {t} = {te} > {ts} && {ts} - {k} < {self.extent(name, 0)} '
+                          f'? v_{name}[{ts} - {k}] : 0;')
+                temps.append(t)
+            self.forwards[name] = (var, temps)
         self.short_range = short
         self.open_counted('int64_t', ti, ts, te)
         self.emit(f'v_{var} = {ti};')
@@ -3452,10 +3459,10 @@ class Compiler:
         self.forwards.pop(name, None)
 
     def forwarded(self, s, var, fact):
-        """The array y whose y[var - 1] this loop can read from a temporary instead of memory, because
-        the last iteration just stored it: the one array store in the loop is y[var] = ..., on every
-        iteration, and no array store means no other name for that memory can change it. y[var - 1] is
-        read only up to that store. The dtype holds exactly what the C value does. Otherwise None."""
+        """(y, k) when this loop can read y[var - 1] to y[var - k] from temporaries instead of memory, because
+        earlier iterations just stored them: the one array store in the loop is y[var] = ..., on every
+        iteration, and no array store means no other name for that memory can change it. They're read
+        only up to that store. The dtype holds exactly what the C value does. Otherwise None."""
         if not fact or fact[0] is None:
             return None
         body = list(ast.walk(ast.Module(body=s.body, type_ignores=[])))
@@ -3481,18 +3488,23 @@ class Compiler:
             return None
         self.facts[var] = fact
         try:
-            nonneg, inbounds = self.index_facts(name, reads(s.body)[0].slice, 0)
+            for r in reads(s.body):
+                nonneg, inbounds = self.index_facts(name, r.slice, 0)
+                if not (nonneg and (inbounds or not self.boundscheck)):
+                    return None
         finally:
             self.facts.pop(var, None)
-        return name if nonneg and (inbounds or not self.boundscheck) else None
+        return name, max(self.is_previous(r, name, var) for r in reads(s.body))
 
     def is_previous(self, e, name, var):
-        """Is e the element name[var - 1]?"""
-        return isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id == name \
-            and isinstance(e.slice, ast.BinOp) and isinstance(e.slice.op, ast.Sub) \
-            and isinstance(e.slice.left, ast.Name) and e.slice.left.id == var \
-            and isinstance(e.slice.right, ast.Constant) and type(e.slice.right.value) is int \
-            and e.slice.right.value == 1
+        """How far back e is, if it's the element name[var - k] for k from 1 to FORWARD_DEPTH: k, else 0."""
+        if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id == name \
+                and isinstance(e.slice, ast.BinOp) and isinstance(e.slice.op, ast.Sub) \
+                and isinstance(e.slice.left, ast.Name) and e.slice.left.id == var \
+                and isinstance(e.slice.right, ast.Constant) and type(e.slice.right.value) is int \
+                and 1 <= e.slice.right.value <= FORWARD_DEPTH:
+            return e.slice.right.value
+        return 0
 
     def loop_body(self, s, var, fact):
         if self.env[var].np == 'dyn':
@@ -3981,8 +3993,9 @@ class Compiler:
         self.check_fits(target, et, v, vt)
         val = self.hold(self.coerce(v[0], vt, et), et)
         self.emit(f'{arr}[{idx}] = {val};')
-        if name in self.forwards:
-            self.emit(f'{self.forwards[name][1]} = {val};')
+        if name in self.forwards:                  # what was y[i - 1] is y[i - 2] next time
+            temps = self.forwards[name][1]
+            self.emit(' '.join(f'{temps[k]} = {temps[k - 1]};' for k in range(len(temps) - 1, 0, -1)) + f' {temps[0]} = {val};')
         if self.env[name].kind == 'list' and et.np == 'dyn':
             self.emit(f'v_{name}__np[{idx}] = {flag};')
 
@@ -4404,7 +4417,7 @@ class Compiler:
             e = self.named(e)
             name = e.value.id
             if name in self.forwards and self.is_previous(e, name, self.forwards[name][0]):
-                return self.forwards[name][1], '1'
+                return self.forwards[name][1][self.is_previous(e, name, self.forwards[name][0]) - 1], '1'
             arr, idx = self.element(e)
             return self.hold(f'{arr}[{idx}]', self.env[name].elem), self.hold_flag(self.elem_flag(name, idx))
         if isinstance(e, ast.Call):

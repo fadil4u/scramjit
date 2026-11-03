@@ -248,3 +248,43 @@ def test_it_happens_where_it_should():
 def test_it_stays_away_where_it_must(f, args):
     pool = (X.copy(), np.zeros(40), np.zeros(40))
     assert ' - 1 < v_' not in reads_of(f, *pool[-args:] if args == 1 else pool[:args])
+
+
+def biquad(x, y, b0, b1, b2, a1, a2):
+    y[0] = b0 * x[0]
+    y[1] = b0 * x[1] + b1 * x[0] - a1 * y[0]
+    for i in range(2, len(x)):
+        y[i] = b0 * x[i] + b1 * x[i - 1] + b2 * x[i - 2] - a1 * y[i - 1] - a2 * y[i - 2]
+
+
+def four_back(y):
+    for i in range(4, len(y)):
+        y[i] = y[i - 4] - y[i - 1] * 0.5 + y[i - 3] * y[i - 2]
+
+
+def two_back_from_one(y):           # y[-1] on the first iteration: Python's last element, so not forwarded
+    for i in range(1, len(y)):
+        y[i] = y[i - 2] + 1
+
+
+def only_two_back(y, lo):
+    for i in range(lo, len(y)):
+        y[i] = y[i - 2] * 0.5 + 1
+
+
+@pytest.mark.parametrize('n', [0, 1, 2, 3, 4, 5, 17, 40])
+def test_further_back(n):
+    x = X[:n].copy()
+    if n >= 2:
+        same(biquad, x, np.zeros(n), 0.2, 0.3, 0.2, -0.5, 0.25)
+    same(four_back, x)
+    same(two_back_from_one, x)
+    for lo in (2, 3, 7):
+        same(only_two_back, x, lo)
+
+
+def test_further_back_happens():
+    c = reads_of(biquad, X.copy(), np.zeros(40), 0.2, 0.3, 0.2, -0.5, 0.25)
+    assert ' - 2 < v_y__n ?' in c and ' - 1 < v_y__n ?' in c
+    assert ' - 4 < v_y__n ?' in reads_of(four_back, X.copy())
+    assert ' - 2 < v_y__n ?' not in reads_of(two_back_from_one, X.copy())

@@ -262,9 +262,9 @@ Spills per line, once cimo can report them.
    with `base` built from Python ints that don't change in the loop, also with a positive literal step and a start
    checked at run time. Not yet: negative steps, numpy int bases, `arr[i // 2]` and `arr[2 * i]`, and outer loops,
    where a second copy of everything inside costs more than it wins.
-4. **Store-to-load forwarding, what's left:** `y[i - 1]` comes from a temporary when `y[i] = ...` is the
-   loop's only array store and runs every iteration. Not yet: `y[i - 2]`, 2-D rows (`m[r, j - 1]`), and loops
-   with other stores, which need a runtime test that the arrays don't overlap.
+4. **Store-to-load forwarding, what's left:** `y[i - 1]` to `y[i - 4]` come from temporaries when `y[i] = ...` is the
+   loop's only array store and runs every iteration. Not yet: 2-D rows (`m[r, j - 1]`), and loops with other stores,
+   which need a runtime test that the arrays don't overlap.
 5. **Loop lifting, what's left:** a loop stays in Python if a variable read afterwards may be unbound
    (`for i ...` then reading `i`, with nothing assigned first), inside `try` or `with`, or containing `return`.
    "Partly compiled" is per function, not per signature. Tracebacks show one extra frame for a loop that raises.

@@ -445,7 +445,9 @@ also drops the negative-index test: 89 to 90 natively but 70 to 88 in Pyodide. T
 copy of those loops: this function compiles in 4 s rather than 2.7 by default, 2.5 rather than 1.25
 with `boundscheck=False`. A constant `base` stays with `a[i + c]`, or `a[i - 1]` would always take the
 checked copy. `y[i - 1]` reads a temporary when `y[i] = ...` is the loop's only array store, on every iteration, in a
-float64 or int64 array: with no other store, no view can change that element, so overlap needs no test.
+float64 or int64 array: with no other store, no view can change that element, so overlap needs no test. Up to `y[i - 4]`,
+each in its own temporary, shifted after the store; past `y[i - 1]` it gains little (a biquad 5.80 to 5.68 ns per sample),
+since those loads are issued iterations before they're needed.
 `ema` 3.09 to 2.39 ns (hand C 3.06, which cimo can't forward), `edit_distance` 2.22 to 1.71; in Pyodide
 `ema` 4.20 to 3.55. Facts from `range` loops with a step of 1 or another positive literal (index
 non-negative, below `len(a)`) drop negative-index adjustment and bounds checks, and loop versioning

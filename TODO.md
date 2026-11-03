@@ -294,7 +294,7 @@ Spills per line, once cimo can report them.
    - **Module-level constants: built.** Numbers, tuples, arrays and dicts are hidden arguments, read at each call, at about 0.2 µs each. Not as compile-time literals: only `x[i % K]` would gain, 1.25 to 1.06
      ns, against recompiling on every change. Not yet: lists at module level, and a global that is a list of numbers.
    - **Enums: built.** See "Enums" in `containers.md`. Not yet: `.name`, `Cell(1)`, iterating over the class, storing a member into an array, `Flag` and string enums.
-   - **Nested tuples:** `((1, 2), 3)`, and tuples holding arrays, as locals, arguments and results.
+   - **Nested tuples: built,** as locals, arguments, results and globals, and loops over tuples. Not yet: a tuple holding arrays as a local or an argument, a tuple indexed with a variable, a comprehension variable that is a tuple, and comparing tuples.
    - **Lists as arguments, and nested:** `[[1.0, 2.0], [3.0, 4.0]]`; returning one. The spec's copy in and
      out at the call was never built.
    - **Classes:** attribute reads and writes on instances and dataclasses, then method calls.

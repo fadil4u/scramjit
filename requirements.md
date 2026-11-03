@@ -163,6 +163,10 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   as Python. Loop optimizations and loop lifting come first, so that containers don't hide speedups still to
   be had from loops. Open, apart from dicts below: what a runtime value that breaks the rule does, aliasing, and the
   cost of checking and copying at the call. See `TODO.md`.
+- **Nested tuples (built 2026-11-03).** One C variable per number, named by its path (`v_t__0__1`); values move as nested lists
+  of (value, flag) following the type, and results take one pair of `sj_io` slots per number. A loop over a tuple holds every
+  element first, as Python builds it, then selects element k by index: one counted loop, so `break` and `continue` need nothing
+  new. Elements must share a type. Preflight takes a parameter's tuple shape from how it's unpacked, or what it's passed to.
 - **Enums (built 2026-11-03).** A member of an `Enum` or `IntEnum` with int values is its value; the class, read from module
   level, is a hidden argument whose identity is part of the signature, so `Level.HIGH` is a literal. Two members of one class are
   the same member exactly when their values are equal, since an alias is the member it names; an `Enum` is never equal to anything

@@ -182,6 +182,7 @@ def assumed_signature(fdef, globals_=None, seen=()):
     ann = {'float': T.FLOAT, 'int': T.INT, 'bool': T.BOOL}
     ndim = {}
     passed_ints = set()
+    passed_tuples = {}
     for n in ast.walk(fdef):
         f = (globals_ or {}).get(n.func.id) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) else None
         c = (globals_ or {}).get(n.func.value.id) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) else None
@@ -197,6 +198,8 @@ def assumed_signature(fdef, globals_=None, seen=()):
                     ndim[a.id] = max(ndim.get(a.id, 0), t.ndim)
                 elif isinstance(a, ast.Name) and t is T.INT:
                     passed_ints.add(a.id)
+                elif isinstance(a, ast.Name) and t.kind == 'tuple':
+                    passed_tuples.setdefault(a.id, t)
     for n in ast.walk(fdef):
         if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name):
             k = len(n.slice.elts) if isinstance(n.slice, ast.Tuple) else 1
@@ -240,6 +243,16 @@ def assumed_signature(fdef, globals_=None, seen=()):
     sig = []
     a = fdef.args
     params = a.posonlyargs + a.args
+    shapes = {}                        # (x0, y0), (x1, y1) = box says box is a tuple of that shape
+
+    def shape(target):
+        return T.tuple_of([shape(x) for x in target.elts]) if isinstance(target, (ast.Tuple, ast.List)) else T.FLOAT
+    for n in ast.walk(fdef):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], (ast.Tuple, ast.List)) \
+                and isinstance(n.value, ast.Name):
+            shapes.setdefault(n.value.id, shape(n.targets[0]))
+    for k, v in passed_tuples.items():
+        shapes.setdefault(k, v)
     literal = {}                       # a literal default says what the parameter usually is
     for p, d in zip(params[len(params) - len(a.defaults):], a.defaults):
         if isinstance(d, ast.Constant) and type(d.value) in (int, float, bool):
@@ -248,6 +261,8 @@ def assumed_signature(fdef, globals_=None, seen=()):
         name = ast.unparse(p.annotation) if p.annotation is not None else None
         if p.arg in literal and name is None and p.arg not in ndim and p.arg not in keys:
             sig.append(literal[p.arg])
+        elif p.arg in shapes and name is None and p.arg not in ndim and p.arg not in keys:
+            sig.append(shapes[p.arg])
         elif p.arg in keys:
             sig.append(T.dict_of(sorted(keys[p.arg].items(), key=lambda kv: repr(kv[0]))))
         elif name in ann:
@@ -374,6 +389,16 @@ def analyze(fdef, sig, globals_, filename, offset, opts, first_only=False):
     return Analysis(sig, None, problems)
 
 
+def _number_tree(v):
+    """The type of a number, or of a tuple of numbers and such tuples, as a call would see it; else None."""
+    if type(v) in (int, float, bool):
+        return {int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(v)] if type(v) is not int or -(1 << 63) <= v < 1 << 63 else None
+    if type(v) is tuple and v:
+        elems = [_number_tree(x) for x in v]
+        return None if None in elems else T.tuple_of(elems)
+    return None
+
+
 def with_globals(fdef, globals_):
     """fdef with what it reads from module level as parameters, as a call would pass them: annotated if they're plain numbers,
     so their types are known. A name whose value can't be known counts if the function indexes it, as an array."""
@@ -413,9 +438,9 @@ def with_globals(fdef, globals_):
             tuples[name] = T.U64
         elif type(v) in (int, float, bool):
             added.append(ast.arg(name, ast.Name(type(v).__name__, ast.Load())))
-        elif type(v) is tuple and v and all(type(x) in (int, float, bool) for x in v):
+        elif _number_tree(v) is not None and type(v) is tuple:
             added.append(ast.arg(name))
-            tuples[name] = T.tuple_of([{int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(x)] for x in v])
+            tuples[name] = _number_tree(v)
         elif type(v) is dict or (v is _OTHER and name in indexed):
             added.append(ast.arg(name))
     if not added:

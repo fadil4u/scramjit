@@ -41,6 +41,8 @@ for i, (u, v) in enumerate(zip(a, b)):
 
 is one counted loop over the shorter of `a` and `b`, reading `a[i]` and `b[i]` directly.
 
+A tuple works as well, when its elements share a type: `for w in (0.25, 0.5, 0.25)`, `for (x, y) in (p, q)`. It's built first, as in Python, then read by index.
+
 ## Comprehensions, `map`, `filter` and generator expressions
 
 These fuse into one loop with no intermediate iterators. A result is materialized only when it is stored:

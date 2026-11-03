@@ -293,6 +293,14 @@ NP_FUNCS = {'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8', 'u
     | set(NP_REDUCE) | set(NP_FLOAT_ONLY)
 
 
+class TupleOf:
+    """A loop element that is a tuple: nested lists of (C value, flag), and its type."""
+    __slots__ = ('vals', 't')
+
+    def __init__(self, vals, t):
+        self.vals, self.t = vals, t
+
+
 class RowOf:
     """What a loop over a multi-dimensional array yields: its k-th first-axis element, a view."""
 
@@ -411,8 +419,16 @@ def exact_int_literal(node):
 
 
 def ret_pairs(ret):
-    """How many pairs of sj_io slots a return value uses beyond the first five."""
-    return len(ret.elem) if ret.kind == 'tuple' else 0
+    """How many pairs of sj_io slots a return value uses beyond the first five: one per number, nested tuples too."""
+    return len([et for et in ret.elem if et.kind != 'tuple']) + sum(ret_pairs(et) for et in ret.elem if et.kind == 'tuple') if ret.kind == 'tuple' else 0
+
+
+def flat(vals):
+    """The (value, flag) leaves of a nested list of them, in order."""
+    out = []
+    for v in vals:
+        out.extend(flat(v) if isinstance(v, list) else [v])
+    return out
 
 
 def ret_arrays(ret):
@@ -913,7 +929,16 @@ class Compiler:
                 if inner[0] not in ('range', 'array') or (len(inner) > 2 and inner[2] is not None):
                     self.fail(it, 'reversed() of something other than range() or an array')
                 return ('reversed', inner)
-        self.fail(it, 'loops over something other than range(), an array, enumerate(), zip() or reversed()')
+        if isinstance(it, ast.Tuple) or self.tuple_typed(it):
+            t = self.typeof(it)
+            r = t.elem[0]
+            for et in t.elem[1:]:
+                j = T.join(r, et) if not (r.kind == 'tuple') else (r if r is et else None)
+                if j is None:
+                    self.fail(it, f'loops over a tuple whose elements differ in type ({r.name}, {et.name})')
+                r = j
+            return ('tuple', it, r)
+        self.fail(it, 'loops over something other than range(), an array, enumerate(), zip(), reversed() or a tuple')
 
     def no_rows(self, d, node):
         """Only for statements bind a view to a variable: a reduction or a comprehension over rows stays Python."""
@@ -937,6 +962,8 @@ class Compiler:
             return [T.INT, self.elem_struct(d[1])]
         if kind == 'zip':
             return [self.elem_struct(x) for x in d[1]]
+        if kind == 'tuple':
+            return d[2]
         return self.elem_struct(d[1])
 
     def has_views(self, e):
@@ -957,6 +984,8 @@ class Compiler:
             self.fail(s, f'stores {t.name} into a {dst.name} array')
 
     def bind_types(self, target, struct, s):
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(struct, T.Type) and struct.kind == 'tuple':
+            struct = list(struct.elem)           # a tuple element, unpacked
         if isinstance(target, ast.Name):
             if isinstance(struct, list):
                 self.fail(s, 'a tuple assigned to one name (tuples are not compiled yet)')
@@ -1040,8 +1069,14 @@ class Compiler:
             self.view_names[id(e)] = name
         return name
 
+    def tuple_typed(self, e):
+        """Is e a tuple variable, or an element of one that is itself a tuple?"""
+        if isinstance(e, ast.Name):
+            return e.id in self.env and self.env[e.id].kind == 'tuple'
+        return isinstance(e, ast.Subscript) and self.tuple_typed(e.value) and self.typeof(e).kind == 'tuple'
+
     def tuple_index(self, sub):
-        t = self.env[sub.value.id]
+        t = self.typeof(sub.value)
         k = sub.slice
         neg = isinstance(k, ast.UnaryOp) and isinstance(k.op, ast.USub)
         if neg:
@@ -1405,13 +1440,13 @@ class Compiler:
                 if self.shape_index(e) is None:
                     self.fail(e, 'a.shape indexed with something other than a constant in range')
                 return T.INT
-            if isinstance(e.value, ast.Name) and e.value.id in self.env and self.env[e.value.id].kind == 'tuple':
-                return self.env[e.value.id].elem[self.tuple_index(e)]
+            if self.tuple_typed(e.value):
+                return self.typeof(e.value).elem[self.tuple_index(e)]
             return self.subscript_type(e)
         if isinstance(e, ast.Tuple):
             ts = [self.typeof(x) for x in e.elts]
-            if not all(t.is_number for t in ts):
-                self.fail(e, 'tuples of non-numbers (nested tuples, arrays)')
+            if not all(T.is_number_tree(t) for t in ts):
+                self.fail(e, 'tuples of non-numbers (arrays, lists)')
             return T.tuple_of(ts)
         if isinstance(e, ast.Call):
             made = self.make_of(e)
@@ -1715,7 +1750,7 @@ class Compiler:
         nodes, picked = self.call_args(e, spec, fn)
         ts = [self.typeof(x) for x in nodes]
         for x, t in zip(nodes, ts):
-            if not (t.is_number or t.kind in ('array', 'enum') or (t.kind == 'tuple' and all(et.is_number and et.np != 'dyn' for et in t.elem))):
+            if not (t.is_number or t.kind in ('array', 'enum') or (t.kind == 'tuple' and T.is_number_tree(t) and all(et.np != 'dyn' for et in T.leaves(t)))):
                 self.fail(e, f'passes {t.name} to {e.func.id}()')
         types = [ts[k] for k in picked]
         for h in spec.hidden:
@@ -1785,7 +1820,7 @@ class Compiler:
                 if t.strided:
                     cargs += [f'v_{v}__s{k}' for k in range(t.ndim)]
             elif t.kind == 'tuple':
-                cargs += [val if isinstance(val, str) else val for val, _ in (v if isinstance(v, list) else self.tuple_var(v))]
+                cargs += [val for val, _ in flat(v if isinstance(v, list) else self.tuple_var(v))]
             elif isinstance(v, str):           # a global that is a number
                 cargs.append(f'v_{v}')
                 if t.np == 'dyn':
@@ -2809,6 +2844,10 @@ class Compiler:
             self.restore(saved)
 
     def comp_bind_types(self, target, struct, saved, e):
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(struct, T.Type) and struct.kind == 'tuple':
+            struct = list(struct.elem)           # a tuple element, unpacked
+        if isinstance(target, ast.Name) and isinstance(struct, T.Type) and struct.kind == 'tuple':
+            self.fail(e, 'a comprehension variable that is a tuple (unpack it: for a, b in ...)')
         if isinstance(target, ast.Name) and not isinstance(struct, list):
             if target.id not in saved:
                 saved[target.id] = self.env.get(target.id)
@@ -2937,7 +2976,7 @@ class Compiler:
                 if t.strided:
                     params += [f'int64_t v_{p}__s{k}' for k in range(t.ndim)]
             elif t.kind == 'tuple':
-                params += [f'{et.ctype} v_{p}__{i}' for i, et in enumerate(t.elem)]
+                params += [f'{et.ctype} {cv}' for cv, et in self.tuple_leaves(p)]
             elif p in self.tagged and self.came_as(p) is T.INT:
                 params.append(f'int64_t v_{p}__in')
             elif t is T.U64:
@@ -2971,11 +3010,11 @@ class Compiler:
                     self.emit(f'int *v_{name}__np = NULL;')
                 continue
             if t.kind == 'tuple':
-                for i, et in enumerate(t.elem):
+                for cv, et in self.tuple_leaves(name):
                     if name not in self.params:
-                        self.emit(f'{et.ctype} v_{name}__{i} = 0;')
+                        self.emit(f'{et.ctype} {cv} = 0;')
                     if et.np == 'dyn':
-                        self.emit(f'int v_{name}__{i}__np = 0;')
+                        self.emit(f'int {cv}__np = 0;')
                 continue
             if t.kind == 'array' and self.tracks:     # which argument it's a view of, and is it that very array?
                 if name in self.params:
@@ -3269,8 +3308,9 @@ class Compiler:
         elif isinstance(s, ast.Return):
             if s.value is not None and self.ret.kind == 'tuple':
                 vals = self.texpr(s.value)
-                for i, ((c, f), et, rt) in enumerate(zip(vals, self.typeof(s.value).elem, self.ret.elem)):
-                    self.return_number(i, c, f, et, rt, s.value.elts[i] if isinstance(s.value, ast.Tuple) else None)
+                given = s.value.elts if isinstance(s.value, ast.Tuple) and len(T.leaves(self.ret)) == len(self.ret.elem) else None
+                for i, ((c, f), et, rt) in enumerate(zip(flat(vals), T.leaves(self.typeof(s.value)), T.leaves(self.ret))):
+                    self.return_number(i, c, f, et, rt, given[i] if given else None)
                 self.emit('goto sj_done;')
             elif s.value is not None:
                 v = self.expr(s.value)
@@ -3497,6 +3537,33 @@ class Compiler:
             start = '0LL' if d[2] is None else self.coerce(self.expr(d[2])[0], self.typeof(d[2]), T.INT)
             self.emit(f'int64_t {st} = {start};')
             return n, lambda k: [(f'sj_add({st}, (int64_t){k})', T.INT, '0'), inner(k)]
+        if kind == 'tuple':                          # all of it first, as Python builds it; element k by a select
+            vals, t = self.texpr(d[1]), d[2]
+            n = len(vals)
+
+            def pick(k, at):
+                parts = [flat([v])[at] if not isinstance(v, list) else flat(v)[at] for v in vals]
+                c = parts[-1][0]
+                f = parts[-1][1]
+                for i in range(n - 2, -1, -1):
+                    c = f'((uint64_t){k} == {i} ? {parts[i][0]} : {c})'
+                    f = f'((uint64_t){k} == {i} ? {parts[i][1]} : {f})' if f != parts[i][1] else f
+                return c, f
+
+            def rebuild(et, k, at):
+                if et.kind != 'tuple':
+                    return pick(k, at[0]), at.__setitem__(0, at[0] + 1)
+                out = []
+                for x in et.elem:
+                    out.append(rebuild(x, k, at)[0])
+                return out, None
+
+            def elem(k):
+                if t.kind == 'tuple':
+                    return TupleOf(rebuild(t, k, [0])[0], t)
+                c, f = pick(k, 0)
+                return c, t, f
+            return f'{n}ULL', elem
         if kind == 'zip':
             parts = [self.iter_prep(x) for x in d[1]]
             n = self.temp()
@@ -3520,6 +3587,12 @@ class Compiler:
     def bind_values(self, target, v):
         if isinstance(v, RowOf):
             self.bind_row(target.id, v)
+        elif isinstance(v, TupleOf):
+            if isinstance(target, ast.Name):
+                self.assign_tuple(target, v.vals, v.t)
+            else:
+                for x, val, et in zip(target.elts, v.vals, v.t.elem):
+                    self.bind_values(x, TupleOf(val, et) if et.kind == 'tuple' else (val[0], et, val[1]))
         elif isinstance(target, ast.Name):
             c, t, f = v
             self.assign(target.id, (c, f), t)
@@ -4413,10 +4486,17 @@ class Compiler:
         if dyn:
             self.emit(f'free(v_{name}__np); v_{name}__np = {pf}; {pf} = NULL;')
 
-    def tuple_var(self, name):
-        t = self.env[name]
-        return [(f'v_{name}__{i}', f'v_{name}__{i}__np' if et.np == 'dyn' else flag_of(et))
+    def tuple_var(self, name, t=None, prefix=None):
+        """A tuple variable's C variables, one per number, as nested lists of (value, flag) following its type."""
+        t = self.env[name] if t is None else t
+        prefix = f'v_{name}' if prefix is None else prefix
+        return [self.tuple_var(name, et, f'{prefix}__{i}') if et.kind == 'tuple'
+                else (f'{prefix}__{i}', f'{prefix}__{i}__np' if et.np == 'dyn' else flag_of(et))
                 for i, et in enumerate(t.elem)]
+
+    def tuple_leaves(self, name):
+        """(C variable, type) for each number in a tuple variable, in order."""
+        return [(c, et) for (c, _), et in zip(flat(self.tuple_var(name)), T.leaves(self.env[name]))]
 
     def texpr(self, e):
         """Emit a tuple-valued expression: a list of (value, flag), each computed now."""
@@ -4424,11 +4504,18 @@ class Compiler:
         if isinstance(e, ast.Tuple):
             out = []
             for x, et in zip(e.elts, t.elem):
+                if et.kind == 'tuple':
+                    out.append(self.texpr(x))
+                    continue
                 c, f = self.expr(x)
                 out.append((self.hold(c, et), self.hold_flag(f)))
             return out
         if isinstance(e, ast.Name):
-            return [(self.hold(c, et), self.hold_flag(f)) for (c, f), et in zip(self.tuple_var(e.id), t.elem)]
+            def held(vals, ts):
+                return [held(v, et.elem) if et.kind == 'tuple' else (self.hold(v[0], et), self.hold_flag(v[1])) for v, et in zip(vals, ts)]
+            return held(self.tuple_var(e.id), t.elem)
+        if isinstance(e, ast.Subscript) and self.tuple_typed(e.value):
+            return self.texpr(e.value)[self.tuple_index(e)]
         if self.is_shape(e):
             return [(self.extent(e.value.id, k), '0') for k in range(len(t.elem))]
         if isinstance(e, ast.Call) and self.math_func(e.func):
@@ -4444,13 +4531,15 @@ class Compiler:
         """Assign a tuple (already computed in full, as Python does) to a name or to targets."""
         if isinstance(target, ast.Name):
             t = self.env[target.id]
-            for i, ((c, f), et, tt) in enumerate(zip(vals, vt.elem, t.elem)):
-                self.emit(f'v_{target.id}__{i} = {self.coerce(c, et, tt)};')
+            for (c, f), et, (cv, _), tt in zip(flat(vals), T.leaves(vt), flat(self.tuple_var(target.id)), T.leaves(t)):
+                self.emit(f'{cv} = {self.coerce(c, et, tt)};')
                 if tt.np == 'dyn':
-                    self.emit(f'v_{target.id}__{i}__np = {f};')
+                    self.emit(f'{cv}__np = {f};')
             return
         for x, v, et in zip(target.elts, vals, vt.elem):
-            if isinstance(x, ast.Name):
+            if isinstance(x, ast.Name) and et.kind == 'tuple':
+                self.assign_tuple(x, v, et)
+            elif isinstance(x, ast.Name):
                 self.assign(x.id, v, et)
             elif isinstance(x, ast.Subscript):
                 self.store_elem(x, v, et)
@@ -4583,9 +4672,10 @@ class Compiler:
         if isinstance(e, ast.Subscript) and self.is_shape(e.value):
             arr, k = self.shape_index(e)
             return self.extent(arr, k), '0'
-        if isinstance(e, ast.Subscript) and self.env.get(getattr(e.value, 'id', None)) is not None \
-                and self.env[e.value.id].kind == 'tuple':
-            return self.tuple_var(e.value.id)[self.tuple_index(e)]
+        if isinstance(e, ast.Subscript) and self.tuple_typed(e.value):
+            if isinstance(e.value, ast.Name):
+                return self.tuple_var(e.value.id)[self.tuple_index(e)]
+            return self.texpr(e.value)[self.tuple_index(e)]
         if isinstance(e, ast.Subscript):
             e = self.named(e)
             name = e.value.id
@@ -4968,6 +5058,8 @@ class Compiler:
             self.restore(saved, saved_c)
 
     def comp_bind_values(self, target, v, saved, saved_c):
+        if isinstance(v, TupleOf):
+            v = [TupleOf(val, et) if et.kind == 'tuple' else (val[0], et, val[1]) for val, et in zip(v.vals, v.t.elem)]
         if isinstance(target, ast.Name):
             c, t, f = v
             cn = self.temp()

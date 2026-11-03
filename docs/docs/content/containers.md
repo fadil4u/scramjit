@@ -96,6 +96,20 @@ def minmax(a):
     return lo, hi
 ```
 
+Tuples can hold tuples, to any depth, as locals, arguments, results and module-level constants, with one C variable per number:
+
+```python
+@scram
+def iou(a, b):
+    (ax0, ay0), (ax1, ay1) = a
+    (bx0, by0), (bx1, by1) = b
+    ...
+
+iou(((0.0, 0.0), (2.0, 2.0)), ((1.0, 1.0), (3.0, 3.0)))
+```
+
+A tuple is indexed with constants (`box[0][1]`), unpacked, and looped over when its elements share a type: `for (a, b) in (p, q)`, with `break` and `continue`, and in comprehensions when the element is unpacked. A tuple holding arrays works as a result (`return a, b`), not yet as a local or an argument.
+
 ## Lists that never change size
 
 A list that is never resized becomes a fixed-size C array. That means no `append`, `pop`, `extend`, `insert`, `del` or slice assignment on it, and no escape into code that might do those. It lives on the stack when it is small, constant-sized and not returned, and on the heap otherwise.

@@ -74,7 +74,7 @@ def _arg_type(x):
         return T.BOOL
     if t is tuple:
         elems = [_arg_type(v) for v in x]
-        if not elems or any(e is None or not e.is_number or e is T.U64 for e in elems):
+        if not elems or any(e is None or not T.is_number_tree(e) or e is T.U64 or (e.kind == 'tuple' and T.U64 in T.leaves(e)) for e in elems):
             return None
         return T.tuple_of(elems)
     if isinstance(x, enum.Enum) and T.enum_ok(t):       # a member: passed as its value
@@ -183,7 +183,8 @@ def _push(cargs, x, t):
         cargs.append(x)
         cargs.extend(x.shape)
     elif t.kind == 'tuple':
-        cargs.extend(v.item() if et.np else v for v, et in zip(x, t.elem))
+        for v, et in zip(x, t.elem):
+            _push(cargs, v, et)
     elif t.kind == 'dict':
         for key, ft in t.elem:
             _push(cargs, x[key], ft)
@@ -372,8 +373,8 @@ def _make_plan(f, entry, args):
     elif r is T.FLOAT:
         result = 'd[0]'
     elif r.kind == 'tuple':
-        env['boxes'] = [(32 + 16 * i, 40 + 16 * i, et) for i, et in enumerate(r.elem)]
-        result = 'tuple([box(io, at, flag, et) for at, flag, et in boxes])'
+        env['box_tuple'] = f._box_tuple
+        result = 'box_tuple(io, ret)'
     else:
         result = 'box(io, 0, 16, ret)'
     rerun = ''
@@ -820,8 +821,20 @@ class Function:
         if entry.records:
             return self._array_result(entry, io, args)
         if r.kind == 'tuple':
-            return tuple(self._box(io, 32 + 16 * i, 40 + 16 * i, et) for i, et in enumerate(r.elem))
+            return self._box_tuple(io, r)
         return self._box(io, 0, 16, r)
+
+    def _box_tuple(self, io, r, at=None):
+        """A returned tuple of numbers, nested ones too: each number has its pair of slots, in order."""
+        at = at if at is not None else [0]
+        out = []
+        for et in r.elem:
+            if et.kind == 'tuple':
+                out.append(self._box_tuple(io, et, at))
+            else:
+                out.append(self._box(io, 32 + 16 * at[0], 40 + 16 * at[0], et))
+                at[0] += 1
+        return tuple(out)
 
     def _array_result(self, entry, io, args):
         arrays = self._arrays(entry, io, args)

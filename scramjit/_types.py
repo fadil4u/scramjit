@@ -227,6 +227,19 @@ def dict_of(fields):
     return _DICTS[key]
 
 
+def leaves(t):
+    """A tuple type's numbers, in order, through nested tuples."""
+    out = []
+    for et in t.elem:
+        out.extend(leaves(et) if et.kind == 'tuple' else [et])
+    return out
+
+
+def is_number_tree(t):
+    """A number, or a tuple of numbers and such tuples."""
+    return t.is_number or (t.kind == 'tuple' and all(is_number_tree(et) for et in t.elem))
+
+
 _TUPLES = {}
 
 

@@ -72,7 +72,14 @@ for i in range(len(x)):
 
 The literal must have the same kind as the array and fit its dtype exactly: `0.0` or `0.5`, not `0.1`, on `float32`, and not `0` either. Such a variable can then only meet numpy scalars, or be compared with an int if it holds ints. Anything else keeps the function in Python.
 
-Also in Python, with numpy's result: `**`, `sum()`, and [numpy functions and reductions](loops-and-builtins.md#numpy-functions-on-single-numbers) on these dtypes.
+Also compiled, with numpy's result:
+
+- `**`: an integer dtype wraps, and a negative exponent raises `ValueError`. `float32` uses the C library's `powf`, as numpy does.
+- `sum()`: the total wraps or rounds at each step, as in Python with numpy scalars. Starting from Python's `0`, it's `0` when there's nothing to add. On `float32` start from `0.0`, since `0` would make the type depend on the data.
+- On `float32` scalars: `np.sqrt`, `np.abs`, `np.square`, `np.sign`, `np.floor`, `np.ceil`, `np.trunc`, `np.rint`, `np.copysign`, `np.minimum` and `np.maximum`, the tests such as `np.isnan`, and conversions such as `np.float32(x)` or `np.uint8(n)`. On integer dtypes, the same functions apart from those numpy gives a float for, since it picks a float as narrow as the int (`np.sqrt` of a `uint8` is a `float16`).
+- Reductions: `.max()`, `.min()`, `.argmax()`, `.argmin()`, `.any()` and `.all()`; `.sum()`, `.prod()` and `.mean()` on `float32` and signed ints. On unsigned ints numpy totals in `uint64`, which stays Python, as do `.std()` and `.var()`.
+
+Other numpy functions, such as `np.sin` or `np.exp` on `float32`, stay in Python: numpy has its own versions, whose last bits vary by CPU.
 
 ## The narrowest type that is proven sufficient
 

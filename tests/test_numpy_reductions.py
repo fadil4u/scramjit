@@ -197,11 +197,19 @@ def test_an_axis_in_a_variable_stays_python():
 # Everything else that must stay Python
 
 
-@pytest.mark.parametrize('dtype', ['f4', 'i4', 'u1', 'i1', 'u8', '?', 'f2'])
+@pytest.mark.parametrize('dtype', ['u8', '?', 'f2'])
 @pytest.mark.parametrize('op', OPS)
 def test_other_dtypes_stay_python(dtype, op):
     a = np.arange(1, 5).astype(dtype)
     check(f'x.{op}()', [a], compiled=False)
+
+
+@pytest.mark.parametrize('dtype', ['f4', 'i4', 'u1', 'i1'])
+@pytest.mark.parametrize('op', OPS)
+def test_narrow_dtypes_match(dtype, op):
+    """Narrow dtypes compile, apart from std, var and unsigned totals (tests/test_narrow.py goes further)."""
+    a = np.arange(1, 5).astype(dtype)
+    check(f'x.{op}()', [a], compiled=None)
 
 
 def test_views_with_gaps_in_many_dimensions_stay_python():

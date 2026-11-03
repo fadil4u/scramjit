@@ -24,6 +24,18 @@ def brighten(image, amount):
 
 
 @scram
+def normalize(x):
+    """Scale to unit length and centre: np.sqrt and .mean() on float32 give float32, as numpy's do."""
+    length = np.sqrt(sum((v * v for v in x), np.float32(0)))  # float32 throughout, even when x is empty
+    for i in range(len(x)):
+        x[i] = x[i] / length
+    centre = x.mean()
+    for i in range(len(x)):
+        x[i] -= centre
+    return length
+
+
+@scram
 def dot(x, y):
     total = 0.0                            # np.float32 from the first +=, and still the float 0.0 if x is empty
     for i in range(len(x)):
@@ -69,6 +81,12 @@ if __name__ == '__main__':
         brighten(image, 300)
     except OverflowError as e:
         print('brighten by 300:', e)
+
+    v = np.array([3.0, 4.0, 12.0], np.float32)
+    w = v.copy()
+    length = normalize(v)
+    assert normalize.__wrapped__(w) == length and v.tobytes() == w.tobytes()
+    print('normalize:', repr(length), v)
 
     x = np.array([0.1, 0.2, 0.3], np.float32)
     print('dot:', repr(dot(x, x)), 'and on nothing:', repr(dot(x[:0], x[:0])))

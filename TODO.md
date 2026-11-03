@@ -2,6 +2,60 @@
 
 Biggest first. `requirements.md` is the spec; this is the work queue.
 
+## Release
+
+0. **PyPI is behind the docs: release 0.0.3 now.** `v0.0.2` on PyPI can't call one `@scram`
+   function from another, or C from `cimo.compile`; both landed after the tag (`f9faed9`, `9af355d`,
+   14 commits on `main` since), and the README, the site and `docs/agent-prompt.txt` describe them
+   as available. A reader who installs from PyPI and follows the docs hits a `FallbackWarning` or a
+   `CompileError` on a documented feature. Bump `pyproject.toml`, tag, publish, and check the pin on
+   cimo covers what the release needs.
+   **Rule from now on:** the README, site and docs describe the *released* version. A feature that
+   is on `main` but not on PyPI is either released the same day or marked `> [!PLANNED]` /
+   "from 0.0.3" in every place it's mentioned. Add the rule to `AGENTS.md`, and a test that
+   `pyproject.toml`'s version matches the latest tag when the README's feature table changes.
+
+## Demos
+
+1. **Standalone demo pages, one per demo, with the LLM demo's shell.** `docs/demos/llm/` is the
+   model: a full page at `scramjit.dev/demos/<name>/` with the canvas, the editable code, the
+   scramjit switch, the stats strip (frames per second, iterations per second, speedup, compile
+   time), the tabs for the syntax tree, C and WebAssembly, the share-an-edit link, and the
+   "compiles stay between visits" cache. Make the shell one module (`docs/demos/shell/`: `page.js`,
+   `worker.js`, the CSS) that each demo fills with a Python file, a draw function and presets, so a
+   new demo is one `.py` and one small `.js`. Then:
+   - **Existing lab demos as pages:** `demos/flock`, `demos/erosion`, `demos/sand`, `demos/fractal`
+     from `docs/lab/*.py`, unchanged in substance, each with room to show the full code (the home
+     page's lab truncates). The lab on the home page keeps linking to them.
+   - **`demos/3d`: strange attractors.** Aizawa, Dadras, Halvorsen, Lorenz, Rössler, Thomas (cimo's
+     docs have posters of each): a `@scram` function integrates a million points with RK4 per frame
+     into a float32 array that three.js (already on the site) draws as a rotating point cloud;
+     plain Python manages a few thousand. Presets switch the system; the parameters are editable
+     and recompile live. Color by speed.
+   - **`demos/lenia`: continuous cellular automaton.** Lenia (Chan 2019) with one kernel ring and
+     growth function, 256x256 at first, the convolution as a plain loop (no FFT: that is the point),
+     drawn to a 2D canvas with a colormap. Presets: Orbium and two other known creatures. Edit the
+     growth function's `mu`/`sigma` and watch it change. SmoothLife as a second preset family if
+     cheap.
+   - **`demos/tracer`: progressive path tracer.** A Cornell-box scene of spheres and planes, one
+     sample per pixel per frame accumulated into a float32 buffer, tone-mapped to the canvas: noise
+     resolves to a clean image in seconds under scramjit, barely clears the first pass as Python.
+     Editable material parameters and light. 256x256 to start; measure what Pyodide sustains.
+   - **`demos/fluid`: the race.** Stable fluids (Stam 1999: diffuse, advect, project, about 80
+     lines) with dye injected by the mouse, **two panels on one clock**: plain Python on the left,
+     scramjit on the right, both given the same real time per frame as `tools/readme_gif.py` does
+     for the Mandelbrot race, with the clock and iteration counts on screen and nothing staged.
+     This is the social-media asset: it needs no explanation.
+   - **A recording mode** on every page: `?record=1` hides everything but the canvas, the stats and
+     the switch, sizes the canvas to 1920x1080 (2x device pixel ratio), and `?autorun=<seconds>` flips
+     the switch after that many seconds, so a clean 1080p screen capture needs no clicks. Document it
+     in `docs/demos/README.md` with the shot list (3 s plain Python, flip, 5 s smooth, one edit, hold).
+   - Each page states its own numbers from a measurement in Pyodide on a named machine, as the lab
+     table in the README does, and the README's demo table gains a row per new demo.
+   - Order: the shell with the four existing demos first (they're known to work), then fluid (the
+     asset), then 3d, lenia, tracer. Each lands with its page, a preset test in `tests/`, and a line
+     in the README.
+
 ## From cimo
 
 - **Signed overflow is now undefined in cimo, as in C** (`compile(wrapv=True)` for `-fwrapv`): `x + 1 > x` folds to true
@@ -37,8 +91,10 @@ Spills per line, once cimo can report them.
 
 ## Next
 
-1. **Narrow dtypes, what's left:** arithmetic compiles (see "Narrow dtypes" in `types.md`). Not yet: `**` (numpy calls `powf`, so the libm table needs it; int powers wrap in the dtype), `sum()`,
-   numpy functions and reductions on them, and `uint64`. A literal becoming narrow must fit exactly: not `s = 0` then `s += x[i]` on float32, nor `s = 0.1`, nor a parameter, and such a variable can't meet a Python number afterwards, since the type depends on its flag.
+1. **Narrow dtypes, what's left:** arithmetic, `**`, `sum()`, the exact numpy functions and most reductions compile (see "Narrow dtypes" in `types.md`).
+   Not yet: `np.sin`, `np.exp` and the like on float32 (numpy's own SIMD versions: check them against numpy per CPU first), float functions of narrow ints (float16 results),
+   `.std()` and `.var()`, `.sum()` of unsigned ints and of any int on wasm32 (numpy totals in uint64, or int32 there), `uint64`, and `np.int8(x)` of a float.
+   A literal becoming narrow must fit exactly: not `s = 0` then `s += x[i]` on float32, nor `s = 0.1`, nor a parameter, and such a variable can't meet a Python number afterwards, since the type depends on its flag.
    Speed, all in cimo's `TODO.md`: byte and short lanes (`uint8` brighten 0.24 ns per element against int32's 0.12) and the flag written in the loop.
 2. **64-bit hashes:** a literal past int64 (`0xFFFFFFFFFFFFFFFF`, FNV-1a 64's `14695981039346656037`) falls back, and so does
    `uint64`. 32-bit hashes and xorshift compile (`examples/xorshift.py`). A uint64 type would need its own rules: Python masks a
@@ -129,7 +185,25 @@ Spills per line, once cimo can report them.
     in one function. Compile time decides whether generated code is practical, since each candidate compiles once.
 17. **A name assigned in `while True` isn't seen as assigned after the loop.** `while True: ds = f(); if ds >= 17: break`, then
     reading `ds`, gives "ds may be read before it is assigned". Every way out of such a loop passes the assignment.
-18. **Compile time.** A first call costs seconds, not the 0.1 s the README's `ema` example suggests: 0.53 s
+18. **scramjit against Numba and Cython: measure, then close the gaps.** The README compares with
+    CPython and hand-written C; the question everyone will ask is how it compares with what they use
+    today. `bench/compare.py`, run on x86-64 Linux and arm64 Linux (an investor's or a reviewer's machine
+    is x86), reported as one table in the README and the site:
+    - Kernels: the existing `bench/kernels.py` set plus three where Numba is known to be strong (a
+      float64 dot/axpy that it vectorizes, a stencil, a histogram) and one where it's weak (a loop with
+      Python-level dict or tuple work).
+    - Columns: CPython, scramjit, Numba (`@njit`, `fastmath=False` to match parity, and once with
+      `fastmath=True`), Cython (typed, `boundscheck=False`), hand-written C via gcc -O3. Steady-state
+      time, first-call time including compile, install size on disk (Numba + llvmlite about 100 MB;
+      Cython needs a C compiler; scramjit about 1 MB), and whether it runs in Pyodide (only scramjit).
+    - Report losses as they are; the "runs everywhere" claim doesn't need wins on every row.
+    - Then improve, biggest gap first, each with a measurement before and after. Expected gaps and where
+      they land: FP reductions that Numba vectorizes with `fastmath` (an opt-in `reassociate=True` that maps
+      to cimo's `#pragma omp simd reduction`), 128-bit lanes against Numba's AVX2 on x86 (cimo's TODO: AVX2
+      behind a check at load), bounds checks that Numba drops by proving ranges (#3 above), call overhead
+      (1.4 µs against Numba's about 0.3 µs; a typed fast path in `_dispatch`).
+    - Keep the script runnable by anyone: `pip install numba cython` are dev extras, never dependencies.
+19. **Compile time.** A first call costs seconds, not the 0.1 s the README's `ema` example suggests: 0.53 s
     on Gray-Scott, 0.76 s native and 1.75 s in Pyodide for the LLM demo's forward pass, 3 s for a 200-line
     generated loop and up to 15 s with bounds-check versioning (#16). Every candidate in a generated-code
     workflow compiles once, so this decides what's practical. An optimization pass on the compiler
@@ -143,18 +217,18 @@ Spills per line, once cimo can report them.
       previous compile shouldn't redo their work; ask for a per-process cache of parsed headers and the
       prelude, or pass them pre-parsed.
     - Target: under 0.3 s warm for a 100-line function natively, under 1 s in Pyodide.
-19. **Split `_compiler.py` into a package.** 4.8k lines holding every lowering in one file. Make
+20. **Split `_compiler.py` into a package.** 4.8k lines holding every lowering in one file. Make
     `scramjit/_compiler/` with one module per concern, in the order the compile runs: `infer` (types),
     `index` (indexing, views, slices), `checks` (bounds checks and versioning), `calls` (`@scram` and C
     callees, inlining), `reduce` (builtins and numpy reductions), `make` (arrays and containers made
     inside a function), `emit` (C text). No behavior change: the suite and `bench/` are the gate, and
     the `docs/py/scramjit` copy is regenerated, not edited.
-20. **Adversarial code reading before a public launch.** `_compiler.py` (4.8k lines) and `_dispatch.py`
+21. **Adversarial code reading before a public launch.** `_compiler.py` (4.8k lines) and `_dispatch.py`
     were written in days and no one has read them end to end. The parity tests check results; a read
     checks what they can't: a lowering that is right for every tested type combination and wrong for
     one the generator never produces, a bounds check hoisted when it shouldn't be, a fallback that
     silently changes semantics. Read `_compiler.py` by lowering (indexing and views first, then
     bounds-check versioning, then calls), and record what was checked and found here.
-21. **Commit subjects are paragraphs.** `git log --oneline` is unreadable. One line of at most 72
+22. **Commit subjects are paragraphs.** `git log --oneline` is unreadable. One line of at most 72
     characters, then a blank line, then the detail (add the rule to `AGENTS.md`).
-22. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has. Little to win: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, which leaves temporary arrays.
+23. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has. Little to win: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, which leaves temporary arrays.

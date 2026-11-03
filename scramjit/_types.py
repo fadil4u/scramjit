@@ -273,7 +273,7 @@ def arith_result(a, b, op):
     if (a.np and a.kind == 'bool') or (b.np and b.kind == 'bool'):
         return None
     if has_narrow(a, b):
-        return None if op == 'Pow' else narrow_result(a, b, op)
+        return narrow_result(a, b, op)
     np = join_np(a.np, b.np)
     if a.kind == 'float' or b.kind == 'float' or op == 'Div':
         return scalar('float', np)

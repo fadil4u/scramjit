@@ -137,8 +137,8 @@ def test_two_python_ints_stay_python(name):
 
 
 @pytest.mark.parametrize('name', ['sqrt', 'exp', 'floor', 'abs', 'sign', 'isnan'])
-def test_bools_and_narrow_types_stay_python(name):
-    for v in (True, np.bool_(True), np.int32(4), np.uint8(4), np.float32(4.0), np.int8(-1)):
+def test_bools_stay_python(name):
+    for v in (True, np.bool_(True)):                 # narrow types compile: tests/test_narrow.py
         check(name, v, compiled=False)
 
 
@@ -297,3 +297,10 @@ def test_lifted():
         warnings.simplefilter('ignore')
         assert g(X, 'a') == lifted(X, 'a')
     assert g._native_loops()
+
+
+@pytest.mark.parametrize('name', ['minimum', 'maximum', 'fmin', 'fmax'])
+def test_min_and_max_of_numpy_ints(name):
+    """fmin of two ints gave the larger one."""
+    for a, b in ((np.int64(0), np.int64(1)), (np.int64(1), np.int64(0)), (np.int64(-5), np.int64(5))):
+        check(name, a, b, compiled=True)

@@ -172,12 +172,6 @@ def test_python_int_out_of_range_raises_on_its_line():
         assert f(np.array([1], np.uint8), 255) == 0
 
 
-def test_power_says_why_it_stays_python():
-    f, g = make('def f(a):\n    return a[0] ** 2\n')
-    agree(f, g, [np.array([3.0], 'float32')], compiled=False)
-    assert 'numpy bools' not in str(g._why) and 'pow' in str(g._why), g._why
-
-
 BUILTINS = ['abs(a[0])', 'min(a[0], b[0])', 'max(a[0], b[0])', 'min(a[0], 1)', 'max(1, a[0])', 'float(a[0])', 'int(a[0])', 'bool(a[0])',
             'round(a[0])', 'sum(a)', 'sum(a, 0.0)', 'sum(a, a[0])', 'sum(v * v for v in a)', 'min(a)', 'max(a)', 'pow(a[0], 2)', 'divmod(a[0], b[0])[0]',
             'math.floor(a[0])', 'math.ceil(a[0])', 'math.sqrt(a[0] * a[0])', 'math.fabs(a[0])', 'math.isnan(a[0])',
@@ -294,3 +288,91 @@ def test_lifted_loop_in_a_function_that_stays_python():
         warnings.simplefilter('ignore', FallbackWarning)
         got, want = f(x), f.__wrapped__(x)
     assert type(got) is type(want) and got == want
+
+
+def fresh(src):
+    return make(src, math=math)
+
+
+@pytest.mark.parametrize('form', ['a[0] ** b[0]', 'a[0] ** b', 'b ** a[0]'])
+def test_power(form):
+    """numpy's power: ints wrap in the dtype and raise on a negative exponent, float32 is powf."""
+    for da in NARROW:
+        f, g = fresh(f'def f(a, b):\n    return {form}\n')
+        for x in EDGE[da]:
+            others = [np.array([y], db) for db in ALL for y in EDGE[db][:6]] if form == 'a[0] ** b[0]' else \
+                [0, 1, 2, 3, 7, 31, 64, -1, -2, 300, 0.5, -0.5, 2.0, True]
+            for y in others:
+                if form == 'b ** a[0]' and isinstance(y, int) and abs(x) > 64:
+                    continue
+                agree(f, g, [np.array([x], da), y], compiled=None)
+        assert g.signatures, (da, g._why)
+
+
+def test_float32_power_is_powf():
+    f, g = fresh('def f(a, b):\n    return a[0] ** b[0]\n')
+    rng = np.random.default_rng(3)
+    xs = np.concatenate([rng.uniform(-10, 10, 3000), rng.uniform(0, 3, 3000)]).astype(np.float32)
+    ys = np.concatenate([rng.uniform(-30, 30, 3000), rng.integers(-5, 6, 3000)]).astype(np.float32)
+    for x, y in zip(xs, ys):
+        agree(f, g, [np.array([x]), np.array([y])])
+
+
+@pytest.mark.parametrize('d', NARROW)
+@pytest.mark.parametrize('expr', ['sum(a)', 'sum(a, 0.0)', 'sum(v * v for v in a)', 'sum(a, a[0])', 'sum(a[i] * 2 for i in range(len(a)))'])
+def test_builtin_sum(d, expr):
+    f, g = fresh(f'def f(a):\n    return {expr}\n')
+    compiles = ('0.0' in expr) == (d == 'float32') or 'a[0])' in expr
+    for n in (0, 1, 2, 5, 300):
+        a = np.resize(np.array([v for v in EDGE[d] if v == v][1:], d), n)
+        if 'a[0])' in expr and n == 0:
+            continue
+        agree(f, g, [a], compiled=None)
+    assert bool(g.signatures) == compiles, g._why
+
+
+@pytest.mark.parametrize('name', ['sqrt', 'fabs', 'abs', 'square', 'sign', 'floor', 'ceil', 'trunc', 'rint', 'isnan', 'isinf', 'isfinite',
+                                  'signbit', 'float64', 'int64', 'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8'])
+def test_numpy_functions_of_one(name):
+    for d in NARROW:
+        f, g = fresh(f'def f(a):\n    return np.{name}(a[0])\n')
+        for x in EDGE[d]:
+            agree(f, g, [np.array([x], d)], compiled=None)
+        float_only = name in ('sqrt', 'fabs', 'floor', 'ceil', 'trunc', 'rint')     # of ints numpy gives float16 or float32
+        to_int = name.startswith(('int', 'uint'))                                     # of a float it may raise, or wrap by platform
+        assert bool(g.signatures) == (not float_only if d != 'float32' else not to_int), (name, d, g._why)
+
+
+@pytest.mark.parametrize('name', ['minimum', 'maximum', 'fmin', 'fmax', 'copysign'])
+def test_numpy_functions_of_two(name):
+    f, g = fresh(f'def f(a, b):\n    return np.{name}(a[0], b[0])\n')
+    h, k = fresh(f'def f(a, b):\n    return np.{name}(a[0], b)\n')
+    for da, db in narrow_pairs():
+        if name == 'copysign' and 'float' not in da + db:
+            continue
+        for x, y in itertools.product(EDGE[da], EDGE[db]):
+            agree(f, g, [np.array([x], da), np.array([y], db)], compiled=None)
+    for d in NARROW:
+        for x, y in itertools.product(EDGE[d], [0, 1, -1, 300, 0.5, -0.0, math.nan]):
+            agree(h, k, [np.array([x], d), y], compiled=None)
+    assert g.signatures and k.signatures
+
+
+@pytest.mark.parametrize('d', NARROW)
+@pytest.mark.parametrize('op', ['sum', 'prod', 'mean', 'max', 'min', 'argmax', 'argmin', 'any', 'all'])
+def test_reductions(d, op):
+    f, g = fresh(f'def f(a):\n    return a.{op}()\n')
+    rng = np.random.default_rng(5)
+    vals = [v for v in EDGE[d]]
+    arrays = [np.array(vals, d), np.array(vals[::-1], d), np.array([], d), np.zeros(3, d)]
+    if 'float' in d:
+        arrays += [rng.uniform(-1, 1, n).astype(d) for n in (7, 8, 9, 127, 128, 129, 1000, 8191, 8192, 8193, 20000, 100003)]
+        arrays += [np.array([0.0, -0.0], d), np.array([-0.0, 0.0], d)]
+    else:
+        info = np.iinfo(d)
+        arrays += [rng.integers(info.min, info.max, n, dtype=d, endpoint=True) for n in (7, 129, 8193, 20000)]
+    for a in arrays:
+        agree(f, g, [a], compiled=None)
+        agree(f, g, [a[::2]], compiled=None)
+    unsigned_total = op in ('sum', 'prod') and d.startswith('u')
+    assert bool(g.signatures) == (not unsigned_total), g._why

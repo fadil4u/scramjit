@@ -26,6 +26,7 @@ from ._errors import Unsupported
 import sys
 
 from ._mathlib import snippets
+from . import _mathlib
 from ._runtime import (ARANGE_ERROR, BROADCAST_ERROR, INDEX_ERROR, INTERRUPTED, LINSPACE_ERROR, MAKE_DTYPES, MAKE_ERROR, NO_AXIS, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
                        OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION)
 
@@ -240,6 +241,10 @@ NP_FLOATS_ONLY2 = {'fmod'}                            # of ints it stays int
 NP_MINMAX = {'minimum', 'maximum', 'fmin', 'fmax'}
 NP_TESTS = {'isnan', 'isinf', 'isfinite', 'signbit'}
 NP_CONVERT = {'float64', 'int64'}
+NP_NARROW_OK = {'sqrt', 'fabs', 'abs', 'absolute', 'square', 'sign', 'floor', 'ceil', 'trunc', 'rint', 'copysign', 'float64', 'int64'} \
+    | NP_MINMAX | NP_TESTS | {'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8'}   # exact in double, then rounded once
+NP_NARROW_INT_OK = {'abs', 'absolute', 'square', 'sign', 'float64', 'int64'} | NP_MINMAX | NP_TESTS \
+    | {'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8'}
 NP_CONSTANTS = {'pi': math.pi, 'e': math.e, 'inf': math.inf, 'nan': math.nan}
 NP_REDUCE = {'sum': 'sum', 'prod': 'prod', 'mean': 'mean', 'max': 'max', 'min': 'min', 'any': 'any', 'all': 'all', 'argmax': 'argmax',
              'argmin': 'argmin', 'amax': 'max', 'amin': 'min', 'std': 'std', 'var': 'var'}
@@ -250,7 +255,7 @@ NP_MAKE = NP_MAKE_SHAPED | NP_MAKE_LIKE | {'copy', 'array', 'asarray', 'arange',
 MAX_MADE_DIMS = 4      # sj_block has room for this many
 ARRAY_METHODS = {'sum', 'prod', 'mean', 'max', 'min', 'any', 'all', 'argmax', 'argmin', 'std', 'var'}
 NP_FLOAT_ONLY = {'round': 1, 'around': 1, 'clip': 3, 'degrees': 1, 'rad2deg': 1, 'radians': 1, 'deg2rad': 1}
-NP_FUNCS = NP_MAKE | set(NP_LIBM1) | set(NP_DIRECT1) | NP_ROUND | NP_KEEPS_INT | set(NP_LIBM2) | {'copysign'} | NP_MINMAX | NP_TESTS | NP_CONVERT \
+NP_FUNCS = {'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8'} | NP_MAKE | set(NP_LIBM1) | set(NP_DIRECT1) | NP_ROUND | NP_KEEPS_INT | set(NP_LIBM2) | {'copysign'} | NP_MINMAX | NP_TESTS | NP_CONVERT \
     | set(NP_REDUCE) | set(NP_FLOAT_ONLY)
 
 
@@ -2085,7 +2090,10 @@ class Compiler:
         if t.kind != 'array':
             self.fail(e, f'np.{op}() of {t.name}: only arrays compile')
         if t.elem not in (T.NP_FLOAT64, T.NP_INT64):
-            self.fail(e, f'{op}() of {t.elem.name[3:]} elements')
+            if not T.is_narrow(t.elem) or op in ('std', 'var'):
+                self.fail(e, f'{op}() of {t.elem.name[3:]} elements')
+            if op in ('sum', 'prod') and t.elem.kind == 'int' and (t.elem.ctype[0] == 'u' or self.default_int() is not T.NP_INT64):
+                self.fail(e, f'{op}() of {t.elem.name[3:]} elements, which numpy adds up as {"uint64" if t.elem.ctype[0] == "u" else "its default int"}')
         if t.strided and t.ndim > 1:
             self.fail(e, f'{op}() of a multi-dimensional view with gaps')
         if len(rest) > 1 or any(isinstance(x, ast.Starred) for x in rest):
@@ -2111,6 +2119,22 @@ class Compiler:
                 self.fail(e, f'{op}() with an axis (on more than one dimension it returns an array)')
         return t
 
+    def narrow_sum_type(self, e, el, st, start):
+        """sum() where numpy's rules apply at each step: start + x0 + x1 ..., each one wrapping or rounding in the
+        narrow type. From a Python start the result is that start when there's nothing to add, so it carries the flag."""
+        if el.np is not True or st.np == 'dyn' or T.is_narrow_dyn(el):
+            self.fail(e, f'sum() of {el.name} from {st.name}')
+        r = T.narrow_result(st, el, 'Add')
+        if st.np is True:
+            return r
+        if not T.is_narrow(r) or r.kind != st.kind:
+            self.fail(e, f'sum() of {el.name} from a Python {st.kind}, whose type would depend on the data'
+                      + ('; write sum(..., 0.0)' if r.kind == 'float' else ''))
+        value = 0 if start is None else const_number(start)
+        if not T.holds_exactly(r, value):
+            self.fail(e, f'sum() of {el.name} from a start that isn\'t a literal {r.name} holds exactly')
+        return T.NARROW_DYN[r.name[3:]]
+
     def numpy_type(self, e, name):
         if name in NP_REDUCE:
             op, a, rest = self.reduction_of(e)
@@ -2124,8 +2148,16 @@ class Compiler:
         for t in ts:
             if t.kind == 'array':
                 self.fail(e, f'np.{name}() of an array: only single numbers compile; write it as a loop')
-            if not (t in (T.INT, T.FLOAT, T.NP_INT64, T.NP_FLOAT64) or (t.np == 'dyn' and t.kind in ('int', 'float'))):
+            if T.is_narrow(t):
+                if name not in NP_NARROW_OK or (t.kind == 'int' and name not in NP_NARROW_INT_OK):
+                    self.fail(e, f'np.{name}() of {t.name}' + (' (numpy gives a float of a size that depends on it)' if t.kind == 'int' else ''))
+                continue
+            if not (t in (T.INT, T.FLOAT, T.NP_INT64, T.NP_FLOAT64) or (t.np == 'dyn' and t.kind in ('int', 'float') and not T.is_narrow_dyn(t))):
                 self.fail(e, f'np.{name}() of {t.name}')
+        if name in T.NARROW:
+            return self.narrow_convert_type(e, name, ts[0])
+        if any(T.is_narrow(t) for t in ts):
+            return self.narrow_numpy_type(e, name, ts)
         floats = any(t.kind == 'float' for t in ts)
         if name in NP_FLOAT_ONLY and not all(t.kind == 'float' for t in ts):
             self.fail(e, f'np.{name}() of an int (the type it gives depends on the platform)')
@@ -2145,6 +2177,30 @@ class Compiler:
             return T.NP_INT64
         return T.NP_FLOAT64
 
+    def narrow_convert_type(self, e, name, t):
+        """np.float32(x), np.uint8(x) and the rest."""
+        r = T.NARROW[name]
+        if r.kind == 'int' and t.kind != 'int':
+            self.fail(e, f'np.{name}() of a float (it raises on nan, and what it gives past the range depends on the platform)')
+        if t.kind == 'bool' and t.np:
+            self.fail(e, f'np.{name}() of a numpy bool')
+        return r
+
+    def narrow_numpy_type(self, e, name, ts):
+        """A numpy function given a narrow scalar: its type, from numpy's promotion of the arguments."""
+        if any(t.np == 'dyn' or (t.np and t.kind == 'bool') for t in ts):
+            self.fail(e, f'np.{name}() of {", ".join(t.name for t in ts)}')
+        if name in NP_TESTS:
+            return T.NP_BOOL
+        if name in ('float64', 'int64'):
+            if name == 'int64' and ts[0].kind != 'int':
+                self.fail(e, 'np.int64() of a float (it raises on nan and on values too large)')
+            return T.NP_FLOAT64 if name == 'float64' else T.NP_INT64
+        r = ts[0] if len(ts) == 1 else T.narrow_result(ts[0], ts[1], 'Add')
+        if r.kind == 'int' and name not in NP_NARROW_INT_OK:
+            self.fail(e, f'np.{name}() of ints')
+        return r
+
     def np_reduction_type(self, e, op, a, rest):
         t = self.reduction_array_type(e, op, a, rest)
         if op in ('any', 'all'):
@@ -2156,6 +2212,10 @@ class Compiler:
             return T.NARROW[np.dtype(np.intp).name]          # int32 on wasm32
         if op in ('sum', 'mean', 'std', 'var') and sum_chunk() is None:
             self.fail(e, f'{op}() on a numpy whose rounding isn\'t known')
+        if T.is_narrow(t.elem) and op in ('sum', 'prod', 'mean'):
+            if t.elem.kind == 'float':
+                return t.elem
+            return T.NP_FLOAT64 if op == 'mean' else T.NP_INT64
         if op in ('mean', 'std', 'var'):
             return T.NP_FLOAT64
         return t.elem
@@ -2168,8 +2228,10 @@ class Compiler:
         n = self.hold(' * '.join(['1LL'] + [self.extent(name, k) for k in range(t.ndim)]), T.INT)
         st = self.hold(self.stride(name, t.ndim - 1), T.INT)
         p = f'v_{name}'
-        floats = t.elem is T.NP_FLOAT64
+        floats = t.elem.kind == 'float'
         line = self.line(e)
+        if T.is_narrow(t.elem):
+            return self.narrow_reduction(e, op, t.elem, p, n, st, floats, line)
         if op in ('max', 'min', 'argmax', 'argmin', 'any', 'all') and not self.loops:
             self.gotchas[line] = f'{op}() is slower here than numpy on big arrays, for now: numpy uses SIMD (see "Gotchas")'
         if op == 'sum' and floats:
@@ -2207,6 +2269,37 @@ class Compiler:
             return self.hold(f'sj_np_{op}_f({p}, {n}, {st}, {code})', T.FLOAT), '1'
         return self.hold(f'sj_np_{op}_{suffix}({p}, {n}, {st})', T.INT), '1'
 
+    def narrow_reduction(self, e, op, elem, p, n, st, floats, line):
+        """A reduction over a narrow array, by a copy of the same helper for its element type (_mathlib.typed)."""
+        rt = self.typeof(e)
+        pre = f'sj_np{_mathlib.TAGS[elem.ctype]}_'
+        suffix = 'f' if floats else 'i'
+        if op in ('max', 'min', 'argmax', 'argmin', 'any', 'all') and not self.loops:
+            self.gotchas[line] = f'{op}() is slower here than numpy on big arrays, for now: numpy uses SIMD (see "Gotchas")'
+        if op in ('sum', 'mean') and floats:
+            self.helpers.add(_mathlib.typed('np_sum', elem.ctype))
+            s = self.hold(f'{pre}sum({p}, {n}, {st}, {sum_chunk() or 0})', rt)
+            return (self.hold(f'(float)((double){s} / (double){n})', rt) if op == 'mean' else s), '1'
+        if op == 'mean':
+            self.helpers.add(_mathlib.typed('np_stats', elem.ctype))
+            return self.hold(f'{pre}sum_as_float({p}, {n}, {st}) / (double){n}', T.FLOAT), '1'
+        self.helpers.add(_mathlib.typed('np_folds', elem.ctype))
+        if op in ('sum', 'prod'):
+            return self.hold(f'{pre}{op}_{suffix}({p}, {n}, {st})', rt), '1'
+        if op in ('any', 'all'):
+            return self.hold(f'{pre}{op}_{suffix}({p}, {n}, {st})', T.BOOL), '1'
+        words = {'max': 'zero-size array to reduction operation maximum which has no identity',
+                 'min': 'zero-size array to reduction operation minimum which has no identity',
+                 'argmax': 'attempt to get argmax of an empty sequence', 'argmin': 'attempt to get argmin of an empty sequence'}
+        self.emit(f'if ({n} == 0) SJ_FAIL({VALUE_ERROR}, {line}, {VALUE_ERROR_MESSAGES.index(words[op])}, 0);')
+        if op in ('max', 'min') and floats:
+            rule = zero_rule('maximum' if op == 'max' else 'minimum')
+            code = {'first': 0, 'second': 2, 'positive' if op == 'max' else 'negative': 1}.get(rule)
+            if code is None:
+                self.fail(e, f'{op}() on a numpy whose signed zeros go another way')
+            return self.hold(f'{pre}{op}_f({p}, {n}, {st}, {code})', rt), '1'
+        return self.hold(f'{pre}{op}_{suffix}({p}, {n}, {st})', rt), '1'
+
     def numpy_call(self, e, name):
         if name in NP_REDUCE:
             op, a, _ = self.reduction_of(e)
@@ -2214,8 +2307,22 @@ class Compiler:
         ts = [self.typeof(a) for a in e.args]
         vals = [self.expr(a) for a in e.args]          # arguments first, in order
         vals = [self.hold(c, t) for (c, _), t in zip(vals, ts)]
-        xs = [self.hold(self.coerce(c, t, T.FLOAT), T.FLOAT) for c, t in zip(vals, ts)]
         rt = self.typeof(e)
+        if T.is_narrow(rt) or any(T.is_narrow(t) for t in ts):
+            for t, v in zip(ts, vals):                 # numpy: a Python int must fit the dtype
+                if T.is_narrow(rt) and rt.kind == 'int' and t.kind in ('int', 'bool') and t.np is False:
+                    self.check_fits(e, rt, (v, '0'), t)
+            if name in T.NARROW:
+                return f'({self.coerce(vals[0], ts[0], rt)})', '1'
+            if T.is_narrow(rt):                        # the same function on doubles, then rounded once to the narrow type
+                wide = T.NP_FLOAT64 if rt.kind == 'float' else T.NP_INT64
+                ts = [wide if T.is_narrow(t) or t.np is False else t for t in ts]
+                c, f = self.numpy_on(name, vals, ts, wide)
+                return f'(({rt.ctype})({c}))', f
+        return self.numpy_on(name, vals, ts, rt)
+
+    def numpy_on(self, name, vals, ts, rt):
+        xs = [self.hold(self.coerce(c, t, T.FLOAT), T.FLOAT) for c, t in zip(vals, ts)]
         x = xs[0]
         if name == 'int64':
             return f'(int64_t)({vals[0]})', '1'
@@ -2233,7 +2340,7 @@ class Compiler:
             if name == 'square':
                 return f'sj_mul({a}, {a})', '1'
             b = f'(int64_t)({vals[1]})'
-            return self.hold(f'({a} {"<" if name == "minimum" else ">"} {b} ? {a} : {b})', T.INT), '1'
+            return self.hold(f'({a} {"<" if name in ("minimum", "fmin") else ">"} {b} ? {a} : {b})', T.INT), '1'
         if name in NP_DIRECT1 or name in NP_ROUND:
             return self.hold(f'{name}({x})', T.FLOAT), '1'
         if name in ('round', 'around'):
@@ -2352,7 +2459,7 @@ class Compiler:
         if el.np and el.kind == 'bool':
             self.fail(e, 'sum() of numpy bools')
         if T.has_narrow(el, st):
-            self.fail(e, f'sum() of {el.name}: numpy\'s rules wrap or round at each step, not compiled yet')
+            return self.narrow_sum_type(e, el, st, start)
         if st.np is True:
             return T.arith_result(st, el, 'Add')
         if st.kind == 'int':
@@ -4008,10 +4115,13 @@ class Compiler:
         table = f'SJ_LIBM2({LIBM.index("pow")})'
 
         def numpy():
-            if rt.kind == 'int':
+            if rt.kind == 'int':                       # a narrow int wraps as numpy's does: the low bits of the 64-bit power
                 self.helpers.add('ipow')
                 self.emit(f'if ((int64_t){b} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 15, 0);')
-                self.emit(f'{out} = sj_ipow((int64_t){a}, (int64_t){b});')
+                self.emit(f'{out} = ({rt.ctype})sj_ipow((int64_t){a}, (int64_t){b});')
+            elif rt.ctype == 'float':                  # numpy calls powf
+                f = f'((float (*)(float, float))(uintptr_t)sj_m[{LIBM.index("powf")}])' if self.exact else 'powf'
+                self.emit(f'{out} = {f}({fa}, {fb});')
             elif self.exact:
                 self.emit(f'{out} = {table}({fa}, {fb});')
             else:
@@ -4335,6 +4445,23 @@ class Compiler:
         # sum
         start = e.args[1] if len(e.args) == 2 else kws.get('start')
         st = self.typeof(start) if start is not None else T.INT
+        if T.is_narrow(T.as_narrow(rt)):              # numpy's rules: each addition wraps or rounds in the narrow type
+            r = T.as_narrow(rt)
+            acc, rf = self.temp(), self.temp()
+            self.emit(f'{r.ctype} {acc} = 0; int {rf} = {1 if st.np is True else 0};')
+
+            def after_first():
+                if start is not None:
+                    self.emit(f'{acc} = {self.coerce(self.expr(start)[0], st, r)};')
+
+            def item(v, t):
+                x = self.coerce(v[0], t, r)
+                if r.kind == 'int':
+                    self.emit(f'{acc} = ({r.ctype})((uint32_t){acc} + (uint32_t)({x})); {rf} = 1;')
+                else:
+                    self.emit(f'{acc} = {acc} + {x}; {rf} = 1;')
+            self.source_loops(src, after_first, item)
+            return acc, ('1' if st.np is True else rf)
         if rt.kind == 'int':
             acc, rf = self.temp(), self.temp()
             self.emit(f'int64_t {acc} = 0; int {rf} = 0;')

@@ -553,6 +553,25 @@ static int sj_fsum_end(sj_fsum_t *s, double *out) {
 }
 
 
+TAGS = {'float': 'f32', 'int32_t': 'i32', 'int16_t': 'i16', 'int8_t': 'i8', 'uint32_t': 'u32', 'uint16_t': 'u16', 'uint8_t': 'u8'}
+
+
+def typed(name, ctype):
+    """A copy of numpy's reduction helper `name` for arrays of a narrow type, its functions renamed sj_np<tag>_. For
+    float32 everything is float: numpy adds float32 in float32. For a narrow int only the element type changes: the
+    total is int64 or double, as numpy's is."""
+    key = f'{name}@{ctype}'
+    if key not in SNIPPETS:
+        deps, code = SNIPPETS[name]
+        code = code.replace('sj_np_', f'sj_np{TAGS[ctype]}_')
+        if ctype == 'float':
+            code = code.replace('double', 'float')
+        else:
+            code = code.replace('const int64_t *', f'const {ctype} *').replace(', int64_t, SJ_NP_', f', {ctype}, SJ_NP_')
+        SNIPPETS[key] = (tuple(typed(d, ctype) for d in deps), code)
+    return key
+
+
 def snippets(names):
     """The C for these helpers and what they need, each once, dependencies first."""
     out, seen = [], set()

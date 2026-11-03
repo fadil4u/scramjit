@@ -535,7 +535,7 @@ results identical to CPython's, natively and in Pyodide.
 
 **M2 acceptance (2026-11-02).** Met as written: every rule has differential tests (`tests/test_m2.py`, `test_lazy.py`,
 `test_for_else.py`), `tests/test_m2_acceptance.py` finds no iterator or boxing code in each M0 kernel's C, and `math` matches CPython
-natively and in Pyodide (28,019 cases there). Arithmetic on narrow dtypes came later, with differential tests over every pair of dtypes (`tests/test_narrow.py`). `axpy` on float32 is 0.15 ns per element against 0.26 on float64 (arm64). Range analysis still picks no narrow types: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, so only temporary arrays could benefit. `for ... else`
+natively and in Pyodide (28,019 cases there). Arithmetic on narrow dtypes came later, with differential tests over every pair of dtypes (`tests/test_narrow.py`), and then `**`, `sum()`, numpy functions that are exact in double and rounded once, and reductions: each numpy reduction helper is copied per element type (`_mathlib.typed`), all-`float` for float32, since numpy totals float32 in float32. `axpy` on float32 is 0.15 ns per element against 0.26 on float64 (arm64). Range analysis still picks no narrow types: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, so only temporary arrays could benefit. `for ... else`
 needed definite assignment to follow breaks: `found` assigned before each break and in the else is assigned after the loop.
 
 Found on the way, in code emitted before this: a size from the user could wrap (`[1.5] * (2**61 + 1)`: 8 times that is 8 bytes), so

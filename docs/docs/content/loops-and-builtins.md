@@ -95,6 +95,71 @@ def spread(m):
         total += m[i].max() - m[i].min()
     return total / m.size
 ```
+<!-- c: spread(np.ones((3, 4))) -->
+```c-generated
+int sj_kernel(double *v_m, int64_t v_m__n, int64_t v_m__n1, volatile int *sj_stop, int64_t *sj_io) {
+    *sj_stop = 0;
+    double v_total = 0;
+    int v_total__np = 0;
+    int64_t v_i = 0;
+    double *v_sjv__0 = 0; int64_t v_sjv__0__n = 0;
+    double *v_sjv__1 = 0; int64_t v_sjv__1__n = 0;
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    v_total = 0x0.0p+0;
+    v_total__np = 0;
+    int64_t t1 = 0LL, t2 = v_m__n;
+    int64_t t3 = t1, t4 = t2;
+    for (;;) {
+        int64_t t5 = t4 > t3 && (uint64_t)t4 - (uint64_t)t3 > 65536 ? t3 + 65536 : t4;
+        for (; t3 < t5; t3++) {
+            v_i = t3;
+            double t6 = v_total;
+            int t7 = v_total__np;
+            int64_t t8 = v_i;
+            int64_t t9 = 0;
+            int64_t t10 = t8 < 0 ? t8 + v_m__n : t8;
+            if ((uint64_t)t10 >= (uint64_t)v_m__n) { sj_io[4] = 0; SJ_FAIL(1, 10, t8, v_m__n); }
+            t9 += t10 * (1LL * v_m__n1);
+            v_sjv__0 = v_m + t9;
+            v_sjv__0__n = v_m__n1;
+            int64_t t11 = 1LL * v_sjv__0__n;
+            int64_t t12 = 1LL;
+            if (t11 == 0) SJ_FAIL(3, 10, 19, 0);
+            double t13 = sj_np_max_f(v_sjv__0, t11, t12, 1);
+            double t14 = t13;
+            int64_t t15 = v_i;
+            int64_t t16 = 0;
+            int64_t t17 = t15 < 0 ? t15 + v_m__n : t15;
+            if ((uint64_t)t17 >= (uint64_t)v_m__n) { sj_io[4] = 0; SJ_FAIL(1, 10, t15, v_m__n); }
+            t16 += t17 * (1LL * v_m__n1);
+            v_sjv__1 = v_m + t16;
+            v_sjv__1__n = v_m__n1;
+            int64_t t18 = 1LL * v_sjv__1__n;
+            int64_t t19 = 1LL;
+            if (t18 == 0) SJ_FAIL(3, 10, 20, 0);
+            double t20 = sj_np_min_f(v_sjv__1, t18, t19, 1);
+            double t21 = t20;
+            double t22 = (t14 - t21);
+            v_total = (t6 + t22);
+        }
+        if (t3 >= t4) break;
+        if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+    }
+    if (t2 > t1) { v_total__np = 1; }
+    double t23 = v_total;
+    int t24 = v_total__np;
+    int64_t t25 = (v_m__n * v_m__n1);
+    if (!t24 && (double)(t25) == 0.0) SJ_FAIL(2, 11, 1, 0);
+    { double t26 = (t23 / (double)(t25)); memcpy(&sj_io[0], &t26, 8); }
+    sj_io[2] = t24;
+    goto sj_done;
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+```
 
 Inside a compiled loop there's no call to pay for, so short rows gain the most: `m[i].sum()` took 8 ns on rows of 8, against 1.2 µs in Python. They work on `float64` and `int64` arrays, of any shape if the elements are contiguous, and on one-dimensional views with gaps. `std` and `var` take `ddof=`.
 
@@ -128,6 +193,95 @@ def run(state, n):
         if not step(state, 1.0 if i % 2 else -1.0):
             return i
     return n
+```
+<!-- c: run(np.zeros(2), 10) -->
+```c-generated
+static int sj_call_0(double *v_state, int64_t v_state__n, double v_push, int64_t *sj_tb, int64_t *sj_io) {
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    int64_t t1 = 1LL;
+    int64_t t2 = t1 < 0 ? t1 + v_state__n : t1;
+    if ((uint64_t)t2 >= (uint64_t)v_state__n) { sj_io[4] = 0; SJ_FAIL(1, 8, t1, v_state__n); }
+    double t3 = v_state[t2];
+    double t4 = t3;
+    double t5 = v_push;
+    double t6 = 0x1.47ae147ae147bp-6;
+    double t7 = (t5 * t6);
+    v_state[t2] = (t4 + t7);
+    int64_t t8 = 0LL;
+    int64_t t9 = t8 < 0 ? t8 + v_state__n : t8;
+    if ((uint64_t)t9 >= (uint64_t)v_state__n) { sj_io[4] = 0; SJ_FAIL(1, 9, t8, v_state__n); }
+    double t10 = v_state[t9];
+    double t11 = t10;
+    int64_t t12 = 1LL;
+    int64_t t13 = t12 < 0 ? t12 + v_state__n : t12;
+    if ((uint64_t)t13 >= (uint64_t)v_state__n) { sj_io[4] = 0; SJ_FAIL(1, 9, t12, v_state__n); }
+    double t14 = v_state[t13];
+    double t15 = t14;
+    double t16 = 0x1.47ae147ae147bp-6;
+    double t17 = (t15 * t16);
+    v_state[t9] = (t11 + t17);
+    int64_t t18 = 0LL;
+    int64_t t19 = t18 < 0 ? t18 + v_state__n : t18;
+    if ((uint64_t)t19 >= (uint64_t)v_state__n) { sj_io[4] = 0; SJ_FAIL(1, 10, t18, v_state__n); }
+    double t20 = v_state[t19];
+    double t21 = fabs(t20);
+    double t22 = 0x1.3333333333333p+1;
+    sj_io[0] = (int64_t)((t21 < t22));
+    goto sj_done;
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+
+int sj_kernel(double *v_state, int64_t v_state__n, int64_t v_n, volatile int *sj_stop, int64_t *sj_io) {
+    *sj_stop = 0;
+    int64_t *sj_tb = sj_io + 5; sj_tb[0] = 0;
+    int64_t v_i = 0;
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    int64_t t1 = 0LL, t2 = v_n;
+    int64_t t3 = t1, t4 = t2;
+    for (;;) {
+        int64_t t5 = t4 > t3 && (uint64_t)t4 - (uint64_t)t3 > 65536 ? t3 + 65536 : t4;
+        for (; t3 < t5; t3++) {
+            v_i = t3;
+            double t6; int t7;
+            int64_t t8 = v_i;
+            int64_t t9 = 2LL;
+            int64_t t10 = ((int64_t)t8 & 1LL);
+            if ((t10) != 0) {
+                t6 = 0x1.0000000000000p+0; t7 = 0;
+            } else {
+                double t11 = (-(0x1.0000000000000p+0));
+                t6 = t11; t7 = 0;
+            }
+            double t12 = t6;
+            int t13 = t7;
+            double t14 = t12;
+            int t15 = t13;
+            int64_t t16[5];
+            int t17 = sj_call_0(v_state, v_state__n, t14, sj_tb, t16);
+            if (t17) { sj_tb[++sj_tb[0]] = ((int64_t)0 << 32) | t16[1]; sj_io[0] = t16[0]; sj_io[4] = t16[4]; SJ_FAIL(t17, 15, t16[2], t16[3]); }
+            int t18 = (int)t16[0];
+            int t19 = t18;
+            int t20 = !(t19);
+            if (t20) {
+                sj_io[0] = (int64_t)(v_i);
+                goto sj_done;
+            }
+        }
+        if (t3 >= t4) break;
+        if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+    }
+    sj_io[0] = (int64_t)(v_n);
+    goto sj_done;
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
 ```
 
 Each function compiles once per set of argument types it's called with, so `sq(2)` and `sq(2.0)` are two C functions. A small one is inlined and costs nothing: a loop calling `sq(x[i])` took 0.93 ns per element, the same as writing `x[i] * x[i]`. `step` above, called 1,000,000 times from `run`, costs a few ns each time, against 3 µs from a Python loop.
@@ -164,6 +318,52 @@ int64_t mix(int64_t value) {
 def bucket(values, counts):
     for i in range(len(values)):
         counts[hashing.mix(int(values[i])) % len(counts)] += 1
+```
+<!-- c: bucket(np.arange(8), np.zeros(4, np.int64)) -->
+```c-generated
+int sj_kernel(int64_t *v_values, int64_t v_values__n, int64_t *v_counts, int64_t v_counts__n, volatile int *sj_stop, int64_t *sj_io) {
+    *sj_stop = 0;
+    int64_t v_i = 0;
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    int64_t t1 = v_values__n;
+    int64_t t2 = 0LL, t3 = t1;
+    int64_t t4 = t2, t5 = t3;
+    for (;;) {
+        int64_t t6 = t5 > t4 && (uint64_t)t5 - (uint64_t)t4 > 65536 ? t4 + 65536 : t5;
+        for (; t4 < t6; t4++) {
+            v_i = t4;
+            int64_t t7 = v_i;
+            int64_t t8 = t7;
+            int64_t t9 = v_values[t8];
+            int64_t t10 = t9;
+            int64_t t11 = t10;
+            int64_t t12 = (int64_t)(t11);
+            int64_t t13 = mix(t12);
+            int64_t t14 = t13;
+            int64_t t15 = t14;
+            int64_t t16 = v_counts__n;
+            int64_t t17 = t16;
+            if (t17 == 0) SJ_FAIL(2, 12, 3, 0);
+            int64_t t18 = 0, t19 = 0;
+            if ((int64_t)t17 == -1) t18 = sj_neg((int64_t)t15); else if ((int64_t)t17 != 0) { t18 = (int64_t)t15 / (int64_t)t17; t19 = (int64_t)t15 % (int64_t)t17; }
+            int t20 = t19 != 0 && ((t19 < 0) != ((int64_t)t17 < 0));
+            int64_t t21 = (t19 + (t20 ? (int64_t)t17 : 0));
+            int64_t t22 = t21;
+            int64_t t23 = t22;
+            int64_t t24 = v_counts[t23];
+            int64_t t25 = t24;
+            int64_t t26 = 1LL;
+            v_counts[t23] = sj_add((int64_t)t25, (int64_t)t26);
+        }
+        if (t4 >= t5) break;
+        if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+    }
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
 ```
 
 The module's source goes into the same C file as the function calling it, so a small C function is inlined: `k.sq(x[i])` took 0.92 ns per element in a compiled loop, against 686 from a Python loop calling it. `f = k.f` at module level works as well. Arguments and results follow what the same call does from Python, which is what runs if any of this doesn't compile:

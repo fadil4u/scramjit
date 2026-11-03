@@ -77,6 +77,13 @@ html{scrollbar-width:thin}
 .doc pre:hover .copy,.doc pre .copy:focus-visible{opacity:1}
 .doc pre .copy svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .doc pre .copy.done{color:#7ee2b8}
+.doc .tabs{margin-top:14px}
+.doc .tabs pre{margin-top:0;border-top-left-radius:0}
+.doc .tabs pre .lang{display:none}
+.doc .tabs pre.c-pane,.doc .tabs pre:nth-of-type(2){max-height:520px;overflow:auto}
+.doc .tab-bar{display:flex;gap:4px}
+.doc .tab-bar button{font:500 12px var(--mono);padding:6px 12px;border:1px solid var(--codeline);border-bottom:0;border-radius:8px 8px 0 0;background:var(--code2);color:#8e94a3;cursor:pointer}
+.doc .tab-bar button.on{background:var(--code);color:#e6edf3}
 .t-kw{color:#ff7b72}.t-ty{color:#ffa657}.t-fn{color:#d2a8ff}.t-str{color:#a5d6ff}.t-num{color:#79c0ff}.t-cm{color:#6e7681}.t-pp{color:#ff7b72}.t-pr{color:#6e7681}.t-out{color:#8b949e}.t-dec{color:#ffa94d}
 
 /* callouts: > [!NOTE] / [!TIP] / [!WARNING] / [!PLANNED] */

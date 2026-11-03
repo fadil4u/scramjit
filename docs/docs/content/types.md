@@ -16,6 +16,38 @@ def scale(img, k: float):
     for i in range(len(img)):
         img[i] = img[i] * k
 ```
+<!-- c: scale(np.ones(8), 2.0) -->
+```c-generated
+int sj_kernel(double *v_img, int64_t v_img__n, double v_k, volatile int *sj_stop, int64_t *sj_io) {
+    *sj_stop = 0;
+    int64_t v_i = 0;
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    int64_t t1 = 0LL, t2 = v_img__n;
+    int64_t t3 = t1, t4 = t2;
+    for (;;) {
+        int64_t t5 = t4 > t3 && (uint64_t)t4 - (uint64_t)t3 > 65536 ? t3 + 65536 : t4;
+        for (; t3 < t5; t3++) {
+            v_i = t3;
+            int64_t t6 = v_i;
+            int64_t t7 = t6;
+            double t8 = v_img[t7];
+            double t9 = t8;
+            double t10 = v_k;
+            int64_t t11 = v_i;
+            int64_t t12 = t11;
+            double t13 = (t9 * t10);
+            v_img[t12] = t13;
+        }
+        if (t3 >= t4) break;
+        if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+    }
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+```
 
 Calling `scale(img, "2")` fails at the boundary with a `TypeError`, as the annotation says it should, before any native code runs.
 
@@ -49,6 +81,40 @@ Arithmetic on `float32`, `int32`, `int16`, `int8`, `uint32`, `uint16` and `uint8
 def brighten(image, amount):
     for i in range(len(image)):
         image[i] = image[i] + amount    # 250 + 10 wraps to 4
+```
+<!-- c: brighten(np.zeros(8, np.uint8), 10) -->
+```c-generated
+int sj_kernel(uint8_t *v_image, int64_t v_image__n, int64_t v_amount, volatile int *sj_stop, int64_t *sj_io) {
+    *sj_stop = 0;
+    int64_t v_i = 0;
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    int64_t t1 = 0LL, t2 = v_image__n;
+    int64_t t3 = t1, t4 = t2;
+    for (;;) {
+        int64_t t5 = t4 > t3 && (uint64_t)t4 - (uint64_t)t3 > 65536 ? t3 + 65536 : t4;
+        for (; t3 < t5; t3++) {
+            v_i = t3;
+            int64_t t6 = v_i;
+            int64_t t7 = t6;
+            uint8_t t8 = v_image[t7];
+            uint8_t t9 = t8;
+            int64_t t10 = v_amount;
+            int64_t t11 = t10;
+            if (t11 < 0LL || t11 > 255LL) SJ_FAIL(7, 9, t11, 5);
+            int64_t t12 = v_i;
+            int64_t t13 = t12;
+            uint8_t t14 = ((uint8_t)((uint32_t)t9 + (uint32_t)t10));
+            v_image[t13] = t14;
+        }
+        if (t3 >= t4) break;
+        if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+    }
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
 ```
 
 | With a `uint8` or `float32` | Result |

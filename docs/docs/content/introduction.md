@@ -15,6 +15,64 @@ x = np.random.rand(1_000_000)
 y = np.zeros_like(x)
 saxpy(2.0, x, y)   # compiled on this call, native from then on
 ```
+<!-- c: saxpy(2.0, np.ones(8), np.zeros(8)) -->
+```c-generated
+int sj_kernel(double v_a, double *v_x, int64_t v_x__n, double *v_y, int64_t v_y__n, volatile int *sj_stop, int64_t *sj_io) {
+    *sj_stop = 0;
+    int64_t v_i = 0;
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    int64_t t1 = 0LL, t2 = v_x__n;
+    if (t2 > t1 && t2 <= v_y__n - (0)) {
+        int64_t t3 = t1, t4 = t2;
+        for (;;) {
+            int64_t t5 = t4 > t3 && (uint64_t)t4 - (uint64_t)t3 > 65536 ? t3 + 65536 : t4;
+            for (; t3 < t5; t3++) {
+                v_i = t3;
+                int64_t t6 = v_i;
+                int64_t t7 = t6;
+                double t8 = v_y[t7];
+                double t9 = t8;
+                double t10 = v_a;
+                int64_t t11 = v_i;
+                int64_t t12 = t11;
+                double t13 = v_x[t12];
+                double t14 = t13;
+                double t15 = (t10 * t14);
+                v_y[t7] = (t9 + t15);
+            }
+            if (t3 >= t4) break;
+            if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+        }
+    } else {
+        int64_t t16 = t1, t17 = t2;
+        for (;;) {
+            int64_t t18 = t17 > t16 && (uint64_t)t17 - (uint64_t)t16 > 65536 ? t16 + 65536 : t17;
+            for (; t16 < t18; t16++) {
+                v_i = t16;
+                int64_t t19 = v_i;
+                int64_t t20 = t19;
+                if ((uint64_t)t20 >= (uint64_t)v_y__n) { sj_io[4] = 0; SJ_FAIL(1, 12, t19, v_y__n); }
+                double t21 = v_y[t20];
+                double t22 = t21;
+                double t23 = v_a;
+                int64_t t24 = v_i;
+                int64_t t25 = t24;
+                double t26 = v_x[t25];
+                double t27 = t26;
+                double t28 = (t23 * t27);
+                v_y[t20] = (t22 + t28);
+            }
+            if (t16 >= t17) break;
+            if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+        }
+    }
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+```
 
 There is no LLVM, no C compiler and no binary wheel involved: scramjit and cimo are both pure Python, so it works wherever Python runs, including Pyodide in the browser.
 

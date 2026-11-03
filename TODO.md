@@ -279,7 +279,7 @@ Spills per line, once cimo can report them.
      a two-dimensional-or-more array assigned into three dimensions or more.
    - **Reductions: built,** with `std`, `var`, integer `mean` and `argmax` on wasm32, for one number from `float64` or `int64`. `axis=` that returns an array, `keepdims=True`, `dtype=`, `out=`, `where=`, `initial=` stay Python.
      Not yet: views with gaps in more than one dimension (numpy's order depends on strides), other dtypes.
-   - **Arrays made inside a function: built.** See "Making arrays" in `containers.md`. Not yet: `x.reshape()`, `np.eye`, `.size` or `.shape` directly on a call (`np.ones(n).size`), a conditional expression of arrays (`y = a if c else b`),
+   - **Arrays made inside a function: built.** See "Making arrays" in `numpy.md`. Not yet: `x.reshape()`, `np.eye`, `.size` or `.shape` directly on a call (`np.ones(n).size`), a conditional expression of arrays (`y = a if c else b`),
      five dimensions or more, `uint64` and `bool` dtypes, an array made in a comprehension. Returning one costs a copy (3.1 µs for 10 elements): worth removing if a Gymnasium-style `reset` or `step` shows it.
    - **Not now, whole-array arithmetic:** `x * 2`, `a + b` need broadcasting and dtype rules on top, which is rewriting numpy.
      They stay in Python, with the loops around them lifted.
@@ -293,9 +293,9 @@ Spills per line, once cimo can report them.
    and most useful first:
    - **Module-level constants: built.** Numbers, tuples, arrays and dicts are hidden arguments, read at each call, at about 0.2 µs each. Not as compile-time literals: only `x[i % K]` would gain, 1.25 to 1.06
      ns, against recompiling on every change. Not yet: lists at module level, and a global that is a list of numbers.
-   - **Enums: built.** See "Enums" in `containers.md`. Not yet: `.name`, `Cell(1)`, iterating over the class, storing a member into an array, `Flag` and string enums.
+   - **Enums: built.** See "Enums" in `data-structures.md`. Not yet: `.name`, `Cell(1)`, iterating over the class, storing a member into an array, `Flag` and string enums.
    - **Nested tuples: built,** as locals, arguments, results and globals, and loops over tuples. Not yet: a tuple holding arrays as a local or an argument, a tuple indexed with a variable, a comprehension variable that is a tuple, and comparing tuples.
-   - **Lists as arguments, returned, and at module level: built, from 0.0.4** (see `containers.md`). Lists of lists passed in
+   - **Lists as arguments, returned, and at module level: built, from 0.0.4** (see `data-structures.md`). Lists of lists passed in
      too: one array, rows as views, so a row is a reference as in Python. Lists of lists made in the
      function too, from `[[c] * w for _ in range(h)]` and its comprehension form (`[[c] * w] * h`, one row repeated, stays Python).
      Returned too. Not yet: making more than two levels, returning a row, numpy scalars as elements, and a call plan for list

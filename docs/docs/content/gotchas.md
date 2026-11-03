@@ -19,6 +19,24 @@ power(2, 3)     # 8, compiled
 power(2, -1)    # 0.5, as Python: the call ran as Python
 power(0, -1)    # ZeroDivisionError, as Python
 ```
+<!-- c: power(2, 3) -->
+```c-generated
+int sj_kernel(int64_t v_n, int64_t v_k, const uint64_t *sj_m, int64_t *sj_io) {
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    int64_t t1 = v_n;
+    int64_t t2 = v_k;
+    int64_t t3 = 0;
+    if ((int64_t)t2 < 0) SJ_FAIL(9, 8, 0, 0);
+    t3 = sj_ipow((int64_t)t1, (int64_t)t2);
+    sj_io[0] = (int64_t)(t3);
+    goto sj_done;
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+```
 
 A function that has written something can't start again, so there a negative `k` raises `ValueError`. We chose to compile it and raise in the rare case, because `n ** k` is too common to run as Python and `k` is almost never negative. numpy makes the same choice for its integers. It's an error, never a wrong answer.
 
@@ -41,6 +59,31 @@ def root(x: float, out):
 
 root(4.0, a)    # 2.0, as in Python
 root(-8.0, a)   # ValueError; Python returns (1.7319121124709868e-16+2.8284271247461903j)
+```
+<!-- c: root(4.0, np.zeros(1)) -->
+```c-generated
+int sj_kernel(double v_x, double *v_out, int64_t v_out__n, const uint64_t *sj_m, int64_t *sj_io) {
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    int64_t t1 = 0LL;
+    int64_t t2 = t1 < 0 ? t1 + v_out__n : t1;
+    if ((uint64_t)t2 >= (uint64_t)v_out__n) { sj_io[4] = 0; SJ_FAIL(1, 8, t1, v_out__n); }
+    double t3 = v_x;
+    v_out[t2] = t3;
+    double t4 = v_x;
+    double t5 = 0x1.0000000000000p-1;
+    double t6 = 0;
+    int t7 = sj_float_pow(SJ_LIBM2(23), t4, t5, &t6);
+    if (t7 == 1) SJ_FAIL(2, 9, 6, 0);
+    if (t7 == 2) SJ_FAIL(4, 9, 4, 0);
+    if (t7 == 3) SJ_FAIL(3, 9, 17, 0);
+    { double t8 = t6; memcpy(&sj_io[0], &t8, 8); }
+    goto sj_done;
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
 ```
 
 As with `n ** k`, this is an error, never a wrong answer. (Where Python's complex result would itself overflow, Python raises `OverflowError`; compiled code still raises `ValueError`.) An integer exponent is exact, as in Python: `x ** 2`, `x ** n` and `(-8.0) ** 3.0` work. So is a nonnegative constant base: `2.0 ** x` never raises this.

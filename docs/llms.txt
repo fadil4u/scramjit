@@ -16,7 +16,8 @@
 
 - [Types and annotations](https://www.scramjit.dev/docs/content/types.md): Type inference, annotations as contracts, narrowing
 - [Loops and builtins](https://www.scramjit.dev/docs/content/loops-and-builtins.md): How range, zip, comprehensions and other builtins compile
-- [Arrays, views, lists, tuples and dicts](https://www.scramjit.dev/docs/content/containers.md): numpy arrays, tuples and lists
+- [Python data structures](https://www.scramjit.dev/docs/content/data-structures.md): tuples, lists, lists of lists, dicts, enums and module-level constants: what compiles, what's copied, what stays Python
+- [numpy compatibility](https://www.scramjit.dev/docs/content/numpy.md): arrays as arguments, views, slices, making arrays, what numpy calls compile
 - [Semantics](https://www.scramjit.dev/docs/content/semantics.md): Where results match CPython, and why
 - [Gotchas](https://www.scramjit.dev/docs/content/gotchas.md): Every known difference from CPython: 64-bit integers that wrap, n ** k with a negative k and x ** 0.5 with a negative x raise; and small functions, Ctrl-C, numpy warnings, debuggers and threads around a compiled call
 - [Fallback and errors](https://www.scramjit.dev/docs/content/errors.md): Fallback to Python, FallbackWarning and CompileError

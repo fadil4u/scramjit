@@ -15,7 +15,8 @@
       "pages": [
         ["types", "Types and annotations"],
         ["loops-and-builtins", "Loops and builtins"],
-        ["containers", "Arrays, views, lists, tuples and dicts"],
+        ["data-structures", "Python data structures"],
+        ["numpy", "numpy compatibility"],
         ["semantics", "Semantics"],
         ["gotchas", "Gotchas"],
         ["errors", "Fallback and errors"],

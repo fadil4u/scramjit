@@ -111,6 +111,26 @@
       });
       pre.appendChild(b);
     });
+    // a Python snippet followed by the C scramjit generates for it (tools/docs_c.py): two tabs, Python open
+    doc.querySelectorAll('pre > code.language-c-generated').forEach(code => {
+      const cpre = code.parentNode, ppre = cpre.previousElementSibling;
+      if (!ppre || ppre.tagName !== 'PRE' || !ppre.querySelector('code.language-python')) return;
+      const box = document.createElement('div'), bar = document.createElement('div');
+      box.className = 'tabs'; bar.className = 'tab-bar'; bar.setAttribute('role', 'tablist');
+      ppre.parentNode.insertBefore(box, ppre);
+      box.append(bar, ppre, cpre);
+      const panes = [ppre, cpre];
+      ['Python', 'Generated C'].forEach((label, k) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = label; b.setAttribute('role', 'tab');
+        b.addEventListener('click', () => {
+          panes.forEach((p, j) => { p.hidden = j !== k; });
+          bar.querySelectorAll('button').forEach((x, j) => { x.classList.toggle('on', j === k); x.setAttribute('aria-selected', j === k); });
+        });
+        bar.appendChild(b);
+      });
+      bar.firstChild.click();
+    });
     doc.querySelectorAll('blockquote').forEach(q => {
       const p = q.querySelector('p');
       const m = p && /^\[!(NOTE|TIP|WARNING|PLANNED)\]\s*/i.exec(p.innerHTML);

@@ -295,7 +295,7 @@ Check for `inf` and `nan` yourself if you rely on these.
 
 ### A few whole-array calls are slower outside a loop
 
-numpy runs `max`, `min`, `argmax`, `argmin`, `any` and `all` with SIMD, which compiled code doesn't have yet. On 1,000,000 elements `x.max()` took 1.6 ms against numpy's 0.18, and `x.all()` 0.5 against 0.2. `x.sum()` and `x.mean()` are within about 15%, since numpy's sum isn't SIMD either. Inside a loop, where a numpy call costs about a microsecond each time, compiled code is far faster unless the arrays are huge. Preflight notes the calls this can affect that aren't in a loop.
+numpy runs `max`, `min`, `argmax`, `argmin`, `any` and `all` with SIMD. Compiled loops use SIMD too, but not yet for these, since each element is tested. On 1,000,000 `float64` elements on arm64, `x.max()` took 1.3 ms against numpy's 0.16, and `x.all()` 0.43 against 0.20; narrower dtypes widen the gap, as numpy fits more in a register (`float32` `x.max()`: 1.3 ms against 0.09). `x.sum()` is close to numpy's: 0.24 ms against 0.21 on `float64`. Inside a loop, where a numpy call costs about a microsecond each time, compiled code is far faster unless the arrays are huge. Preflight notes the calls this can affect that aren't in a loop.
 
 ### min and max of two different NaNs
 

@@ -212,7 +212,7 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   numbers match; AVX-512 unchecked. `max` and `min` keep the last of two zeros, a third rule next to "by sign" (arm64) and "the first" (wasm). Python 3.12 words `1.0 % 0.0` differently from 3.13,
   so zero-division messages now come from the running Python. NaN signs differ as on Windows arm64.
 - **numpy calls (decided 2026-11-02; see `TODO.md`):** whole-array arithmetic stays in Python, and MKL and BLAS stay out: not pure Python, and their results vary by library, CPU and thread count. A
-  plain loop doesn't reproduce `np.sum` (pairwise), and is 6 to 12x slower than numpy on 1,000,000 elements until cimo has SIMD.
+  plain loop doesn't reproduce `np.sum` (pairwise), and was 6 to 12x slower than numpy on 1,000,000 elements. cimo has SIMD now, but not for loops with a condition (its `TODO.md`).
 - **Arrays made in a function (built 2026-11-02).** Each is a `malloc`ed block behind a header, and a view remembers its block in a variable. No reference counts, so loops keep their C: at statements
   that make arrays and at the top of loops that do, if 1 MB or the live size has been allocated since the last time, blocks no variable names are freed. A stale variable only keeps memory longer. A result is copied
   into a numpy array, as numpy can't own a kernel's block and `resize` has to work; 3.1 µs returning 10 elements against 0.14 for `np.zeros`, 107 µs for 800 KB against 4.8, since numpy's pages stay untouched. Inside a loop 24 ns against 256 (8

@@ -51,7 +51,7 @@ int sj_kernel(double v_a, double *v_x, int64_t v_x__n, double *v_y, int64_t v_y_
                 v_i = t16;
                 int64_t t19 = v_i;
                 int64_t t20 = t19;
-                if ((uint64_t)t20 >= (uint64_t)v_y__n) { sj_io[4] = 0; SJ_FAIL(1, 12, t19, v_y__n); }
+                if ((uint64_t)t20 >= (uint64_t)v_y__n) { sj_io[4] = 0; SJ_FAIL(1, 4, t19, v_y__n); }
                 double t21 = v_y[t20];
                 double t22 = t21;
                 double t23 = v_a;

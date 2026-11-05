@@ -40,7 +40,7 @@ int sj_kernel(double *v_a, int64_t v_a__n, volatile int *sj_stop, int64_t *sj_io
     int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
     int64_t t1 = 0LL;
     int64_t t2 = t1 < 0 ? t1 + v_a__n : t1;
-    if ((uint64_t)t2 >= (uint64_t)v_a__n) { sj_io[4] = 0; SJ_FAIL(1, 8, t1, v_a__n); }
+    if ((uint64_t)t2 >= (uint64_t)v_a__n) { sj_io[4] = 0; SJ_FAIL(1, 3, t1, v_a__n); }
     double t3 = v_a[t2];
     double t4 = t3;
     v_lo = t4;
@@ -169,10 +169,10 @@ int sj_kernel(double *v_prices, int64_t v_prices__n, int64_t v_window, volatile 
     int64_t t8 = 1LL;
     int64_t t9 = sj_add((int64_t)t7, (int64_t)t8);
     int64_t t10 = (t9 > 0 ? t9 : 0);
-    if ((uint64_t)(t10) > 9223372036854775807ULL / sizeof(double) / 1) SJ_FAIL(6, 13, 0, 0);
+    if ((uint64_t)(t10) > 9223372036854775807ULL / sizeof(double) / 1) SJ_FAIL(6, 3, 0, 0);
     int64_t t3 = 0;
     t1 = malloc(sizeof(double) * (size_t)((t10) * 1 > 0 ? (t10) * 1 : 1));
-    if (!t1) SJ_FAIL(6, 13, 0, 0);
+    if (!t1) SJ_FAIL(6, 3, 0, 0);
     int64_t t11 = 0, t12 = t10;
     for (;;) {
         int64_t t13 = t12 > t11 && (uint64_t)t12 - (uint64_t)t11 > 65536 ? t11 + 65536 : t12;
@@ -191,7 +191,7 @@ int sj_kernel(double *v_prices, int64_t v_prices__n, int64_t v_window, volatile 
             v_i = t16;
             int64_t t19 = v_i;
             int64_t t20 = t19;
-            if ((uint64_t)t20 >= (uint64_t)v_prices__n) SJ_FAIL(5, 15, 0, 0);
+            if ((uint64_t)t20 >= (uint64_t)v_prices__n) SJ_FAIL(5, 5, 0, 0);
             double t21 = v_prices[t20];
             v_m = t21;
             int64_t t22 = v_i;
@@ -207,14 +207,14 @@ int sj_kernel(double *v_prices, int64_t v_prices__n, int64_t v_window, volatile 
                     double t31; int t32;
                     int64_t t33 = v_j;
                     int64_t t34 = t33 < 0 ? t33 + v_prices__n : t33;
-                    if ((uint64_t)t34 >= (uint64_t)v_prices__n) SJ_FAIL(5, 17, 0, 0);
+                    if ((uint64_t)t34 >= (uint64_t)v_prices__n) SJ_FAIL(5, 7, 0, 0);
                     double t35 = v_prices[t34];
                     double t36 = t35;
                     double t37 = v_m;
                     if ((t36 > t37)) {
                         int64_t t38 = v_j;
                         int64_t t39 = t38 < 0 ? t38 + v_prices__n : t38;
-                        if ((uint64_t)t39 >= (uint64_t)v_prices__n) SJ_FAIL(5, 17, 0, 0);
+                        if ((uint64_t)t39 >= (uint64_t)v_prices__n) SJ_FAIL(5, 7, 0, 0);
                         double t40 = v_prices[t39];
                         t31 = t40; t32 = 0;
                     } else {
@@ -343,7 +343,7 @@ int sj_kernel(double v_p__gain, int64_t v_p__n, double v_p__offset, int64_t v_p_
                 v_i = t16;
                 int64_t t19 = v_i;
                 int64_t t20 = t19;
-                if ((uint64_t)t20 >= (uint64_t)v_x__n) { sj_io[4] = 0; SJ_FAIL(1, 9, t19, v_x__n); }
+                if ((uint64_t)t20 >= (uint64_t)v_x__n) { sj_io[4] = 0; SJ_FAIL(1, 4, t19, v_x__n); }
                 double t21 = v_x[t20];
                 double t22 = t21;
                 double t23 = v_p__gain;
@@ -351,7 +351,7 @@ int sj_kernel(double v_p__gain, int64_t v_p__n, double v_p__offset, int64_t v_p_
                 double t25 = v_p__offset;
                 int64_t t26 = v_i;
                 int64_t t27 = t26;
-                if ((uint64_t)t27 >= (uint64_t)v_y__n) { sj_io[4] = 0; SJ_FAIL(1, 9, t26, v_y__n); }
+                if ((uint64_t)t27 >= (uint64_t)v_y__n) { sj_io[4] = 0; SJ_FAIL(1, 4, t26, v_y__n); }
                 double t28 = (t24 + t25);
                 v_y[t27] = t28;
             }
@@ -570,7 +570,7 @@ int sj_kernel(double *v_grid, int64_t v_grid__n, volatile int *sj_stop, int64_t 
             double t5 = v_v;
             int64_t t6[5];
             int t7 = sj_call_0(t5, sj_tb, t6);
-            if (t7) { sj_tb[++sj_tb[0]] = ((int64_t)0 << 32) | t6[1]; sj_io[0] = t6[0]; sj_io[4] = t6[4]; SJ_FAIL(t7, 19, t6[2], t6[3]); }
+            if (t7) { sj_tb[++sj_tb[0]] = ((int64_t)0 << 32) | t6[1]; sj_io[0] = t6[0]; sj_io[4] = t6[4]; SJ_FAIL(t7, 5, t6[2], t6[3]); }
             int64_t t8 = (int64_t)t6[0];
             int64_t t9 = t8;
             int64_t t10 = 1LL;
@@ -663,7 +663,7 @@ int sj_kernel(double *v_x, int64_t v_x__n, double v_RATE, double v_TABLE__0, dou
                 double t27 = t26;
                 int64_t t28 = v_i;
                 int64_t t29 = t28;
-                if ((uint64_t)t29 >= (uint64_t)v_x__n) { sj_io[4] = 0; SJ_FAIL(1, 14, t28, v_x__n); }
+                if ((uint64_t)t29 >= (uint64_t)v_x__n) { sj_io[4] = 0; SJ_FAIL(1, 5, t28, v_x__n); }
                 double t30 = v_x[t29];
                 double t31 = t30;
                 double t32 = (t27 * t31);

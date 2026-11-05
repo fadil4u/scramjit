@@ -90,7 +90,7 @@ static int sj_call_0(double *v_state, int64_t v_state__n, double v_push, int64_t
     int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
     int64_t t1 = 1LL;
     int64_t t2 = t1 < 0 ? t1 + v_state__n : t1;
-    if ((uint64_t)t2 >= (uint64_t)v_state__n) { sj_io[4] = 0; SJ_FAIL(1, 8, t1, v_state__n); }
+    if ((uint64_t)t2 >= (uint64_t)v_state__n) { sj_io[4] = 0; SJ_FAIL(1, 3, t1, v_state__n); }
     double t3 = v_state[t2];
     double t4 = t3;
     double t5 = v_push;
@@ -99,12 +99,12 @@ static int sj_call_0(double *v_state, int64_t v_state__n, double v_push, int64_t
     v_state[t2] = (t4 + t7);
     int64_t t8 = 0LL;
     int64_t t9 = t8 < 0 ? t8 + v_state__n : t8;
-    if ((uint64_t)t9 >= (uint64_t)v_state__n) { sj_io[4] = 0; SJ_FAIL(1, 9, t8, v_state__n); }
+    if ((uint64_t)t9 >= (uint64_t)v_state__n) { sj_io[4] = 0; SJ_FAIL(1, 4, t8, v_state__n); }
     double t10 = v_state[t9];
     double t11 = t10;
     int64_t t12 = 1LL;
     int64_t t13 = t12 < 0 ? t12 + v_state__n : t12;
-    if ((uint64_t)t13 >= (uint64_t)v_state__n) { sj_io[4] = 0; SJ_FAIL(1, 9, t12, v_state__n); }
+    if ((uint64_t)t13 >= (uint64_t)v_state__n) { sj_io[4] = 0; SJ_FAIL(1, 4, t12, v_state__n); }
     double t14 = v_state[t13];
     double t15 = t14;
     double t16 = 0x1.47ae147ae147bp-6;
@@ -112,7 +112,7 @@ static int sj_call_0(double *v_state, int64_t v_state__n, double v_push, int64_t
     v_state[t9] = (t11 + t17);
     int64_t t18 = 0LL;
     int64_t t19 = t18 < 0 ? t18 + v_state__n : t18;
-    if ((uint64_t)t19 >= (uint64_t)v_state__n) { sj_io[4] = 0; SJ_FAIL(1, 10, t18, v_state__n); }
+    if ((uint64_t)t19 >= (uint64_t)v_state__n) { sj_io[4] = 0; SJ_FAIL(1, 5, t18, v_state__n); }
     double t20 = v_state[t19];
     double t21 = fabs(t20);
     double t22 = 0x1.3333333333333p+1;
@@ -152,7 +152,7 @@ int sj_kernel(double *v_state, int64_t v_state__n, int64_t v_n, volatile int *sj
             int t15 = t13;
             int64_t t16[5];
             int t17 = sj_call_0(v_state, v_state__n, t14, sj_tb, t16);
-            if (t17) { sj_tb[++sj_tb[0]] = ((int64_t)0 << 32) | t16[1]; sj_io[0] = t16[0]; sj_io[4] = t16[4]; SJ_FAIL(t17, 15, t16[2], t16[3]); }
+            if (t17) { sj_tb[++sj_tb[0]] = ((int64_t)0 << 32) | t16[1]; sj_io[0] = t16[0]; sj_io[4] = t16[4]; SJ_FAIL(t17, 4, t16[2], t16[3]); }
             int t18 = (int)t16[0];
             int t19 = t18;
             int t20 = !(t19);
@@ -233,7 +233,7 @@ int sj_kernel(int64_t *v_values, int64_t v_values__n, int64_t *v_counts, int64_t
             int64_t t15 = t14;
             int64_t t16 = v_counts__n;
             int64_t t17 = t16;
-            if (t17 == 0) SJ_FAIL(2, 12, 3, 0);
+            if (t17 == 0) SJ_FAIL(2, 4, 3, 0);
             int64_t t18 = 0, t19 = 0;
             if ((int64_t)t17 == -1) t18 = sj_neg((int64_t)t15); else if ((int64_t)t17 != 0) { t18 = (int64_t)t15 / (int64_t)t17; t19 = (int64_t)t15 % (int64_t)t17; }
             int t20 = t19 != 0 && ((t19 < 0) != ((int64_t)t17 < 0));

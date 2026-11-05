@@ -614,7 +614,8 @@ arm64 (a console of the program's own, `CREATE_NO_WINDOW`, then `GenerateConsole
 
 **M3 progress.** The disk cache is cimo's: scramjit's C is deterministic, so a second process finds
 it (Gray-Scott first call 0.53 s, then 0.06 s, mostly preprocessing the prelude); no second cache
-needed. Preflight is built (`scramjit/_preflight.py`): static analysis sets each failing statement
+needed. The C holds no position (2026-11-05): lines count from the function's `def` and `#line` names no file, so
+moving a function or renaming its file hits the cache (a line above Gray-Scott was 86 ms warm, 562 ms before). Preflight is built (`scramjit/_preflight.py`): static analysis sets each failing statement
 aside and retries, so it reports every line, not only the first, though a line can fail only because
 one it depends on did. Bounds notes come from the compiler, not from scanning the C, since a versioned
 loop's slow copy always holds checks that don't run in the fast one.

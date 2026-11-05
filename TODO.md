@@ -379,11 +379,10 @@ Spills per line, once cimo can report them.
       prelude, or pass them pre-parsed.
     - Target: under 0.3 s warm for a 100-line function natively, under 1 s in Pyodide.
     - **An edit above a function recompiles it.** Line numbers and the file's path are in the C, so cimo's key changes: Gray-Scott first call 86 ms warm, 562 ms after
-      adding one line above it, or renaming the file; a comment that keeps the lines stays warm. Two parts, both needed:
-      - **Here:** the lines in `SJ_FAIL` and the other error sites are constants in the code, so make them relative to the function's first line and add `_first` when
-        the traceback is built (`_failed`, `exception`). Keep the `#line` markers, so cimo's diagnostics still name the Python line.
-      - **In cimo** (its `TODO.md`: "Line markers out of the cache key"): the markers are in its key, though they emit no code. Until that lands, write them
-        relative too, with a fixed file name, and map cimo's diagnostics back to the real file and line here. **When it lands, note it here.**
+      adding one line above it, or renaming the file; a comment that keeps the lines stays warm. **Done here (2026-11-05):** the C's lines count from the function's
+      `def` and `#line` names `sj` (or `sj<k>`, the k-th function called) instead of the file, put back for tracebacks (`_failed`), preflight's notes (`py_line`) and
+      cimo's messages (`cimo_diagnostic`); moved 3 lines down and renamed, Gray-Scott's first call stayed warm. `tests/test_line_independence.py`.
+      cimo's half ("Line markers out of the cache key", its `TODO.md`) would let `#line` name the real file again; not needed for the cache any more.
     - **A warm first call (2026-11-05):** Gray-Scott about 47 ms: 13 generating C, 30 preprocessing it (14 of that the prelude), about 1 loading; `small` about 45, nearly all preprocessing.
       A cold one is 96% cimo (496 ms, 13 generating). A cache keyed on the Python would save only warm time, and needs cimo's public cache export and import to skip the preprocessing.
 20. **Split `_compiler.py` into a package.** 4.8k lines holding every lowering in one file. Make

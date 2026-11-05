@@ -21,7 +21,7 @@ import warnings
 import weakref
 
 from . import _types as T
-from ._compiler import Callee, Compiler, Unit, array_record_slots, ret_arrays, ret_pairs
+from ._compiler import Callee, Compiler, Unit, array_record_slots, cimo_diagnostic, ret_arrays, ret_pairs
 from ._errors import CompileError, FallbackWarning, Unsupported
 from . import _interrupt
 from . import _lift
@@ -829,13 +829,15 @@ class Function:
 
     def _failed(self, entry, status, io):
         slots = [int.from_bytes(io[i:i + 8], 'little', signed=True) for i in range(0, 40, 8)]
-        frames = [(self._filename, slots[1], self.__name__)]
+        first = self._first - 1                    # the kernel's lines count from the def
+        frames = [(self._filename, slots[1] + first if slots[1] else 0, self.__name__)]
         if entry.frames:                 # those a call passed through, innermost first
             n = int.from_bytes(io[entry.tb_at:entry.tb_at + 8], 'little', signed=True)
             for k in range(n, 0, -1):
                 v = int.from_bytes(io[entry.tb_at + 8 * k:entry.tb_at + 8 * k + 8], 'little', signed=True)
-                filename, name = entry.frames[v >> 32]
-                frames.append((filename, v & 0xffffffff, name))
+                filename, name, offset = entry.frames[v >> 32]
+                line = v & 0xffffffff
+                frames.append((filename, line + offset if line else 0, name))
         _raise_chain(exception(status, slots), frames)
 
     def _callee(self):
@@ -976,6 +978,7 @@ class Function:
                 module = cimo.compile(PRELUDE + source, cache=self._use_disk, fma=not self._parity)   # Python never contracts
             kernel = module.sj_kernel
         except cimo.CompileError as e:
+            e = cimo_diagnostic(str(e), self._filename, self._first - 1, c.unit.frames)
             if c.unit.modules:
                 raise Unsupported(None, f'the C it calls doesn\'t compile in one file with the C generated here: {e}')
             raise Unsupported(None, f'internal error: cimo rejected the generated C ({e}); please report it')

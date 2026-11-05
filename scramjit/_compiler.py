@@ -496,6 +496,20 @@ def array_record_slots(t):
     return 10 + 2 * t.ndim
 
 
+def line_tag(frame):
+    """The file name #line gives a function's lines: the function called from Python, or the frame-th it calls."""
+    return 'sj' if frame is None else f'sj{frame}'
+
+
+def cimo_diagnostic(text, filename, offset, frames):
+    """cimo's message with sj:12 or sj3:4 put back as the Python file and line."""
+    def put(m):
+        k = m.group(1)
+        f, o = (filename, offset) if k == '' else (frames[int(k)][0], frames[int(k)][2])
+        return f'{f}:{int(m.group(2)) + o}'
+    return re.sub(r'\bsj(\d*):(\d+)', put, text)
+
+
 class Safepoint(ast.Constant):
     """Stands for a place where no array is held anywhere but in variables, so unused ones can be freed."""
 
@@ -574,7 +588,7 @@ class Unit:
         self.stack = [identity]  # the calls being worked out, to find recursion
         self.code = []           # the callees' C, each after those it calls
         self.helpers = set()
-        self.frames = []         # (file, function name) a failed call's trace refers to
+        self.frames = []         # (file, function name, line offset) a failed call's trace refers to
         self.modules = []        # cimo modules whose functions are called: their C goes in this file
         self.fma = self.wrapv = None
 
@@ -615,7 +629,7 @@ class Unit:
             c.cname = f'sj_call_{len(self.callees)}'
             c.frame = len(self.frames)
             c.spec = spec
-            self.frames.append((spec.filename, spec.name or spec.tree.name))
+            self.frames.append((spec.filename, spec.name or spec.tree.name, spec.offset))
             self.callees[key] = c
         return c
 
@@ -693,6 +707,12 @@ class Compiler:
 
     # ---- helpers
     def line(self, node):
+        """A line for the C: counted from the function's def, so moving the function in its file, or renaming the file,
+        leaves the C as it was and cimo's cache still has it. The dispatcher adds the offset back for tracebacks."""
+        return node.lineno
+
+    def py_line(self, node):
+        """The line in the file, for what Python reads: preflight's notes, checks and counts."""
         return node.lineno + self.offset
 
     def fail(self, node, reason):
@@ -1416,7 +1436,7 @@ class Compiler:
 
     def gotcha(self, node, text):
         """Note that this line can differ from Python, for preflight."""
-        line, have = self.line(node), self.gotchas.get(self.line(node))
+        line, have = self.py_line(node), self.gotchas.get(self.py_line(node))
         self.gotchas[line] = text if have is None or text in have else f'{have}; {text}'
 
     def join_all(self, node, ts, what):
@@ -2688,7 +2708,7 @@ class Compiler:
         if T.is_narrow(t.elem) or t.elem is T.NP_UINT64:
             return self.narrow_reduction(e, op, t.elem, p, n, st, floats, line)
         if op in ('max', 'min', 'argmax', 'argmin', 'any', 'all') and not self.loops:
-            self.gotchas[line] = f'{op}() is slower here than numpy on big arrays, for now: numpy uses SIMD (see "Gotchas")'
+            self.gotchas[line + self.offset] = f'{op}() is slower here than numpy on big arrays, for now: numpy uses SIMD (see "Gotchas")'
         if op == 'sum' and floats:
             self.helpers.add('np_sum')
             return self.hold(f'sj_np_sum({p}, {n}, {st}, {sum_chunk() or 0})', T.FLOAT), '1'
@@ -2730,7 +2750,7 @@ class Compiler:
         pre = f'sj_np{_mathlib.TAGS[elem.ctype]}_'
         suffix = 'f' if floats else 'i'
         if op in ('max', 'min', 'argmax', 'argmin', 'any', 'all') and not self.loops:
-            self.gotchas[line] = f'{op}() is slower here than numpy on big arrays, for now: numpy uses SIMD (see "Gotchas")'
+            self.gotchas[line + self.offset] = f'{op}() is slower here than numpy on big arrays, for now: numpy uses SIMD (see "Gotchas")'
         if op in ('sum', 'mean') and floats:
             self.helpers.add(_mathlib.typed('np_sum', elem.ctype))
             s = self.hold(f'{pre}sum({p}, {n}, {st}, {sum_chunk() or 0})', rt)
@@ -3003,8 +3023,9 @@ class Compiler:
         return f't{self.ntemp}'
 
     def mark(self, node):
-        name = self.filename.replace('\\', '\\\\').replace('"', '\\"')
-        self.lines.append(f'#line {self.line(node)} "{name}"')
+        # not the file's name either: cimo's diagnostics name sj (this function) or sj<k> (the k-th it calls), which
+        # cimo_diagnostic maps back
+        self.lines.append(f'#line {self.line(node)} "{line_tag(getattr(self, "frame", None))}"')
 
     def plain_arg(self, param):
         """The caller's argument a parameter that isn't a dict's key stands for."""
@@ -3228,19 +3249,19 @@ class Compiler:
                 self.count_lines.append(set())
                 by_test = False
             self.count_slot[id(s)] = (slot, leads)
-            self.count_lines[slot].add(self.line(s))
+            self.count_lines[slot].add(self.py_line(s))
             if isinstance(s, ast.If):
                 body = self.first_count(s.body, True)
                 if body is not None:
                     self.count_tests[id(s)] = body
-                    self.count_heads[self.line(s)] = ('if', body)
+                    self.count_heads[self.py_line(s)] = ('if', body)
                     other = self.first_count(s.orelse, True)
                     if other is not None:
                         self.count_rest[other] = (slot, body)
             elif isinstance(s, (ast.For, ast.While)):
                 body = self.first_count(s.body)
                 if body is not None:
-                    self.count_heads[self.line(s)] = ('loop', body)
+                    self.count_heads[self.py_line(s)] = ('loop', body)
                 self.first_count(s.orelse)
             if any(isinstance(n, (ast.Break, ast.Continue, ast.Return)) for n in ast.walk(s)):
                 slot = None
@@ -3254,7 +3275,7 @@ class Compiler:
     def count(self, s):
         if id(s) not in self.count_slot:          # written by the compiler as it went: its own counter
             self.count_slot[id(s)] = (len(self.count_lines), True)
-            self.count_lines.append({self.line(s)})
+            self.count_lines.append({self.py_line(s)})
         slot, leads = self.count_slot[id(s)]
         if leads:
             self.emit(f'sj_c[{slot}]++;')
@@ -4301,9 +4322,9 @@ class Compiler:
                 self.emit(f'if ((uint64_t){t} >= (uint64_t){n}) SJ_FAIL({LIST_INDEX_ERROR}, {self.line(sub)}, {1 if store else 0}, 0);')
             elif not is_list and self.boundscheck and not inbounds:
                 if self.slow_copy:
-                    self.hoisted_lines.add(self.line(sub))
+                    self.hoisted_lines.add(self.py_line(sub))
                 else:
-                    self.checks[self.line(sub)] = self.checks.get(self.line(sub), 0) + 1
+                    self.checks[self.py_line(sub)] = self.checks.get(self.py_line(sub), 0) + 1
                 self.emit(f'if ((uint64_t){t} >= (uint64_t){n}) {{ sj_io[4] = {axis}; SJ_FAIL({INDEX_ERROR}, {self.line(sub)}, {raw}, {n}); }}')
             if strided:
                 lin = f'{t} * v_{name}__s{axis}' if lin is None else f'({lin} + {t} * v_{name}__s{axis})'

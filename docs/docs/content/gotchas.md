@@ -26,7 +26,7 @@ int sj_kernel(int64_t v_n, int64_t v_k, const uint64_t *sj_m, int64_t *sj_io) {
     int64_t t1 = v_n;
     int64_t t2 = v_k;
     int64_t t3 = 0;
-    if ((int64_t)t2 < 0) SJ_FAIL(9, 8, 0, 0);
+    if ((int64_t)t2 < 0) SJ_FAIL(9, 3, 0, 0);
     t3 = sj_ipow((int64_t)t1, (int64_t)t2);
     sj_io[0] = (int64_t)(t3);
     goto sj_done;
@@ -66,16 +66,16 @@ int sj_kernel(double v_x, double *v_out, int64_t v_out__n, const uint64_t *sj_m,
     int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
     int64_t t1 = 0LL;
     int64_t t2 = t1 < 0 ? t1 + v_out__n : t1;
-    if ((uint64_t)t2 >= (uint64_t)v_out__n) { sj_io[4] = 0; SJ_FAIL(1, 8, t1, v_out__n); }
+    if ((uint64_t)t2 >= (uint64_t)v_out__n) { sj_io[4] = 0; SJ_FAIL(1, 3, t1, v_out__n); }
     double t3 = v_x;
     v_out[t2] = t3;
     double t4 = v_x;
     double t5 = 0x1.0000000000000p-1;
     double t6 = 0;
     int t7 = sj_float_pow(SJ_LIBM2(23), t4, t5, &t6);
-    if (t7 == 1) SJ_FAIL(2, 9, 6, 0);
-    if (t7 == 2) SJ_FAIL(4, 9, 4, 0);
-    if (t7 == 3) SJ_FAIL(3, 9, 17, 0);
+    if (t7 == 1) SJ_FAIL(2, 4, 6, 0);
+    if (t7 == 2) SJ_FAIL(4, 4, 4, 0);
+    if (t7 == 3) SJ_FAIL(3, 4, 17, 0);
     { double t8 = t6; memcpy(&sj_io[0], &t8, 8); }
     goto sj_done;
 sj_done:

@@ -139,25 +139,25 @@ int sj_kernel(double *v_m, int64_t v_m__n, int64_t v_m__n1, volatile int *sj_sto
             int64_t t8 = v_i;
             int64_t t9 = 0;
             int64_t t10 = t8 < 0 ? t8 + v_m__n : t8;
-            if ((uint64_t)t10 >= (uint64_t)v_m__n) { sj_io[4] = 0; SJ_FAIL(1, 10, t8, v_m__n); }
+            if ((uint64_t)t10 >= (uint64_t)v_m__n) { sj_io[4] = 0; SJ_FAIL(1, 5, t8, v_m__n); }
             t9 += t10 * (1LL * v_m__n1);
             v_sjv__0 = v_m + t9;
             v_sjv__0__n = v_m__n1;
             int64_t t11 = 1LL * v_sjv__0__n;
             int64_t t12 = 1LL;
-            if (t11 == 0) SJ_FAIL(3, 10, 19, 0);
+            if (t11 == 0) SJ_FAIL(3, 5, 19, 0);
             double t13 = sj_np_max_f(v_sjv__0, t11, t12, 1);
             double t14 = t13;
             int64_t t15 = v_i;
             int64_t t16 = 0;
             int64_t t17 = t15 < 0 ? t15 + v_m__n : t15;
-            if ((uint64_t)t17 >= (uint64_t)v_m__n) { sj_io[4] = 0; SJ_FAIL(1, 10, t15, v_m__n); }
+            if ((uint64_t)t17 >= (uint64_t)v_m__n) { sj_io[4] = 0; SJ_FAIL(1, 5, t15, v_m__n); }
             t16 += t17 * (1LL * v_m__n1);
             v_sjv__1 = v_m + t16;
             v_sjv__1__n = v_m__n1;
             int64_t t18 = 1LL * v_sjv__1__n;
             int64_t t19 = 1LL;
-            if (t18 == 0) SJ_FAIL(3, 10, 20, 0);
+            if (t18 == 0) SJ_FAIL(3, 5, 20, 0);
             double t20 = sj_np_min_f(v_sjv__1, t18, t19, 1);
             double t21 = t20;
             double t22 = (t14 - t21);
@@ -170,7 +170,7 @@ int sj_kernel(double *v_m, int64_t v_m__n, int64_t v_m__n1, volatile int *sj_sto
     double t23 = v_total;
     int t24 = v_total__np;
     int64_t t25 = (v_m__n * v_m__n1);
-    if (!t24 && (double)(t25) == 0.0) SJ_FAIL(2, 11, 1, 0);
+    if (!t24 && (double)(t25) == 0.0) SJ_FAIL(2, 6, 1, 0);
     { double t26 = (t23 / (double)(t25)); memcpy(&sj_io[0], &t26, 8); }
     sj_io[2] = t24;
     goto sj_done;
@@ -225,7 +225,7 @@ int sj_kernel(uint8_t *v_image, int64_t v_image__n, int64_t v_amount, volatile i
             uint8_t t9 = t8;
             int64_t t10 = v_amount;
             int64_t t11 = t10;
-            if (t11 < 0LL || t11 > 255LL) SJ_FAIL(7, 9, t11, 5);
+            if (t11 < 0LL || t11 > 255LL) SJ_FAIL(7, 4, t11, 5);
             int64_t t12 = v_i;
             int64_t t13 = t12;
             uint8_t t14 = ((uint8_t)((uint32_t)t9 + (uint32_t)t10));

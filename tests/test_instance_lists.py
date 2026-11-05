@@ -179,14 +179,13 @@ def test_lists_of_instances(f, make, compiled):
     same(f, make, compiled)
 
 
-def test_one_instance_twice_runs_as_python():
+def test_one_instance_twice():
+    g = scram(cache=False, fallback=False)(by_index)
     p = P(1.0)
-    g = scram(cache=False)(by_index)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', FallbackWarning)
-        lst = [p, p]
-        want = by_index([P(1.0)] * 2)
-        assert g(lst) == want and not g.signatures
+    lst = [p, p]
+    assert g(lst) == by_index([P(1.0)] * 2) and lst[0] is lst[1] and p.v == 1.0    # [P(1.0)] * 2 is one instance too
+    assert g.signatures[0][0].name.endswith('with repeats')
+    same(by_index, lambda: (lambda o: [[o, P(2.0), o]])(P(1.0)), True)
 
 
 def element_and_object(ps, q):

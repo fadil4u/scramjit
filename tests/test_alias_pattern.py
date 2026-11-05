@@ -166,3 +166,52 @@ def test_passing_on_an_object_that_shares_inside_itself():
 def test_passing_on_an_object_sharing_with_another_argument():
     same(passes_on, shared_across, True)      # the callee gets the other argument's object as its own fields
 
+
+
+@scram(cache=False)
+def chase_pair(a, b):
+    a.x += 1.0
+    return b.x
+
+
+def all_pairs(ps):
+    s = 0.0
+    for i in range(len(ps)):
+        for j in range(len(ps)):
+            s += chase_pair(ps[i], ps[j])      # i == j: one instance, so both names are one memory
+    return s
+
+
+def merge_all(ps):
+    for i in range(len(ps)):
+        for j in range(len(ps)):
+            if i != j:
+                ps[i].absorb(ps[j])
+    return ps[0].m
+
+
+def merge_named(ps, i, j):
+    a = ps[i]
+    b = ps[j]
+    a.absorb(b)
+    return a.m + b.m
+
+
+def bump_all(ps):
+    for p in ps:
+        p.bump()
+        p.m += p.x
+    return ps[0].x
+
+
+@pytest.mark.parametrize('f,make', [
+    (all_pairs, lambda: [[P(1.0), P(2.0), P(3.0)]]),
+    (merge_all, lambda: [[P(1.0, 1.0), P(2.0, 2.0), P(3.0, 3.0)]]),
+    (merge_named, lambda: [[P(1.0, 1.0), P(2.0, 2.0)], 0, 0]),
+    (merge_named, lambda: [[P(1.0, 1.0), P(2.0, 2.0)], 0, 1]),
+    (bump_all, lambda: (lambda o: [[o, P(5.0), o, o]])(P(1.0))),        # one instance three times in the list
+    (all_pairs, lambda: (lambda o: [[o, P(2.0), o]])(P(1.0))),
+    (merge_all, lambda: (lambda o: [[o, P(2.0, 2.0), o]])(P(1.0, 1.0))),
+])
+def test_elements_that_may_be_one_instance(f, make):
+    same(f, make, True)

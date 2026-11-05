@@ -125,7 +125,7 @@ def ps():
     (moves, lambda: [B(3.0, 4.0), B(1.0, 0.0)], True),
     (method_with_other, lambda: [B(3.0, 4.0), B(1.0, 0.0)], True),
     (absorbs, lambda: [B(3.0, 4.0, m=2.0), B(1.0, 0.0, m=5.0)], True),
-    (chases_in_list, lambda: [ps()], False),                 # a and b may be one instance
+    (chases_in_list, lambda: [ps()], True),                  # a and b may be one instance: passed by reference
     (chases_two, lambda: [B(3.0, 4.0), B(1.0, 0.0)], True),  # two parameters are two objects, or it runs as Python
     (raises_in_callee, lambda: [B(1.0, 2.0), np.arange(3.0)], True),
     (element_by_index, lambda: [ps(), 2], True),
@@ -142,9 +142,10 @@ def test_one_object_for_both_parameters_runs_as_python():
         assert g(p, p) == 4.0 and p.x == 4.0
 
 
-def test_reason():
-    with pytest.raises(CompileError, match='may be one instance'):
-        scram(cache=False, fallback=False)(chases_in_list)(ps())
+def test_two_elements_that_are_one_instance():
+    g = scram(cache=False, fallback=False)(chases_in_list)
+    a, b = ps(), ps()
+    assert g(a) == chases_in_list(b) and a == b
 
 
 def test_writes_in_the_callee_before_it_raises():

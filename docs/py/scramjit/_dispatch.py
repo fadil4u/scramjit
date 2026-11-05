@@ -548,8 +548,12 @@ def _objlist_type(xs, attrs, seen, dicts=False):
     if type(fields) is not list:
         return None
     ids = list(map(id, xs))
-    if len(set(ids)) != len(ids) or seen.intersection(ids):
-        return None                              # one instance in two places: a write must show through both
+    shared = len(set(ids)) != len(ids)           # an instance twice in it: each once in a pool, and an index list
+    if shared:
+        xs = list({id(x): x for x in xs}.values())
+        ids = list(map(id, xs))
+    if seen.intersection(ids):
+        return None                              # an instance here and in another argument: not yet
     seen.update(ids)
     written = set(attrs[1]).union(*(w for _, w in methods.values()))
     has_dict = hasattr(xs[0], '__dict__')
@@ -574,7 +578,7 @@ def _objlist_type(xs, attrs, seen, dicts=False):
         if seen.intersection(held):
             return None
         seen.update(held)
-    return T.objlist_of(T.object_of(cls.__qualname__, fields, methods, cls, written))
+    return T.objlist_of(T.object_of(cls.__qualname__, fields, methods, cls, written), shared)
 
 
 def _copy_back_attr(xs, key, a, et):
@@ -1921,11 +1925,19 @@ class Function:
         columns = []
         for i, (x, t) in enumerate(zip(args, entry.types)):
             if t.kind == 'objlist':                 # a list of numbers per attribute, written back into the instances
+                pool = x
+                if t.strided:                       # repeats: each instance once, and which is at each place
+                    where = {}
+                    ix = array.array('q', (where.setdefault(id(y), len(where)) for y in x))
+                    pool = list({id(y): y for y in x}.values())
                 for key, ft in t.elem.elem:
                     if ft.kind != 'function':
-                        a = array.array(_LIST_CODES[ft.name], map(operator.attrgetter(key), x))
-                        columns.append((i, key, a, ft))
+                        a = array.array(_LIST_CODES[ft.name], map(operator.attrgetter(key), pool))
+                        columns.append((i, key, a, ft, pool))
                         cargs += [a.buffer_info()[0], len(a)]
+                if t.strided:
+                    copies.append((None, ix))       # kept alive for the call
+                    cargs += [ix.buffer_info()[0], len(ix)]
                 continue
             if t.kind == 'list':
                 a = array.array(_LIST_CODES[t.elem.name], x)
@@ -1950,11 +1962,11 @@ class Function:
             cargs.append(entry.counts)
         io = bytearray(entry.io_size)
         status = entry.kernel(*cargs, io)
-        for i, key, a, ft in columns:
+        for i, key, a, ft, pool in columns:
             if (i, key) in entry.columns:
-                _copy_back_attr(args[i], key, a, ft)
+                _copy_back_attr(pool, key, a, ft)
         for i, a in copies:                       # what was written, even before an exception, as Python would have
-            if i in entry.lists:
+            if i is not None and i in entry.lists:
                 t = entry.types[i]
                 if T.is_pylist(t):
                     _copy_back_nested(args[i], a, t.elem, t.ndim)

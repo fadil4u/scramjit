@@ -288,15 +288,28 @@ def same_as(i, path=()):
     return _SAME[key]
 
 
+_REFS = {}
+
+
+def elemref_of(elem):
+    """An element of a list of instances, given to a compiled callee by reference: the attributes' lists and its index, so
+    two of them that are one instance are one memory, and a write through either is seen through both."""
+    if elem not in _REFS:
+        _REFS[elem] = Type(f'ref {elem.name}', None, 'elemref', elem=elem)
+    return _REFS[elem]
+
+
 _OBJLISTS = {}
 
 
-def objlist_of(elem):
+def objlist_of(elem, shared=False):
     """A list of instances, all one class, by the attributes a function uses (elem, an object type): in C, a list of
-    numbers per attribute."""
-    if elem not in _OBJLISTS:
-        _OBJLISTS[elem] = Type(f'list[{elem.name}]', None, 'objlist', elem=elem)
-    return _OBJLISTS[elem]
+    numbers per attribute. shared: some instance is in it more than once, so the lists are of the instances, each once
+    (a pool), and an index list says which is at each place (strided holds this flag)."""
+    if (elem, shared) not in _OBJLISTS:
+        t = _OBJLISTS[elem, shared] = Type(f'list[{elem.name}]' + (' with repeats' if shared else ''), None, 'objlist', elem=elem)
+        t.strided = shared
+    return _OBJLISTS[elem, shared]
 
 
 def leaves(t):

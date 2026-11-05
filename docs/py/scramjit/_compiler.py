@@ -522,7 +522,7 @@ def flatten_dicts(fdef, arg_types):
     parameter types, and {variable: (argument index, key, how the user wrote it)}."""
     a = fdef.args
     params = a.posonlyargs + a.args
-    if not any(t is not None and t.kind in ('dict', 'object', 'objlist', 'madeclass') for t in arg_types) or len(params) != len(arg_types):
+    if not any(t is not None and t.kind in ('dict', 'object', 'objlist', 'madeclass', 'elemref') for t in arg_types) or len(params) != len(arg_types):
         return fdef, arg_types, {}
     tree = copy.deepcopy(fdef)
     taken = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {p.arg for p in params}
@@ -559,8 +559,22 @@ def flatten_dicts(fdef, arg_types):
                 return path_expr(renamed[n.id], n) if n.id in renamed else n
         tree.body = [Rename().visit(s) for s in tree.body]
         ast.fix_missing_locations(tree)
+    pools = {}                                   # a list with repeats -> its index list
+    refs = {}                                    # an element given by reference -> (its own list's name, its index's, its type)
     for i, (p, t) in enumerate(zip(tree.args.posonlyargs + tree.args.args, arg_types)):
         if t.kind == 'same':
+            continue
+        if t.kind == 'elemref':                  # the attributes' lists, then the index: an element of a list of its own
+            pl = fresh(f'sjref__{p.arg}')
+            refs[p.arg] = (pl, fresh(f'sji__{p.arg}'), t.elem)
+            for key, ft in t.elem.elem:
+                flat[pl, key] = fresh(f'{p.arg}__{key}')
+                if ft.kind == 'function':
+                    methods[pl, key] = ft
+                new_params.append(ast.copy_location(ast.arg(flat[pl, key]), p))
+                new_types.append(ft if ft.kind == 'function' else T.list_of(ft))
+            new_params.append(ast.copy_location(ast.arg(refs[p.arg][1]), p))
+            new_types.append(T.INT)
             continue
         if t.kind not in ('dict', 'object', 'objlist'):
             plain[p.arg] = i
@@ -588,11 +602,17 @@ def flatten_dicts(fdef, arg_types):
                 slots[name] = (i, prefix + key if prefix else key, shown)     # a dict's key can be an int
                 new_params.append(ast.copy_location(ast.arg(name), p))
                 new_types.append(T.list_of(ft) if t.kind == 'objlist' and ft.kind != 'function' else ft)
+        if t.kind == 'objlist' and t.strided:     # after its attributes' lists: the index of the instance at each place
+            pools[p.arg] = fresh(f'{p.arg}__ix')
+            new_params.append(ast.copy_location(ast.arg(pools[p.arg]), p))
+            new_types.append(T.list_of(T.INT))
 
     dicts = {p.arg for p, t in zip(params, arg_types) if t.kind == 'dict'}
     objects = {p.arg for p, t in zip(params, arg_types) if t.kind == 'object'}
     lists = {p.arg: t for p, t in zip(params, arg_types) if t.kind == 'objlist'}
     types_of = {p.arg: (t.elem if t.kind == 'objlist' else t) for p, t in zip(params, arg_types)}
+    for pl, _, et in refs.values():
+        lists[pl], types_of[pl] = T.objlist_of(et), et
     objects |= set(nested)
     types_of.update(nested)
     made = {p.arg: t for p, t in zip(params, arg_types) if t.kind == 'madeclass'}
@@ -648,6 +668,8 @@ def flatten_dicts(fdef, arg_types):
         if not data:
             raise Unsupported(tree, f'{p} is a list of instances whose attributes it never reads')
         first[p] = flat[p, data[0]]
+        if t.strided:                            # repeats: the attributes' lists are of each instance once
+            first[p] = pools[p]
 
     # q = p for an instance parameter p, at the top of the body, q assigned nowhere else and not named before: q is p
     for k, s in enumerate(tree.body):
@@ -705,9 +727,19 @@ def flatten_dicts(fdef, arg_types):
                 changed = True
     if set(alias) & (set(lists) | dicts | objects):
         raise Unsupported(tree, 'a parameter is also an element of a list')
+    for p, (pl, _, _) in refs.items():
+        alias[p] = pl
     index = {name: fresh(f'sji__{name}') for name in alias}
+    index.update({p: ix for p, (_, ix, _) in refs.items()})
+
+    def pooled(ps, idx):
+        """Where an element's attributes are in their lists: its place, or in a list with repeats, its instance's."""
+        idx = copy.deepcopy(idx)
+        return ast.Subscript(ast.Name(pools[ps], ast.Load()), idx, ast.Load()) if ps in pools and idx is not None else idx
 
     def column(ps, key, idx, ctx, node):
+        if ps in pools:                          # which instance is at that place, then its attribute
+            idx = ast.copy_location(ast.Subscript(ast.Name(pools[ps], ast.Load()), idx, ast.Load()), node)
         return ast.copy_location(ast.Subscript(ast.Name(flat[ps, key], ast.Load()), idx, ctx), node)
 
     def path_owner(owner, path):
@@ -879,7 +911,7 @@ def flatten_dicts(fdef, arg_types):
                     passed = [self.argument(x) for x in n.args]
                     call = ast.Call(ast.copy_location(ast.Name(flat[owner, f.attr], ast.Load()), f), [ast.copy_location(me, n)] + [x for x, _ in passed],
                                     [self.visit(k) for k in n.keywords])
-                    call.sj_writes = [(flat[owner, k], copy.deepcopy(el[1]) if el else None) for k in sorted(writes) if (owner, k) in flat] \
+                    call.sj_writes = [(flat[owner, k], pooled(owner, el[1]) if el else None) for k in sorted(writes) if (owner, k) in flat] \
                         + [w for _, ws in passed for w in ws]
                     if not el and owner not in made_local:       # objects in its attributes: any of their numbers may be assigned
                         call.sj_writes += [(flat[path_owner(owner, k)], None) for k, _ in leaf_types(T.object_of(t.py, fields, t.methods)) if '.' in k]
@@ -992,7 +1024,7 @@ def flatten_dicts(fdef, arg_types):
             if owner in made_local:
                 me.local, me.full = t, (None, place)
             return me, [(flat[path_owner(owner, k)], copy.deepcopy(idx)) for k, _ in leaf_types(t) if k.split('.')[0] in t.writes or '.' in k] \
-                if idx is None and owner not in made_local else [(flat[owner, k], copy.deepcopy(idx)) for k in sorted(t.writes) if (owner, k) in flat]
+                if idx is None and owner not in made_local else [(flat[owner, k], pooled(owner, idx)) for k in sorted(t.writes) if (owner, k) in flat]
 
         def visit_Attribute(self, n):
             el = element_of(n.value)
@@ -1365,7 +1397,7 @@ class SelfArg(ast.Tuple):
         new = SelfArg(copy.deepcopy(self.elts, memo), ast.Load())
         new.object_type, new.slots = self.object_type, self.slots
         new.passed, new.full, new.owner = getattr(self, 'passed', False), getattr(self, 'full', None), getattr(self, 'owner', None)
-        new.local, new.same = getattr(self, 'local', None), getattr(self, 'same', None)
+        new.local, new.same, new.ref = getattr(self, 'local', None), getattr(self, 'same', None), getattr(self, 'ref', False)
         return ast.copy_location(new, self)
 
 
@@ -1510,6 +1542,7 @@ class Compiler:
         self.tracks = False        # the function returns an array, so views remember which argument they're of
         self.makes = False         # the function makes arrays, so views remember the block they're in
         self.array_args = []       # for those: (argument index, dict key or None) of each array parameter
+        self.ref_written = set()   # list parameters a callee given an element by reference writes
         local = {p.arg for p in fdef.args.posonlyargs + fdef.args.args}
         local |= {n.id for n in ast.walk(fdef) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
         self.f = ListReturns().visit(Tables().visit(Lazy(local, set(globals_)).visit(copy.deepcopy(fdef))))
@@ -2312,6 +2345,8 @@ class Compiler:
     def typeof(self, e):
         if isinstance(e, SelfArg) and getattr(e, 'same', None) is not None:
             return T.same_as(e.same)
+        if isinstance(e, SelfArg) and getattr(e, 'ref', False):
+            return T.elemref_of(e.object_type)
         if isinstance(e, SelfArg) and getattr(e, 'local', None) is not None:
             for x in e.elts:
                 if self.typeof(x).np == 'dyn':
@@ -2757,7 +2792,7 @@ class Compiler:
                 self.fail(e, f'passes a list of lists to {e.func.id}()')
             if t.kind == 'object' and any(i is not None for i, _ in same_targets(t)):
                 self.fail(e, f'passes {e.func.id}() an object holding another argument\'s object')
-            if not (t.is_number or t.kind in ('array', 'enum') or (t.kind in ('object', 'same') and isinstance(x, SelfArg))
+            if not (t.is_number or t.kind in ('array', 'enum') or (t.kind in ('object', 'same', 'elemref') and isinstance(x, SelfArg))
                     or (t.kind == 'tuple' and T.is_number_tree(t) and all(et.np != 'dyn' for et in T.leaves(t)))):
                 self.fail(e, f'passes {t.name} to {e.func.id}()')
         types = [ts[k] for k in picked]
@@ -2809,7 +2844,7 @@ class Compiler:
         nodes, picked = self.call_args(e, spec, self.callee_of(e))
         self.narrow_passed(nodes, picked, self.callee_of(e))
         done = []
-        mes = {j: nodes[k] for j, k in enumerate(picked) if isinstance(nodes[k], SelfArg) and nodes[k].same is None}
+        mes = {j: nodes[k] for j, k in enumerate(picked) if isinstance(nodes[k], SelfArg) and nodes[k].same is None and not nodes[k].ref}
         self.check_shared(e, mes, c)
 
         def value(x):
@@ -2823,6 +2858,10 @@ class Compiler:
         for x in nodes:
             if isinstance(x, SelfArg) and x.same is not None:      # the object of another argument: nothing more to pass
                 done.append(('self', []))
+            elif isinstance(x, SelfArg) and x.ref:   # an element by reference: its attributes' lists, then its index
+                cols = [x.slots[k] for k, _ in leaf_types(x.object_type)]
+                done.append(('self', [(self.env[c.value.id], ('list', c.value.id)) for c in cols] + [value(cols[0].slice)]))
+                self.ref_written |= {c.value.id for (k, _), c in zip(leaf_types(x.object_type), cols) if k in x.object_type.writes}
             elif isinstance(x, SelfArg):            # an instance: each of its attributes, as the callee's parameters
                 self.typeof(x)
                 done.append(('self', [value(y) for y in x.elts]))
@@ -2843,6 +2882,8 @@ class Compiler:
                     cargs += [f'v_{v}__s{k}' for k in range(t.ndim)]
             elif t.kind == 'tuple':
                 cargs += [val for val, _ in flat(v if isinstance(v, list) else self.tuple_var(v))]
+            elif t.kind == 'list':             # a list parameter, by reference: the callee writes its memory
+                cargs += [f'v_{v[1]}', f'v_{v[1]}__n']
             elif isinstance(v, str):           # a global that is a number
                 cargs.append(f'v_{v}')
                 if t.np == 'dyn':
@@ -2905,7 +2946,7 @@ class Compiler:
             x = nodes[k]
             if not isinstance(x, SelfArg):
                 continue
-            x.same = None
+            x.same, x.ref = None, False
             sub = [v for v in x.slots.values() if isinstance(v, ast.Subscript)]
             groups.setdefault((x.owner, ast.dump(sub[0].slice) if sub else None), []).append((j, x))
         for members in groups.values():
@@ -2932,6 +2973,16 @@ class Compiler:
                 methods.update(t.methods or {})
             lead.object_type = T.object_of(t0.py, [(k, fields[k]) for k in order], methods, t0.cls, frozenset().union(*(t.writes for t in types)))
             lead.elts = [lead.slots[k] for k, _ in leaf_types(lead.object_type)]
+        elements = {}                            # elements of one list at different indexes: maybe one instance
+        for (owner, at), members in groups.items():
+            x = members[0][1]
+            if at is not None and owner is not None and all(self.env.get(v.value.id, T.NONE).kind == 'list' and self.env[v.value.id].elem.np is False
+                                                            for v in x.slots.values() if isinstance(v, ast.Subscript)):
+                elements.setdefault(owner, []).append(x)
+        for owner, xs in elements.items():
+            if len(xs) > 1 and any(x.object_type.writes for x in xs):
+                for x in xs:                     # by reference: a write through one is the other's, if they're one
+                    x.ref = True
 
     def take_writes(self, e, me, c, io, j=0):
         """What a method assigned to self, into the caller's variables, before anything else: an exception it raised
@@ -4591,6 +4642,7 @@ class Compiler:
         """For a list of instances: (argument index, attribute) of each attribute's list it stores into."""
         stored = {n.value.id for n in ast.walk(self.f) if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store)
                   and isinstance(n.value, ast.Name)}
+        stored |= self.ref_written               # given by reference to a callee that writes it
         return {self.dict_slots[p][:2] for p in self.params if p in self.dict_slots and p in stored and self.env[p].kind == 'list'}
 
     def sinkable_flags(self, s):

@@ -608,6 +608,15 @@ class Spring:
     def calls_a_method(self):
         return self.norm() + 1.0
 
+    def push(self, dv):
+        self.v += dv * self.k
+
+    @scram
+    def uses_push(self, n):
+        for i in range(n):
+            self.push(0.5)
+            self.log[i] = self.v
+
 @scram
 def reads(p, x):
     s = 0.0
@@ -630,7 +639,8 @@ def test_static_understands_instances(tmp_path):
     f.write_text(OBJECTS)
     d = json.loads(_cli('preflight', f, '--json', '--no-suggest').stdout)
     states = {x['name']: x['state'] for x in d['files'][0]['functions']}
-    assert states == {'advance': 'compiled', 'calls_a_method': 'python', 'reads': 'compiled', 'is_an_array': 'compiled', 'passes_it_on': 'python'}, states
+    assert states == {'advance': 'compiled', 'calls_a_method': 'python', 'uses_push': 'compiled', 'reads': 'compiled', 'is_an_array': 'compiled',
+                      'passes_it_on': 'python'}, states
 
 
 VIEWS = '''

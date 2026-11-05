@@ -192,6 +192,11 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   no code of the class would run: `__getattribute__` the default one, no `__getattr__`, nothing on the class under that name but a plain value, a slot or a namedtuple's field, and for a write the default `__setattr__` and the
   attribute on the instance already, since writing back one only on the class would add it even where no assignment ran. A call plan checks the same thing for 2.0 µs a call (10 without one; a dict takes 1.7) by comparing what each Python-made class holds
   under those names with what it held: built-in classes can't change. `self.__x` stays Python, as the source doesn't show the name Python gives it. An object and its own `__dict__` count as one object passed twice.
+- **Methods (built 2026-11-05, from 0.0.4).** `p.m(...)` is a callee call: the function on the class (a plain one gets a `Function` of its own) takes
+  the attributes it uses, through what it calls, as self, never the rest, which may have changed type in the caller. Its writes come back from its `sj_io`
+  before its status is checked, so an exception keeps them. A writing call stays out of tests, loop headers and comprehensions, and `p__a = p__a` after its
+  statement shows the write to every analysis that looks for assignments. Which function runs is the class's at each call, as for attributes; one on the
+  instance runs Python. A call costs 5 to 6 ns more than inline code, as every call between compiled functions does: cimo keeps the result array in memory.
 - **numpy on single numbers (built 2026-11-02).** 25 of 26 functions matched libm bit for bit on 160,024 inputs on arm64 and in Pyodide, so they
   call it; `np.tanh` doesn't, natively. Types are the trap: `np.abs(4)` is int64 natively and int32 in Pyodide, `np.floor(4)` changed in numpy 2.1,
   `np.sqrt(True)` is float16, so those stay Python. `np.minimum(0.0, -0.0)` differs by platform, so the compiler asks the numpy present.

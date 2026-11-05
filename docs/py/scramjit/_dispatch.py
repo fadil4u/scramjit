@@ -187,25 +187,48 @@ def _dict_keys(fdef):
 
 
 def _attrs_used(fdef):
-    """For each parameter read as p.a: (the attributes, sorted; those it assigns), if it turns out to be an instance.
-    Not p.__a: in a class that means another name, which the source doesn't say."""
+    """For each parameter used as p.a: (the attributes read or assigned, sorted; those assigned; the methods called, as
+    p.m(...)), if it turns out to be an instance. Not p.__a: in a class that means another name, which the source doesn't say."""
     if fdef is None:
         return {}
     index = {p.arg: i for i, p in enumerate(fdef.args.posonlyargs + fdef.args.args)}
     found = {}
-    for name, attr, written in _attribute_uses(fdef):
+    for name, attr, how in _attribute_uses(fdef):
         if name in index:
-            names, stores = found.setdefault(index[name], (set(), set()))
-            names.add(attr)
-            if written:
-                stores.add(attr)
-    return {i: (sorted(names), stores) for i, (names, stores) in found.items()}
+            _add_use(found.setdefault(index[name], (set(), set(), set())), attr, how)
+    return {i: (sorted(names), stores, calls) for i, (names, stores, calls) in found.items()}
+
+
+def _add_use(entry, attr, how):
+    names, stores, calls = entry
+    if how == 'call':
+        calls.add(attr)
+    else:
+        names.add(attr)
+        if how == 'store':
+            stores.add(attr)
 
 
 def _attribute_uses(fdef):
+    """(name, attribute, 'load', 'store' or 'call') for each name.attribute."""
+    called = {id(n.func) for n in ast.walk(fdef) if isinstance(n, ast.Call)}
     for n in ast.walk(fdef):
         if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and not (n.attr.startswith('__') and not n.attr.endswith('__')):
-            yield n.value.id, n.attr, not isinstance(n.ctx, ast.Load)
+            yield n.value.id, n.attr, 'call' if id(n) in called else 'load' if isinstance(n.ctx, ast.Load) else 'store'
+
+
+_methods = weakref.WeakKeyDictionary()   # a plain function on a class -> the Function that compiles it as a callee
+
+
+def _method(fn):
+    """The Function a method on a class compiles as, when compiled code calls it: itself if it's @scram."""
+    if type(fn) is Function:
+        return fn
+    w = _methods.get(fn)
+    if w is None:
+        w = _methods[fn] = Function(fn, cache=True)
+        _functions.discard(w)               # not a decorated function, for preflight
+    return w
 
 
 def _in_class(cls, name):
@@ -229,10 +252,20 @@ def _in_slots(cls, name):
     return False
 
 
-def _object_fields(x, names, written):
+def _object_fields(x, names, written, calls=(), methods=None):
     """[(attribute, type)] if reading these attributes runs no code of the object's, and assigning those written only
-    stores; if not, the reason as a string. This holds only for now, since a class can change: it's asked at every call."""
+    stores; if not, the reason as a string. This holds only for now, since a class can change: it's asked at every call.
+    A method called is a plain function on the class, or a @scram one; what it uses joins these, and methods (a dict, if
+    given) gets what each call assigns."""
     cls = type(x)
+    if calls:
+        found = _methods_called(x, calls)
+        if type(found) is str:
+            return found
+        names = sorted(set(names).union(*(n for n, _, _ in found.values())))
+        written = set(written).union(*(w for _, w, _ in found.values()))
+        if methods is not None:
+            methods.update({m: (n, w) for m, (n, w, _) in found.items()})
     if not any(_in_class(cls, '__getattribute__') is d for d in _DEFAULT_GET):
         return f'{cls.__name__} defines __getattribute__'
     if _in_class(cls, '__getattr__') is not _MISSING:
@@ -264,7 +297,40 @@ def _object_fields(x, names, written):
         if t is None or t is T.U64 or t.kind in ('list', 'function', 'enumclass') or T.is_pylist(t):
             return f'{name} is a {type(v).__name__}'
         fields.append((name, t))
+    if calls:
+        fields += [(m, T.function_of(w)) for m, (_, _, w) in sorted(found.items())]
     return fields
+
+
+def _methods_called(x, calls):
+    """{method: (attributes it uses, those a call assigns, its Function)}, through the methods it calls; or a reason."""
+    cls = type(x)
+    held = getattr(x, '__dict__', None) if type(x).__getattribute__ is object.__getattribute__ else None
+    found, todo, called = {}, list(calls), {}
+    while todo:
+        m = todo.pop()
+        if m in found:
+            continue
+        c = _in_class(cls, m)
+        if type(c) is not Function and type(c) is not types.FunctionType:
+            return f'{cls.__name__}.{m} is {"not there" if c is _MISSING else "not a plain method"}'
+        if type(held) is dict and m in held:
+            return f'{m} is on the instance, so calling it calls what is held there'
+        w = _method(c)
+        if w._tree is None:
+            return f'{cls.__name__}.{m}: {w._why_not}'
+        if not (w._tree.args.posonlyargs + w._tree.args.args):
+            return f'{cls.__name__}.{m} takes no self'
+        names, stores, inner = w._attrs.get(0, ((), set(), set()))
+        found[m] = (set(names), set(stores), w)
+        called[m] = set(inner)
+        todo += sorted(inner)
+    for _ in found:                      # what a call assigns, through the methods it calls
+        for m in found:
+            for k in called[m]:
+                found[m][0].update(found[k][0])
+                found[m][1].update(found[k][1])
+    return found
 
 
 def _member(x, key):
@@ -468,17 +534,21 @@ def _object_guards(env, i, x, t, n, attrs, again):
     """What a plan checks of an instance: that its class looks up these names as it did (a class can change, and only those
     written in Python can), then what _object_fields checks of the object. The first fetched value of each attribute is
     f{i}_{k}. Nothing here runs the object's code, once the class has been checked."""
-    names, written = attrs
+    written = set(attrs[1]).union(*(w for _, w in (t.methods or {}).values()))
     cls = type(x)
     env[f'cls{i}'], env[f'mro{i}'], env['MISSING'] = cls, cls.__mro__, _MISSING
     out = [f'    if cls{i}.__mro__ is not mro{i}:\n        return slow({again})']
-    asked = list(names) + ['__getattribute__', '__getattr__'] + (['__setattr__'] if written else [])
+    asked = [k for k, _ in t.elem] + ['__getattribute__', '__getattr__'] + (['__setattr__'] if written else [])
     for c, k in enumerate(k for k in cls.__mro__ if k.__flags__ & (1 << 9)):     # 1 << 9: a class made at run time
         env[f'held{i}_{c}'] = k.__dict__
         for a, name in enumerate(asked):
             env[f'was{i}_{c}_{a}'] = k.__dict__.get(name, _MISSING)
             out.append(f'    if held{i}_{c}.get({name!r}, MISSING) is not was{i}_{c}_{a}:\n        return slow({again})')
     for k, (key, ft) in enumerate(t.elem):
+        if ft.kind == 'function':           # a method: the class's, checked above, unless the instance holds its own
+            if hasattr(x, '__dict__'):
+                out.append(f'    if {key!r} in {n}.__dict__:\n        return slow({again})')
+            continue
         env[f'type{i}_{k}'] = type(getattr(x, key))
         out.append(f'    f{i}_{k} = getattr({n}, {key!r}, MISSING)\n    if type(f{i}_{k}) is not type{i}_{k}:\n        return slow({again})')
         if ft is T.INT:
@@ -526,10 +596,11 @@ def _make_plan(f, entry, args):
         elif t.kind in ('tuple', 'list'):
             return f._slow_call
         elif t.kind == 'object':
-            if not all(ft.is_number for _, ft in t.elem) or any(y.kind == 'dict' for y in entry.types):   # x, vars(x)
+            if not all(ft.is_number or ft.kind == 'function' for _, ft in t.elem) or any(y.kind == 'dict' for y in entry.types):   # x, vars(x)
                 return f._slow_call
             for k, (key, ft) in enumerate(t.elem):
-                cargs.append(f'f{i}_{k}.item()' if ft.np else f'f{i}_{k}')
+                if ft.kind != 'function':
+                    cargs.append(f'f{i}_{k}.item()' if ft.np else f'f{i}_{k}')
         elif t.kind == 'dict':
             if not all(ft.is_number for _, ft in t.elem):
                 return f._slow_call
@@ -779,14 +850,11 @@ class Function:
         called = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
         g = self._fn.__globals__
         attrs = {}
-        for name, attr, written in _attribute_uses(tree):
-            names, stores = attrs.setdefault(name, (set(), set()))
-            names.add(attr)
-            if written:
-                stores.add(attr)
+        for name, attr, how in _attribute_uses(tree):
+            _add_use(attrs.setdefault(name, (set(), set(), set())), attr, how)
         self._hidden = sorted(n for n in loads - local - called if n in g and (
             _arg_type(g[n]) is not None or type(g[n]) is dict
-            or (n in attrs and type(_object_fields(g[n], sorted(attrs[n][0]), attrs[n][1])) is list)))
+            or (n in attrs and type(_object_fields(g[n], sorted(attrs[n][0]), attrs[n][1], attrs[n][2])) is list)))
         callees = sorted(n for n in called - local if type(g.get(n)) is Function)
         self._hidden += callees + sorted(n for n in called - local if T.is_c_function(g.get(n)))
         self._hidden_from = [(g, n) for n in self._hidden]
@@ -1028,14 +1096,15 @@ class Function:
 
     @staticmethod
     def _object_type(x, attrs, seen):
-        fields = _object_fields(x, *attrs)
+        methods = {}
+        fields = _object_fields(x, *attrs, methods=methods)
         if type(fields) is not list:             # first: asking anything else of x could run its code
             return None
         held = getattr(x, '__dict__', None)      # an instance and its own __dict__ are two names for one thing as well
         ids = [id(x)] if held is None else [id(x), id(held)]
         fresh = not seen.intersection(ids)
         seen.update(ids)
-        return T.object_of(type(x).__qualname__, fields) if fresh else None
+        return T.object_of(type(x).__qualname__, fields, methods) if fresh else None
 
     @staticmethod
     def _dict_type(d, keys):

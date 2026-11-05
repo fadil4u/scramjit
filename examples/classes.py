@@ -1,6 +1,6 @@
-"""A temperature controller as a plain dataclass, with @scram on its method. Each step depends on the one before, so numpy
-can't vectorize it. `self.integral` and `self.previous` stay on the object, between calls as they would in Python, and
-`name` can be anything, since only the attributes the method uses matter to scramjit."""
+"""A temperature controller as a plain dataclass, with @scram on its method, which calls another. Each step depends on
+the one before, so numpy can't vectorize it. `self.integral` and `self.previous` stay on the object, between calls as they
+would in Python, and `name` can be anything, since only the attributes the methods use matter to scramjit."""
 
 import dataclasses
 import time
@@ -22,6 +22,13 @@ class Controller:
     steps: int = 0
     saturated: int = 0
 
+    def limited(self, power):
+        """Power within what the heater gives. A plain method: called from compiled code, it compiles too."""
+        if power > 100.0:
+            self.saturated += 1
+            return 100.0
+        return max(power, 0.0)
+
     @scram
     def run(self, target, temperature, heat_loss):
         """PID control of a room losing heat, one sample of the target per step. Returns the final temperature."""
@@ -30,12 +37,7 @@ class Controller:
             self.integral += error * self.dt
             derivative = (error - self.previous) / self.dt
             self.previous = error
-            power = self.kp * error + self.ki * self.integral + self.kd * derivative
-            if power > 100.0:
-                power = 100.0
-                self.saturated += 1
-            elif power < 0.0:
-                power = 0.0
+            power = self.limited(self.kp * error + self.ki * self.integral + self.kd * derivative)
             temperature += (power - heat_loss * temperature) * self.dt
             self.steps += 1
         return temperature

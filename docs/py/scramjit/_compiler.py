@@ -525,7 +525,7 @@ def flatten_dicts(fdef, arg_types):
         return fdef, arg_types, {}
     tree = copy.deepcopy(fdef)
     taken = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {p.arg for p in params}
-    slots, flat = {}, {}
+    slots, flat, methods = {}, {}, {}
     new_params, new_types = [], []
     for i, (p, t) in enumerate(zip(tree.args.posonlyargs + tree.args.args, arg_types)):
         if t.kind not in ('dict', 'object'):
@@ -538,6 +538,8 @@ def flatten_dicts(fdef, arg_types):
                 name += '_'
             taken.add(name)
             flat[p.arg, key] = name
+            if ft.kind == 'function':           # a method: called as a function, with p's attributes as self
+                methods[p.arg, key] = ft
             slots[name] = (i, key, f'{p.arg}.{key}' if t.kind == 'object' else f'{p.arg}[{key!r}]')
             new_params.append(ast.copy_location(ast.arg(name), p))
             new_types.append(ft)
@@ -549,7 +551,24 @@ def flatten_dicts(fdef, arg_types):
                 return ast.copy_location(ast.Name(flat[n.value.id, n.slice.value], n.ctx), n)
             return self.generic_visit(n)
 
+        def visit_Call(self, n):
+            f = n.func
+            if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and (f.value.id, f.attr) in methods:
+                p = f.value.id
+                t = types_of[p]
+                uses, writes = t.methods[f.attr]
+                fields = [(k, ft) for k, ft in t.elem if ft.kind == 'function' or k in uses]     # only what it uses: the rest may have changed type
+                me = SelfArg([ast.copy_location(ast.Name(flat[p, k], ast.Load()), n) for k, ft in fields if ft.kind != 'function'], ast.Load())
+                me.object_type, me.slots = T.object_of(t.py, fields, t.methods), {k: flat[p, k] for k, ft in fields if ft.kind != 'function'}
+                call = ast.Call(ast.copy_location(ast.Name(flat[p, f.attr], ast.Load()), f), [ast.copy_location(me, n)] + [self.visit(a) for a in n.args],
+                                [self.visit(k) for k in n.keywords])
+                call.sj_writes = {flat[p, k] for k in writes}
+                return ast.copy_location(call, n)
+            return self.generic_visit(n)
+
         def visit_Attribute(self, n):
+            if isinstance(n.value, ast.Name) and (n.value.id, n.attr) in methods:
+                raise Unsupported(n, f'{n.value.id}.{n.attr} is a method, and only calling it compiles')
             if isinstance(n.value, ast.Name) and n.value.id in objects and (n.value.id, n.attr) in flat:
                 if isinstance(n.ctx, ast.Del):
                     raise Unsupported(n, f'del {n.value.id}.{n.attr}')
@@ -565,9 +584,54 @@ def flatten_dicts(fdef, arg_types):
 
     dicts = {p.arg for p, t in zip(params, arg_types) if t.kind == 'dict'}
     objects = {p.arg for p, t in zip(params, arg_types) if t.kind == 'object'}
+    types_of = {p.arg: t for p, t in zip(params, arg_types)}
     tree = Flatten().visit(tree)
+    if methods:
+        tree.body = shown_writes(tree.body)
     tree.args.posonlyargs, tree.args.args = [], new_params
     return tree, new_types, slots
+
+
+class SelfArg(ast.Tuple):
+    """An instance passed as a method's self: its attributes, as the caller's variables (object_type; slots: attribute ->
+    variable). A tuple of names, so whatever looks for reads sees them."""
+
+    def __deepcopy__(self, memo):            # the names are copied; the type, which holds functions, is shared
+        new = SelfArg(copy.deepcopy(self.elts, memo), ast.Load())
+        new.object_type, new.slots = self.object_type, self.slots
+        return ast.copy_location(new, self)
+
+
+STATEMENTS = ('body', 'orelse', 'finalbody', 'handlers')
+
+
+def shown_writes(stmts):
+    """After a statement calling a method that assigns attributes, p__a = p__a for each: the call writes the variables,
+    and this says so to everything that looks for assignments, so nothing takes p.a as unchanged across it."""
+    out = []
+    for s in stmts:
+        for field in STATEMENTS:
+            inner = getattr(s, field, None)
+            if isinstance(inner, list) and inner and isinstance(inner[0], (ast.stmt, ast.excepthandler)):
+                setattr(s, field, shown_writes(inner) if isinstance(inner[0], ast.stmt) else inner)
+        if isinstance(s, ast.Try):
+            for h in s.handlers:
+                h.body = shown_writes(h.body)
+        own = [v for f, v in ast.iter_fields(s) if f not in STATEMENTS]
+        writes, deferred = set(), False
+        for v in own:
+            for n in ast.walk(v) if isinstance(v, ast.AST) else [x for y in (v or []) if isinstance(y, ast.AST) for x in ast.walk(y)]:
+                if isinstance(n, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.Lambda)):
+                    deferred = deferred or any(getattr(m, 'sj_writes', None) for m in ast.walk(n))
+                writes |= getattr(n, 'sj_writes', None) or set()
+        if writes and (deferred or not isinstance(s, (ast.Expr, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Return))):
+            raise Unsupported(s, 'a method that assigns attributes, called in a loop header, a test, a comprehension or a lambda')
+        shown = [ast.copy_location(ast.Assign([ast.Name(w, ast.Store())], ast.Name(w, ast.Load())), s) for w in sorted(writes)]
+        if isinstance(s, ast.Return):     # before it, then: nothing runs after, but the function's exits must write these back
+            out += shown + [s]
+        else:
+            out += [s] + shown
+    return out
 
 
 
@@ -1449,6 +1513,11 @@ class Compiler:
         return r
 
     def typeof(self, e):
+        if isinstance(e, SelfArg):
+            for x, (k, ft) in zip(e.elts, [kt for kt in e.object_type.elem if kt[1].kind != 'function']):
+                if self.typeof(x) is not ft:
+                    self.fail(e, f'{self.shown(x.id)} is {self.typeof(x).name} here, not {ft.name} as at the call')
+            return e.object_type
         if isinstance(e, ast.Constant):
             v = e.value
             if isinstance(v, bool):
@@ -1862,7 +1931,8 @@ class Compiler:
         for x, t in zip(nodes, ts):
             if T.is_pylist(t):
                 self.fail(e, f'passes a list of lists to {e.func.id}()')
-            if not (t.is_number or t.kind in ('array', 'enum') or (t.kind == 'tuple' and T.is_number_tree(t) and all(et.np != 'dyn' for et in T.leaves(t)))):
+            if not (t.is_number or t.kind in ('array', 'enum') or (t.kind == 'object' and isinstance(x, SelfArg))
+                    or (t.kind == 'tuple' and T.is_number_tree(t) and all(et.np != 'dyn' for et in T.leaves(t)))):
                 self.fail(e, f'passes {t.name} to {e.func.id}()')
         types = [ts[k] for k in picked]
         for h in spec.hidden:
@@ -1911,17 +1981,27 @@ class Compiler:
         self.uses_stop = self.uses_stop or c.uses_stop
         spec = c.spec
         nodes, picked = self.call_args(e, spec, self.callee_of(e))
-        done = []
-        for x in nodes:
+        done, me = [], None
+
+        def value(x):
             t = self.typeof(x)
             if t.kind == 'array':
-                done.append((t, self.materialize(x)))
-            elif t.kind == 'tuple':
-                done.append((t, self.texpr(x)))
+                return t, self.materialize(x)
+            if t.kind == 'tuple':
+                return t, self.texpr(x)
+            v = self.expr(x)
+            return t, (self.hold(v[0], t), self.hold_flag(v[1]))
+        for x in nodes:
+            if isinstance(x, SelfArg):            # self: each of its attributes, as the method's parameters
+                self.typeof(x)
+                me = x
+                done.append(('self', [value(y) for y in x.elts]))
             else:
-                v = self.expr(x)
-                done.append((t, (self.hold(v[0], t), self.hold_flag(v[1]))))
-        chosen = [done[k] for k in picked] + [(self.env[self.hidden_param(h)], self.hidden_param(h)) for h in spec.hidden]
+                done.append(value(x))
+        chosen = []
+        for k in picked:
+            chosen += done[k][1] if done[k][0] == 'self' else [done[k]]
+        chosen += [(self.env[self.hidden_param(h)], self.hidden_param(h)) for h in spec.hidden]
         cargs, arrays = [], []
         for t, v in chosen:
             if t.kind in ('function', 'enumclass'):
@@ -1948,9 +2028,27 @@ class Compiler:
         io, st = self.temp(), self.temp()
         self.emit(f'int64_t {io}[{c.record_slot(len(ret_arrays(c.ret)))}];')
         self.emit(f'int {st} = {c.cname}({", ".join(cargs + ["sj_tb", io])});')
+        if me is not None:
+            self.take_writes(e, me, c, io)
         self.emit(f'if ({st}) {{ sj_tb[++sj_tb[0]] = ((int64_t){c.frame} << 32) | {io}[1]; sj_io[0] = {io}[0]; sj_io[4] = {io}[4]; '
                   f'SJ_FAIL({st}, {self.line(e)}, {io}[2], {io}[3]); }}')
         return c, io, arrays
+
+    def take_writes(self, e, me, c, io):
+        """What a method assigned to self, into the caller's variables, before anything else: an exception it raised
+        comes after its writes, as in Python."""
+        for n, (flat, i, key) in enumerate(c.outs):
+            if i != 0:
+                continue
+            mine = me.slots[key]
+            t, theirs = self.env[mine], c.env[flat]
+            if t is not theirs or t.np == 'dyn':
+                self.fail(e, f'the method makes {self.shown(mine)} {theirs.name}, and here it is {t.name}')
+            at = c.out_slot(n)
+            if t.kind == 'float':
+                self.emit(f'memcpy(&v_{mine}, &{io}[{at}], 8);')
+            else:
+                self.emit(f'v_{mine} = ({t.ctype}){io}[{at}];')
 
     def call_number(self, e):
         c, io, _ = self.emit_call(e)

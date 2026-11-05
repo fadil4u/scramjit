@@ -9,7 +9,7 @@ import struct
 
 
 class Type:
-    __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable', 'ndim', 'strided', 'py')
+    __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable', 'ndim', 'strided', 'py', 'methods')
 
     def __init__(self, name, ctype, kind, np=False, elem=None, writable=True):
         self.name = name          # how signatures print it
@@ -21,6 +21,7 @@ class Type:
         self.ndim = 0             # arrays: dimensions
         self.strided = False      # arrays: a view whose elements aren't next to each other
         self.py = None            # a narrow-or-literal variable: the kind of its Python number, when it isn't the narrow one's
+        self.methods = None       # instances: method name -> (the attributes a call of it uses, those it assigns), through what it calls too
 
     def __repr__(self):
         return self.name
@@ -233,12 +234,17 @@ def dict_of(fields):
     return _DICTS[key]
 
 
-def object_of(name, fields):
-    """An instance, by the attributes a function uses [(attribute, type)]: in C, one variable per attribute."""
-    full = name + '(' + ', '.join(f'{k}: {t.name}' for k, t in fields) + ')'
-    if full not in _OBJECTS:
-        _OBJECTS[full] = Type(full, None, 'object', elem=list(fields))
-    return _OBJECTS[full]
+def object_of(name, fields, methods=None):
+    """An instance, by the attributes a function uses [(attribute, type)]: in C, one variable per attribute. A method it
+    calls is an attribute of a function's type, which is that function's own, and methods says what each call uses and assigns."""
+    key = (name, tuple((k, t.name if t.kind != 'function' else id(t)) for k, t in fields),
+           tuple(sorted((m, tuple(sorted(u)), tuple(sorted(w))) for m, (u, w) in (methods or {}).items())))
+    if key not in _OBJECTS:
+        shown = ', '.join(f'{k}()' if t.kind == 'function' else f'{k}: {t.name}' for k, t in fields)
+        t = _OBJECTS[key] = Type(f'{name}({shown})', None, 'object', elem=list(fields))
+        t.methods = {m: (frozenset(u), frozenset(w)) for m, (u, w) in (methods or {}).items()}
+        t.py = name                         # the class's name
+    return _OBJECTS[key]
 
 
 def leaves(t):

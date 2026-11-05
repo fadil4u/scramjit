@@ -372,7 +372,7 @@ def test_plain_instances(f, make, compiled):
     (writes_a, lambda: [Logged()], False),                          # and must run for a write
     (only_a, lambda: [Lazy()], False),                              # __getattr__
     (only_a, lambda: [Prop()], False),
-    (calls_method, lambda: [Method()], False),
+    (calls_method, lambda: [Method()], True),                      # a plain method (test_methods.py)
     (only_a, lambda: [HasDescriptor()], False),                     # a data descriptor beats the instance's dict
     (nested, lambda: [Plain(inner=Plain(a=1.0))], False),
     (only_a, lambda: [3.5 + 1j], False),
@@ -572,7 +572,7 @@ class Particle:
 
     @scram(cache=False)
     def calls_python(self):
-        return self.describe()
+        return str(self.describe())
 
     def describe(self):
         return self.x
@@ -586,7 +586,7 @@ def test_methods():
     assert Particle.advance(p, 0.5, 1) == 6.0
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', FallbackWarning)
-        assert p.calls_python() == 6.0
+        assert p.calls_python() == '6.0'
     assert not Particle.calls_python.signatures
 
 

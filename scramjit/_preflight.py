@@ -107,6 +107,10 @@ def module_globals(tree):
     """What compiling needs from a module, without running it: math, and which names are taken."""
     out = {}
     for s in tree.body:
+        if isinstance(s, ast.ClassDef):
+            for d in s.body:
+                if isinstance(d, ast.FunctionDef):
+                    d.sj_class = s           # self.m() in it can be found in the class
         if isinstance(s, ast.Import):
             for a in s.names:
                 out[(a.asname or a.name).split('.')[0]] = math if a.name == 'math' else StaticNumpy() if a.name == 'numpy' else _OTHER
@@ -277,7 +281,41 @@ def assumed_signature(fdef, globals_=None, seen=()):
             sig.append(T.INT)
         else:
             sig.append(T.FLOAT)
+    cls = getattr(fdef, 'sj_class', None)
+    if cls is not None and params:
+        me = params[0].arg
+        calls = {n.func.attr for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and isinstance(n.func.value, ast.Name) and n.func.value.id == me}
+        if calls:
+            t = _static_self(fdef, cls, sig[0], calls, globals_, seen)
+            if t is not None:
+                sig[0] = t
     return sig
+
+
+def _static_self(fdef, cls, own, calls, globals_, seen):
+    """self, in a method that calls the class's other methods: what they use too, and each of them, as a call would find
+    them on the class statement. None if one isn't a plain method there."""
+    defs = {s.name: s for s in cls.body if isinstance(s, ast.FunctionDef)}
+    fields = dict(own.elem) if own.kind == 'object' else {}
+    methods = dict(own.methods or {}) if own.kind == 'object' else {}
+    for m in sorted(calls):
+        d = defs.get(m)
+        if d is None or d is fdef or d in seen or any(isinstance(x, ast.Name) and x.id in ('staticmethod', 'classmethod', 'property') for x in d.decorator_list):
+            return None
+        sig = assumed_signature(d, globals_, seen + (fdef,))
+        mt = sig[0] if sig else None
+        inner = list(mt.elem) if mt is not None and mt.kind == 'object' else []
+        for k, ft in inner:
+            fields.setdefault(k, ft)
+        mine = d.args.posonlyargs + d.args.args
+        stores = {n.attr for n in ast.walk(d) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and mine
+                  and n.value.id == mine[0].arg and not isinstance(n.ctx, ast.Load)}
+        nested = (mt.methods or {}) if inner else {}
+        methods.update(nested)
+        methods[m] = ({k for k, ft in inner if ft.kind != 'function'}, stores.union(*(w for _, w in nested.values())))
+        fields[m] = T.function_of(StaticCallee(d, globals_))
+    return T.object_of(cls.name, sorted(fields.items(), key=lambda kv: kv[0]), methods)
 
 
 def _assumed_ints(fdef):

@@ -12,7 +12,7 @@ At a glance:
 | Lists | lists of numbers made in the function, passed in, returned, and at module level (from 0.0.4) | `append` and every method that resizes, `in`, slices, aliases (`ys = xs`), mixed ints and floats |
 | Lists of lists | rectangular, passed in, made in the function and returned (from 0.0.4) | ragged, one row in two places, `m[i, j]`, slices, replacing a row, three levels made in the function |
 | Dicts | passed in, reading and writing the keys the function names | building one, adding or deleting keys, `len`, `in`, `.get`, iterating, a key in a variable |
-| Instances (from 0.0.4) | passed in or at module level, `@scram` methods, reading and writing the attributes the function names: plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | calling methods, properties, an object in an attribute, making an instance, adding an attribute |
+| Instances (from 0.0.4) | passed in or at module level, `@scram` methods, reading and writing the attributes the function names, calling their methods: plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | properties, static and class methods, an object in an attribute, making an instance, adding an attribute |
 | Enums | `Enum` and `IntEnum` members with int values | `.name`, `Cell(1)`, iterating the class, `Flag` and string enums |
 | Module-level constants | numbers, tuples, arrays, dicts, lists, enum classes, instances (from 0.0.4) | strings, `None`, assigning with `global` |
 | Sets, strings | | all of them |
@@ -389,7 +389,7 @@ And each of these keeps the function, or the loop it's in, in Python: adding or 
 
 ## Instances (from 0.0.4)
 
-An object **passed in** compiles when the function only reads and writes attributes it names. So does `self`, with `@scram` on a method. Nothing about the class has to change:
+An object **passed in** compiles when the function only reads and writes attributes it names, and calls its methods. So does `self`, with `@scram` on a method. Nothing about the class has to change:
 
 ```python
 import dataclasses
@@ -492,7 +492,8 @@ scramjit looks the attributes up as Python would, **at every call**, and compile
 | `namedtuple`, `typing.NamedTuple` | compiles | Python, which raises |
 | `@dataclass(frozen=True)` | compiles | Python, which raises |
 | A class with `__setattr__` | compiles | Python, which calls it |
-| `@property` and other descriptors, methods | Python | Python |
+| `@property`, `@staticmethod`, `@classmethod` and other descriptors | Python | Python |
+| A method, read without calling it (`f = p.norm`) | Python | |
 | A class with `__getattribute__` or `__getattr__` | Python | Python |
 | An attribute that isn't there | Python, which raises `AttributeError` | Python, which adds it |
 
@@ -502,9 +503,134 @@ Attributes can hold numbers, numpy arrays and scalars, tuples of numbers and enu
 
 An instance at module level works the same way, read at each call, like [other constants](#constants-at-module-level).
 
+### Methods
+
+A compiled function can call the object's methods, whether they're plain functions on the class or `@scram` ones, and they can call each other:
+
+```python
+import dataclasses
+
+@dataclasses.dataclass
+class Body:
+    x: float
+    v: float
+    k: float
+
+    def force(self):
+        return -self.k * self.x
+
+    def step(self, dt):
+        self.v += self.force() * dt
+        self.x += self.v * dt
+
+@scram
+def simulate(b, n, dt):
+    for _ in range(n):
+        b.step(dt)
+    return b.x
+```
+<!-- c: simulate(Body(1.0, 0.0, 1.0), 10, 0.01) -->
+```c-generated
+static int sj_call_0(double v_self__k, double v_self__x, int64_t *sj_tb, int64_t *sj_io) {
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    double t1 = (-(v_self__k));
+    double t2 = v_self__x;
+    { double t3 = (t1 * t2); memcpy(&sj_io[0], &t3, 8); }
+    goto sj_done;
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+
+static int sj_call_1(double v_self__k, double v_self__v, double v_self__x, double v_dt, int64_t *sj_tb, int64_t *sj_io) {
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    double t1 = v_self__v;
+    double t2 = v_self__k;
+    double t3 = v_self__x;
+    int64_t t4[5];
+    int t5 = sj_call_0(t2, t3, sj_tb, t4);
+    if (t5) { sj_tb[++sj_tb[0]] = ((int64_t)0 << 32) | t4[1]; sj_io[0] = t4[0]; sj_io[4] = t4[4]; SJ_FAIL(t5, 2, t4[2], t4[3]); }
+    double t6_d; memcpy(&t6_d, &t4[0], 8); double t6 = (double)t6_d;
+    double t7 = t6;
+    double t8 = t7;
+    double t9 = v_dt;
+    double t10 = (t8 * t9);
+    double t11 = t10;
+    v_self__v = (t1 + t11);
+    double t12 = v_self__x;
+    double t13 = v_self__v;
+    double t14 = v_dt;
+    double t15 = (t13 * t14);
+    v_self__x = (t12 + t15);
+sj_done:
+    memcpy(&sj_io[5], &v_self__v, 8);
+    sj_io[6] = 0;
+    memcpy(&sj_io[7], &v_self__x, 8);
+    sj_io[8] = 0;
+    return 0;
+sj_fail:
+    memcpy(&sj_io[5], &v_self__v, 8);
+    sj_io[6] = 0;
+    memcpy(&sj_io[7], &v_self__x, 8);
+    sj_io[8] = 0;
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+
+int sj_kernel(double v_b__k, double v_b__v, double v_b__x, int64_t v_n, double v_dt, volatile int *sj_stop, int64_t *sj_io) {
+    *sj_stop = 0;
+    int64_t *sj_tb = sj_io + 9; sj_tb[0] = 0;
+    int64_t v__ = 0;
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    int64_t t1 = 0LL, t2 = v_n;
+    int64_t t3 = t1, t4 = t2;
+    for (;;) {
+        int64_t t5 = t4 > t3 && (uint64_t)t4 - (uint64_t)t3 > 65536 ? t3 + 65536 : t4;
+        for (; t3 < t5; t3++) {
+            v__ = t3;
+            double t6 = v_b__k;
+            double t7 = v_b__v;
+            double t8 = v_b__x;
+            double t9 = v_dt;
+            int64_t t10[9];
+            int t11 = sj_call_1(t6, t7, t8, t9, sj_tb, t10);
+            memcpy(&v_b__v, &t10[5], 8);
+            memcpy(&v_b__x, &t10[7], 8);
+            if (t11) { sj_tb[++sj_tb[0]] = ((int64_t)1 << 32) | t10[1]; sj_io[0] = t10[0]; sj_io[4] = t10[4]; SJ_FAIL(t11, 4, t10[2], t10[3]); }
+            v_b__v = v_b__v;
+            v_b__x = v_b__x;
+        }
+        if (t3 >= t4) break;
+        if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+    }
+    { double t12 = v_b__x; memcpy(&sj_io[0], &t12, 8); }
+    goto sj_done;
+sj_done:
+    memcpy(&sj_io[5], &v_b__v, 8);
+    sj_io[6] = 0;
+    memcpy(&sj_io[7], &v_b__x, 8);
+    sj_io[8] = 0;
+    return 0;
+sj_fail:
+    memcpy(&sj_io[5], &v_b__v, 8);
+    sj_io[6] = 0;
+    memcpy(&sj_io[7], &v_b__x, 8);
+    sj_io[8] = 0;
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+```
+
+Each method compiles as a [call between functions](loops-and-builtins.md#calls-between-functions), with the attributes it uses, through the methods it calls too, as `self`. What it assigns comes back into the caller before anything else happens, so a method that raises leaves what it stored before, as in Python. Which method runs is decided as Python would decide it, at each call: a subclass's method, or one put on the class later, is the one that runs. One the instance holds itself (`p.step = ...`) runs as Python.
+
+A call to a method costs about 5 ns more than the same code written in the loop, since cimo doesn't yet keep a call's results in registers once it inlines it. That's 15 ns a step against 8.5 for the loop above, or 128 ns as Python.
+
+A method that assigns attributes must be called in a plain statement, such as `b.step(dt)`, `y = b.step(dt)`, `s += b.f()` or `return b.f()`, and not in an `if` or `while` test, a loop header, a comprehension or a lambda. One that only reads can be called anywhere. Keyword-only parameters, recursion, a method that reads a module-level value, and one that changes an attribute's type run as Python.
+
 Stays Python, for now:
 
-- calling a method, `p.norm()`, inside a compiled function; `@scram` on the method being called from Python is fine
 - an object in an attribute (`p.pos.x`), or a list in one
 - using the object any other way: passing `p` to a function, `q = p`, `hasattr(p, 'x')`, `isinstance`
 - making an instance in the function, or a list of instances

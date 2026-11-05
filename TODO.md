@@ -60,8 +60,10 @@ Replace it with one model in which composition is free.
 
 **Speed, measured 2026-11-05 through cimo** (spring step, ns per step, arm64): locals 5.2; a struct pointer 6.1; a `restrict` pointer
 6.1; writes through one pointer and reads through another 11.6 against 6.4 for the same arithmetic in locals; `restrict` on both 11.6.
-cimo honours `restrict` for dependences, not for keeping fields in registers (no LICM scalar promotion; its `TODO.md`, "Keep struct
-fields in registers across a loop"). The model above avoids depending on that: static paths are locals, so only the pool indirection
+cimo keeps fields in registers through a loop now (cimo 2026-11-05, `Fast.find_promoted`): a field read and written at a fixed
+address that nothing else in the loop can touch is loaded before the loop and stored after it, and a field only read is hoisted.
+Through one pointer that needs no `restrict` (the same loop as locals: 7.61 to 6.37 ns against 6.60 for locals, laptop on mains);
+through two pointers it needs `restrict` on both, which says the structs are distinct. The model above avoids depending on that: static paths are locals, so only the pool indirection
 for data-chosen objects costs anything, and that is a gather C would do too. Also worth asking cimo for: struct-path alias analysis
 (`a->vx` and `b->x` can't overlap whether or not `a == b`), which `check_shared` does by hand today. A called `@scram` function's `int64_t io[]`
 of results is registers after inlining now (cimo 2026-11-05: SROA follows the callee's copied pointer); a plain call

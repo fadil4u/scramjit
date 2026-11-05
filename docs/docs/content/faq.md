@@ -26,7 +26,7 @@ No. Decorated functions are ordinary Python and run unchanged without scramjit. 
 
 ## What does it not compile?
 
-Anything that needs Python objects at runtime: arbitrary objects, method calls, strings, sets, growable lists, and dicts that gain keys. That code runs as Python, and the loops around it still compile. [Dicts with fixed keys](data-structures.md#dicts) do compile, and from 0.0.4 so do [the attributes of an instance](data-structures.md#instances-from-004). See [Fallback and errors](errors.md).
+Anything that needs Python objects at runtime: objects whose classes run code of their own on attribute access (properties, `__getattr__`), strings, sets, growable lists, and dicts that gain keys. That code runs as Python, and the loops around it still compile. [Dicts with fixed keys](data-structures.md#dicts) do compile, and from 0.0.4 so do [the attributes of an instance](data-structures.md#instances-from-004). See [Fallback and errors](errors.md).
 
 ## Will it vectorize my loop?
 

@@ -302,10 +302,13 @@ Spills per line, once cimo can report them.
      arguments (each call takes the general path).
    - **Instances: attributes and method calls built, from 0.0.4** (see "Instances" in `data-structures.md`), passed in, as `self` and at module level. A method is a callee with the
      attributes it uses as self, its writes copied back before its status is checked; `p__a = p__a` after the statement shows the write to every analysis. Lists of instances (a list of
-     numbers per attribute), passing an instance or an element on, methods reading globals, and parameters never used, built too. Not yet, in this order: an object in an attribute
-     (`p.pos.x`, where two can share one), an instance made in the function, `q = p`, returning an instance or an element, keyword-only parameters, a writing call in a test or
-     comprehension, enumerate() of a list of instances in a comprehension. A list's copy is about 0.15 µs per instance and attribute, checked and built in Python twice (`_key`, `_run`):
-     once would halve it. Static preflight finds a parameter's class by its methods, when one class in the module has them all. A call plan for an array among the attributes: about 12 µs per call now, against 2 for numbers and 2.8 for the array passed separately.
+     numbers per attribute), passing an instance or an element on, methods reading globals, parameters never used, objects in attributes (`p.pos.x`), instances made in the
+     function (`v = Vec(x, y)`, `_init_recipe`), `q = p`, returning an instance, an element or an inner object, `isinstance`, keyword-only parameters, a writing call in a test, and
+     `enumerate()` in a comprehension, built too. Not yet: an object in an attribute of a list's elements or of an instance made here, passing an inner object on (`f(b.pos)`), a
+     function making instances called from compiled code (its class's type is made for its own tree only), a writing method in a comprehension, `hasattr`/`getattr`/`vars`. A method
+     writing into an inner object marks all of that object's numbers written (they go back unchanged). A list's copy is about 0.15 µs per instance and attribute, checked and
+     built in Python twice (`_key`, `_run`): once would halve it. Static preflight finds a parameter's class by its methods, when one class in the module has them all, and
+     follows made instances and inner objects from the class statements. A call plan for an array among the attributes: about 12 µs per call now, against 2 for numbers and 2.8 for the array passed separately.
    - **Dicts, what's left:** a dict passed in compiles (see "Containers"). Not yet: nested dicts, a dict built in the function, returning
      one, `len(p)` and `'a' in p`, which are known from the keys. A function that could add a key still runs as Python.
 

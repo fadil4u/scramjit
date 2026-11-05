@@ -103,11 +103,13 @@ def test_an_array_default_left_out_by_compiled_code_says_so():
     assert any('whose default is a ndarray' in str(m.message) for m in w), [str(m.message) for m in w]
 
 
-def test_keyword_only_stays_python():
+def test_keyword_only_compiles():
     def f(x, *, k=2):
         return x * k
     g = scram(cache=False)(f)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter('always')
         assert g(3) == 6 and g(3, k=4) == 12
-    assert not g.signatures
+    assert g.signatures
+    with pytest.raises(TypeError):
+        g(3, 4)

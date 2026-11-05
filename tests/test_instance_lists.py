@@ -170,7 +170,7 @@ def nothing(ps):
     (by_index, lambda: [[]], False),
     (by_index, lambda: [ps(3) + [Slots(1.0)]], False),   # two classes
     (by_index, lambda: [[P(1), P(2.0)]], False),         # an int and a float
-    (returns_element, lambda: [ps()], False),
+    (returns_element, lambda: [ps()], True),               # the element itself (test_instance_returns.py)
     (passes_list, lambda: [ps()], False),
     (appends, lambda: [ps()], False),
     (nothing, lambda: [ps()], False),
@@ -225,8 +225,8 @@ def test_writes_before_an_exception_and_the_traceback():
 def test_reasons():
     with pytest.raises(CompileError, match='only len'):
         scram(cache=False, fallback=False)(passes_list)(ps())
-    with pytest.raises(CompileError, match='used as a list'):
-        scram(cache=False, fallback=False)(returns_element)(ps())
+    with pytest.raises(CompileError, match='never reads'):
+        scram(cache=False, fallback=False)(appends)(ps())
 
 
 def test_list_and_dict_in_one_call():
@@ -237,3 +237,11 @@ def test_list_and_dict_in_one_call():
     g = scram(cache=False)(f)
     g({'a': 1.0, 'b': 2.0}, xs, lst)
     assert xs == [3.0, 2.0] and lst[0].x == 3.0 and g.signatures
+
+
+def enumerate_in_comprehension(ps):
+    return sum((i * p.x for i, p in enumerate(ps)), 0.0) + sum((i * p.x for i, p in enumerate(ps, 2) if i > 2), 0.0)
+
+
+def test_enumerate_in_a_comprehension():
+    same(enumerate_in_comprehension, lambda: [ps()], True)

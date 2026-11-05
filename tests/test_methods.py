@@ -172,6 +172,23 @@ def writes_in_while_test(p):
     return k
 
 
+def writes_in_if_test(p, k):
+    s = 0
+    for _ in range(k):
+        if p.get_and_inc() > 4:
+            s += p.n
+        else:
+            s -= p.n
+    return s
+
+
+def writes_in_for_header(p):
+    s = 0.0
+    for i in range(p.get_and_inc()):
+        s += p.n * i
+    return s + p.n
+
+
 def writes_in_comprehension(p):
     return sum([p.get_and_inc() for _ in range(3)], 0)
 
@@ -227,8 +244,10 @@ def passes_other(a, b):
     (changes_type, lambda: [V(1.0, 2.0)], False),
     (recursive, lambda: [V(1.0, 2.0)], False),
     (in_while_test, lambda: [V(1.0, 2.0)], True),
-    (writes_in_while_test, lambda: [V(3.0, 2.0)], False),
+    (writes_in_while_test, lambda: [V(3.0, 2.0)], True),
     (writes_in_comprehension, lambda: [V(3.0, 2.0)], False),
+    (writes_in_if_test, lambda: [V(3.0, 2.0), 6], True),
+    (writes_in_for_header, lambda: [V(3.0, 2.0, 2)], True),
     (static, lambda: [V(1.0, 2.0)], False),
     (classmethod_, lambda: [V(1.0, 2.0)], False),
     (prop, lambda: [V(1.0, 2.0)], False),
@@ -324,8 +343,6 @@ def test_reasons():
         scram(cache=False, fallback=False)(static)(V(1.0, 2.0))
     with pytest.raises(CompileError, match='V.norm2 is a method'):
         scram(cache=False, fallback=False)(bound)(V(1.0, 2.0))
-    with pytest.raises(CompileError, match='a test'):
-        scram(cache=False, fallback=False)(writes_in_while_test)(V(3.0, 2.0))
     with pytest.raises(CompileError, match='an int at some times and a float'):
         scram(cache=False, fallback=False)(changes_type)(V(1.0, 2.0))
 
@@ -387,3 +404,34 @@ def test_methods_reading_globals():
     xs, ys = [Spring(1.0), Spring(0.5)], [Spring(1.0), Spring(0.5)]
     assert run_spring_list(xs, 0.01, 50) == run_spring_list.__wrapped__(ys, 0.01, 50) and xs == ys and run_spring_list.signatures
     SPRING_K = 4.0
+
+
+@dataclasses.dataclass
+class Damped:
+    x: float
+    v: float = 0.0
+
+    def step(self, dt, *, k=1.0, damping=0.0):
+        self.v += (-k * self.x - damping * self.v) * dt
+        self.x += self.v * dt
+
+
+@scram(cache=False)
+def kw_scaled(x, *, k=2.0, add=0):
+    return x * k + add
+
+
+def uses_keyword_only(p, n):
+    s = 0.0
+    for _ in range(n):
+        p.step(0.1, damping=0.5)
+        p.step(0.1, k=2.0)
+        s += kw_scaled(p.x) + kw_scaled(p.x, add=1) + kw_scaled(p.x, k=0.5)
+    return s
+
+
+def test_keyword_only_parameters():
+    same(uses_keyword_only, lambda: [Damped(1.0), 10], True)
+    assert kw_scaled(3.0) == 6.0 and kw_scaled(3.0, add=1, k=1.0) == 4.0 and kw_scaled.signatures
+    with pytest.raises(TypeError):
+        kw_scaled(3.0, 2.0)

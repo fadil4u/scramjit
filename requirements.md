@@ -203,6 +203,13 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   what it passes it to), narrowed at compile time. Two elements of one list may be one instance, so a call given two compiles only if what it assigns
   through one it doesn't use through the other. Only real assignments count there: the `p__a = p__a` markers say a call may write, not that it does.
   A method's globals join the caller's when a call's types name the method (`_add_method_globals`), so the caller's globals can grow after its first call.
+- **Making instances, inner objects, the rest (built 2026-11-05, from 0.0.4).** `v = C(...)` compiles when C's construction only stores: a
+  dataclass's own `__init__` (recognized by its code having no file), an `__init__` of `self.a = expression of its parameters`, or none; and
+  `type.__call__`, `object.__new__`, default lookups. The class is a hidden argument (`madeclass`), checked like an instance's class by a plan. `v`'s
+  attributes are variables assigned in `__init__`'s order; a returned `v` is `cls.__new__(cls)` given them in that order with `object.__setattr__`,
+  which is what the dict order and a frozen dataclass need. Inner objects are owners of their own (`'p.pos'`), flattened breadth first; one object
+  reachable two ways runs as Python. `isinstance` folds from the class in the signature. Keyword-only parameters are compiled as parameters
+  after the others, the Python fallback getting them back by keyword.
 - **numpy on single numbers (built 2026-11-02).** 25 of 26 functions matched libm bit for bit on 160,024 inputs on arm64 and in Pyodide, so they
   call it; `np.tanh` doesn't, natively. Types are the trap: `np.abs(4)` is int64 natively and int32 in Pyodide, `np.floor(4)` changed in numpy 2.1,
   `np.sqrt(True)` is float16, so those stay Python. `np.minimum(0.0, -0.0)` differs by platform, so the compiler asks the numpy present.

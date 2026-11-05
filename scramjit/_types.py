@@ -9,7 +9,7 @@ import struct
 
 
 class Type:
-    __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable', 'ndim', 'strided', 'py', 'methods', 'cls', 'writes')
+    __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable', 'ndim', 'strided', 'py', 'methods', 'cls', 'writes', 'recipe')
 
     def __init__(self, name, ctype, kind, np=False, elem=None, writable=True):
         self.name = name          # how signatures print it
@@ -24,6 +24,7 @@ class Type:
         self.methods = None       # instances: method name -> (the attributes a call of it uses, those it assigns), through what it calls too
         self.cls = None           # instances: the class
         self.writes = frozenset() # instances: every attribute anything given it may assign
+        self.recipe = None        # a class instances are made of in the function: how its __init__ assigns (see madeclass_of)
 
     def __repr__(self):
         return self.name
@@ -210,6 +211,30 @@ def enum_class_of(cls):
     if key not in _ENUMS:
         _ENUMS[key] = Type(f'enum {cls.__name__}', None, 'enumclass', elem=cls)
     return _ENUMS[key]
+
+
+def classref_of(cls):
+    """A class a global names, other than an enum: for isinstance(). No C value; a new class is a new signature."""
+    key = ('ref', cls)
+    if key not in _ENUMS:
+        _ENUMS[key] = Type(f'class {cls.__qualname__}', None, 'classref', elem=cls)
+    return _ENUMS[key]
+
+
+_MADE = {}
+
+
+def madeclass_of(cls, recipe, methods, writes, method_fields):
+    """A class the function makes instances of, as a global names it. recipe: {'params': [(name, default or None,
+    keyword-only)], 'assigns': [(attribute, ('param', name) | ('const', value) | ('expr', ast))], 'post_init': bool}.
+    methods, writes, method_fields: as for an instance's type. No C value; a new class is a new signature."""
+    key = (cls, tuple(sorted((m, tuple(sorted(u)), tuple(sorted(w))) for m, (u, w) in methods.items())), tuple(sorted(writes)),
+           tuple((m, id(ft)) for m, ft in method_fields))
+    if key not in _MADE:
+        t = _MADE[key] = Type(f'class {cls.__qualname__}', None, 'madeclass', elem=cls)
+        t.recipe, t.methods, t.writes, t.cls, t.py = recipe, dict(methods), frozenset(writes), cls, cls.__qualname__
+        t.recipe['methods'] = list(method_fields)
+    return _MADE[key]
 
 
 def enum_member_of(cls):

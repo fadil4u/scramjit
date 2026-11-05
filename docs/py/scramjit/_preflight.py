@@ -346,7 +346,82 @@ def assumed_signature(fdef, globals_=None, seen=()):
         t = _static_self(fdef, cls, t if t.kind == 'object' else T.object_of('object', []), calls, globals_, seen)
         if t is not None:
             sig[i] = T.objlist_of(t) if sig[i].kind == 'objlist' or p.arg in lists else t
+    classes = {c.name: c for c in (globals_ or {}).get(CLASSES, [])}
+    made = {n.targets[0].id: classes[n.value.func.id] for n in ast.walk(fdef) if isinstance(n, ast.Assign) and len(n.targets) == 1
+            and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and n.value.func.id in classes}
+    index = {p.arg: k for k, p in enumerate(params)}
+    for n in ast.walk(fdef):             # a parameter passed to a method of an instance made here or of a known class
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)):
+            continue
+        owner = n.func.value.id
+        cls = made.get(owner)
+        if cls is None and owner in index and sig[index[owner]].kind == 'object' and sig[index[owner]].cls is not None:
+            cls = next((c for c in classes.values() if c.name == sig[index[owner]].py), None)
+        d = next((x for x in cls.body if isinstance(x, ast.FunctionDef) and x.name == n.func.attr), None) if cls is not None else None
+        if d is None or d is fdef or d in seen:
+            continue
+        csig = assumed_signature(d, globals_, seen + (fdef,))
+        for pos, a in enumerate(n.args):
+            if isinstance(a, ast.Name) and a.id in index and pos + 1 < len(csig) and csig[pos + 1].kind == 'object':
+                k = index[a.id]
+                sig[k] = _merge_static(sig[k] if sig[k].kind == 'object' else None, csig[pos + 1])
+    for i, p in enumerate(params):        # p.a.b, p.a.m(), p.a passed to a method: a is an object of its own
+        if sig[i].kind == 'object':
+            inner = _static_inner(fdef, p.arg, sig, params, globals_, seen)
+            if inner:
+                fields = dict(sig[i].elem)
+                for k, t in inner.items():
+                    fields[k] = _merge_static(fields.get(k), t)
+                sig[i] = T.object_of(sig[i].py or 'object', sorted(fields.items()), sig[i].methods, sig[i].cls, sig[i].writes)
     return sig
+
+
+def _merge_static(a, b):
+    """Two assumed object types as one: their attributes and methods together."""
+    if a is None or a.kind != 'object':
+        return b
+    if b is None or b.kind != 'object':
+        return a
+    fields = dict(a.elem)
+    for k, t in b.elem:
+        fields[k] = _merge_static(fields.get(k), t) if t.kind == 'object' else fields.get(k, t)
+    methods = dict(a.methods or {})
+    methods.update(b.methods or {})
+    return T.object_of(a.py if a.py != 'object' else b.py or 'object', sorted(fields.items()), methods, a.cls or b.cls, a.writes | b.writes)
+
+
+def _static_inner(fdef, me, sig, params, globals_, seen):
+    """{attribute: object type} for the attributes of parameter me used as objects: their attributes read, their methods
+    called (from the one class in the module with them all), and what a method they're passed to uses of them."""
+    reads, calls, passed = {}, {}, {}
+    called = {id(n.func) for n in ast.walk(fdef) if isinstance(n, ast.Call)}
+    for n in ast.walk(fdef):
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Attribute) and isinstance(n.value.value, ast.Name) and n.value.value.id == me:
+            (calls if id(n) in called else reads).setdefault(n.value.attr, set()).add(n.attr)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+            for pos, a in enumerate(n.args):
+                if isinstance(a, ast.Attribute) and isinstance(a.value, ast.Name) and a.value.id == me:
+                    passed.setdefault(a.attr, []).append((n, pos))
+    out = {}
+    index = {p.arg: k for k, p in enumerate(params)}
+    for a in set(reads) | set(calls) | set(passed):
+        fields = {b: T.FLOAT for b in reads.get(a, ())}
+        for call, pos in passed.get(a, ()):      # x.m(p.a): what m makes of its parameter there
+            owner = call.func.value.id if isinstance(call.func.value, ast.Name) else None
+            t = sig[index[owner]] if owner in index else None
+            fn = dict(t.elem).get(call.func.attr) if t is not None and t.kind == 'object' else None
+            callee = fn.elem if fn is not None and fn.kind == 'function' else None
+            if callee is not None and hasattr(callee, 'fdef'):
+                csig = assumed_signature(callee.fdef, globals_, seen + (fdef,))
+                if pos + 1 < len(csig) and csig[pos + 1].kind == 'object':
+                    fields.update(csig[pos + 1].elem)
+        t = T.object_of('object', sorted(fields.items()))
+        if calls.get(a):
+            found = [c for c in (globals_ or {}).get(CLASSES, []) if calls[a] <= {d.name for d in c.body if isinstance(d, ast.FunctionDef)}]
+            if len(found) == 1:
+                t = _static_self(fdef, found[0], t, calls[a], globals_, seen) or t
+        out[a] = t
+    return out
 
 
 def _static_self(fdef, cls, own, calls, globals_, seen):
@@ -363,7 +438,7 @@ def _static_self(fdef, cls, own, calls, globals_, seen):
         mt = sig[0] if sig else None
         inner = list(mt.elem) if mt is not None and mt.kind == 'object' else []
         for k, ft in inner:
-            fields.setdefault(k, ft)
+            fields[k] = _merge_static(fields.get(k), ft) if ft.kind == 'object' else fields.get(k, ft)
         mine = d.args.posonlyargs + d.args.args
         stores = {n.attr for n in ast.walk(d) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and mine
                   and n.value.id == mine[0].arg and not isinstance(n.ctx, ast.Load)}
@@ -594,11 +669,68 @@ def with_globals(fdef, globals_):
             tuples[name] = _number_tree(v)
         elif type(v) is dict or (v is _OTHER and name in indexed):
             added.append(ast.arg(name))
+    classes = {c.name: c for c in (globals_ or {}).get(CLASSES, [])}
+    makes = {n.value.func.id for n in ast.walk(fdef) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+             and isinstance(n.value.func, ast.Name) and n.value.func.id in classes and n.value.func.id not in local}
+    for name in sorted(makes):                  # a class it makes instances of: built from the class statement
+        t = _static_made(classes[name], fdef, globals_)
+        if t is not None:
+            added.append(ast.arg(name))
+            tuples[name] = t
     if not added:
         return fdef, tuples
     tree = copy.deepcopy(fdef)
     tree.args.args = tree.args.args + [ast.copy_location(a, fdef) for a in added]
     return tree, tuples
+
+
+_STATIC_CLASSES = {}
+
+
+def _static_made(cdef, fdef, globals_):
+    """What scramjit would make of cdef(...) in fdef, from source: a dataclass's fields, or an __init__ that only assigns."""
+    is_dc = any((isinstance(d, ast.Name) and d.id == 'dataclass') or (isinstance(d, ast.Attribute) and d.attr == 'dataclass')
+                or (isinstance(d, ast.Call) and getattr(d.func, 'attr', getattr(d.func, 'id', None)) == 'dataclass') for d in cdef.decorator_list)
+    defs = {d.name: d for d in cdef.body if isinstance(d, ast.FunctionDef)}
+    params, assigns = [], []
+    if is_dc:
+        for s in cdef.body:
+            if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name) and 'ClassVar' not in ast.unparse(s.annotation):
+                default = None
+                if s.value is not None:
+                    try:
+                        default = ('const', ast.literal_eval(s.value))
+                    except ValueError:
+                        return None              # field(default_factory=...) and the like
+                params.append((s.target.id, default, False))
+                assigns.append((s.target.id, ('param', s.target.id)))
+    elif '__init__' in defs:
+        init = defs['__init__']
+        me = init.args.args[0].arg if init.args.args else None
+        names = [a.arg for a in init.args.args[1:]]
+        ds = [None] * (len(names) - len(init.args.defaults)) + [('const', ast.literal_eval(d)) if isinstance(d, ast.Constant) else None for d in init.args.defaults]
+        params = [(n, d, False) for n, d in zip(names, ds)]
+        for s in init.body:
+            if isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant):
+                continue
+            if not (isinstance(s, ast.Assign) and isinstance(s.targets[0], ast.Attribute) and isinstance(s.targets[0].value, ast.Name)
+                    and s.targets[0].value.id == me):
+                return None
+            assigns.append((s.targets[0].attr, ('expr', s.value)))
+    local = {n.targets[0].id for n in ast.walk(fdef) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+             and isinstance(n.value.func, ast.Name) and n.value.func.id == cdef.name and isinstance(n.targets[0], ast.Name)}
+    calls = {n.func.attr for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and isinstance(n.func.value, ast.Name) and n.func.value.id in local}
+    if '__post_init__' in defs:
+        calls.add('__post_init__')
+    own = T.object_of('object', [])
+    t = _static_self(fdef, cdef, own, calls, globals_, ()) if calls else own
+    if t is None:
+        return None
+    cls = _STATIC_CLASSES.setdefault(id(cdef), type(cdef.name, (), {}))
+    writes = set().union(*(w for _, w in (t.methods or {}).values()))
+    return T.madeclass_of(cls, {'params': params, 'assigns': assigns, 'post_init': '__post_init__' in defs, 'frozen': False},
+                          t.methods or {}, writes, [(k, ft) for k, ft in t.elem if ft.kind == 'function'])
 
 
 def best_analysis(fdef, globals_, filename, offset, opts, first_only=False):

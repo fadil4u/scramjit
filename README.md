@@ -115,7 +115,7 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | Numbers and n-D numpy arrays, including dtypes like `uint8`; `Enum` and `IntEnum` members | Making instances; properties |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | Sets, `str` |
 | Dicts passed in, reading and writing keys it names | Dicts that gain keys, or built in the function |
-| Attributes of instances and dataclasses, passed in or as `self`, read and written; calls to their methods; passing them on; lists of them (from 0.0.4) | Properties, instances made in the function |
+| Instances and dataclasses (from 0.0.4): attributes, objects in attributes, methods, making them, passing and returning them, `isinstance`, lists of them | Properties, `hasattr`, `vars()` |
 | numpy functions on single numbers: `np.sqrt(x[i])`, `np.sin`, `np.minimum` | numpy calls that make arrays: `np.sqrt(x)`, `x.sum(axis=0)` |
 | numpy reductions to one number: `x.sum()`, `np.max(m[i])`, `x.std()`, `x.argmax()` | `np.dot`, `np.linalg` |
 
@@ -209,13 +209,13 @@ Pre-release: the API may still change.
 - **Releases.** 0.0.3 is on PyPI. New since 0.0.2: calls between `@scram` functions, default parameter values, enums,
   nested tuples, calling C from `cimo.compile`, arrays made inside a function, module-level constants, arithmetic on
   `float32`, `uint8`, `uint64` and the other narrow dtypes, `<<` and `>>`, exact 64-bit hashes, and int sums that vectorize.
-- **Tests.** About 2,650 differential tests compare each compiled function with CPython and numpy, bit for bit. Developed and
+- **Tests.** About 2,800 differential tests compare each compiled function with CPython and numpy, bit for bit. Developed and
   benchmarked on arm64 Linux and in Pyodide. Run by hand on arm64 Windows and x86-64 Windows (emulated), where a NaN's sign can
   differ. cimo also targets x86-64 Linux and macOS, where scramjit's tests haven't been run yet, and nothing runs in CI yet.
 - A function that doesn't compile whole has its loops compiled on their own, where they fit.
 - Data structures: dicts passed in with keys that don't change, tuples to any depth, enums, local lists, and module-level
   numbers, tuples, arrays and dicts compile. On `main`, from 0.0.4: lists passed in, lists of lists, and attributes of
-  instances and dataclasses, `self`, calls to their methods, passing them to compiled functions and lists of them included.
+  classes: instances and dataclasses passed in or made in the function, their methods, objects in attributes, lists of them.
 - Next: see [`TODO.md`](https://github.com/farizrahman4u/scramjit/blob/main/TODO.md).
 
 ## Development

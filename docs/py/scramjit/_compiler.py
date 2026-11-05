@@ -522,7 +522,7 @@ def flatten_dicts(fdef, arg_types):
     parameter types, and {variable: (argument index, key, how the user wrote it)}."""
     a = fdef.args
     params = a.posonlyargs + a.args
-    if not any(t is not None and t.kind in ('dict', 'object', 'objlist') for t in arg_types) or len(params) != len(arg_types):
+    if not any(t is not None and t.kind in ('dict', 'object', 'objlist', 'madeclass') for t in arg_types) or len(params) != len(arg_types):
         return fdef, arg_types, {}
     tree = copy.deepcopy(fdef)
     taken = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {p.arg for p in params}
@@ -532,7 +532,7 @@ def flatten_dicts(fdef, arg_types):
             name += '_'
         taken.add(name)
         return name
-    slots, flat, methods = {}, {}, {}
+    slots, flat, methods, nested = {}, {}, {}, {}
     new_params, new_types = [], []
     for i, (p, t) in enumerate(zip(tree.args.posonlyargs + tree.args.args, arg_types)):
         if t.kind not in ('dict', 'object', 'objlist'):
@@ -540,20 +540,59 @@ def flatten_dicts(fdef, arg_types):
             new_types.append(t)
             continue
         fields = t.elem.elem if t.kind == 'objlist' else t.elem
-        for k, (key, ft) in enumerate(fields):
-            name = fresh(f'{p.arg}__{key}' if isinstance(key, str) and key.isidentifier() and key.isascii() else f'{p.arg}__k{k}')
-            flat[p.arg, key] = name
-            if ft.kind == 'function':           # a method: called as a function, with p's attributes as self
-                methods[p.arg, key] = ft
-            shown = f'{p.arg}.{key}' if t.kind == 'object' else f'{p.arg}[...].{key}' if t.kind == 'objlist' else f'{p.arg}[{key!r}]'
-            slots[name] = (i, key, shown)
-            new_params.append(ast.copy_location(ast.arg(name), p))
-            new_types.append(T.list_of(ft) if t.kind == 'objlist' and ft.kind != 'function' else ft)
+        todo = [(p.arg, '', fields)]
+        while todo:                              # an object in an attribute is an owner of its own: 'p.pos'
+            owner, prefix, fields = todo.pop(0)
+            for k, (key, ft) in enumerate(fields):
+                if ft.kind == 'object' and t.kind == 'object':
+                    nested[f'{owner}.{key}'] = ft
+                    todo.append((f'{owner}.{key}', f'{prefix}{key}.', ft.elem))
+                    continue
+                base = owner.replace('.', '__')
+                name = fresh(f'{base}__{key}' if isinstance(key, str) and key.isidentifier() and key.isascii() else f'{base}__k{k}')
+                flat[owner, key] = name
+                if ft.kind == 'function':           # a method: called as a function, with p's attributes as self
+                    methods[owner, key] = ft
+                shown = f'{owner}.{key}' if t.kind == 'object' else f'{p.arg}[...].{key}' if t.kind == 'objlist' else f'{p.arg}[{key!r}]'
+                slots[name] = (i, prefix + key if prefix else key, shown)     # a dict's key can be an int
+                new_params.append(ast.copy_location(ast.arg(name), p))
+                new_types.append(T.list_of(ft) if t.kind == 'objlist' and ft.kind != 'function' else ft)
 
     dicts = {p.arg for p, t in zip(params, arg_types) if t.kind == 'dict'}
     objects = {p.arg for p, t in zip(params, arg_types) if t.kind == 'object'}
     lists = {p.arg: t for p, t in zip(params, arg_types) if t.kind == 'objlist'}
     types_of = {p.arg: (t.elem if t.kind == 'objlist' else t) for p, t in zip(params, arg_types)}
+    objects |= set(nested)
+    types_of.update(nested)
+    made = {p.arg: t for p, t in zip(params, arg_types) if t.kind == 'madeclass'}
+    # v = C(...), C a class it makes instances of: v's attributes become variables, assigned as C.__init__ assigns them
+    made_local = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call) \
+                and isinstance(n.value.func, ast.Name) and n.value.func.id in made:
+            v = n.targets[0].id
+            if made_local.get(v, n.value.func.id) != n.value.func.id or v in types_of:
+                raise Unsupported(n, f'{v} is an instance of two classes, or a parameter too')
+            made_local[v] = n.value.func.id
+    makers = set()
+    for v, c in made_local.items():
+        t = made[c]
+        for a, _ in t.recipe['assigns']:
+            if (v, a) not in flat:
+                flat[v, a] = fresh(f'{v}__{a}')
+        for m, ft in t.recipe['methods']:
+            methods[v, m] = ft
+            flat[v, m] = fresh(f'sjm__{v}__{m}')
+        types_of[v] = T.object_of(t.py, list(t.recipe['methods']), t.methods, t.cls, t.writes)
+        objects.add(v)
+    for n in ast.walk(tree):                      # assigned only by C(...)
+        if isinstance(n, ast.Assign) and id(n.value) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) \
+                and n.value.func.id in made and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            makers.add(id(n))
+        elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For, ast.comprehension, ast.With, ast.NamedExpr)):
+            for t in (n.targets if isinstance(n, ast.Assign) else [getattr(n, 'target', None)]):
+                if t is not None and any(isinstance(x, ast.Name) and x.id in made_local and not isinstance(x.ctx, ast.Load) for x in ast.walk(t)):
+                    raise Unsupported(n, 'an instance it makes is assigned something other than a new instance')
     first = {}                                   # a list's first attribute, for len() and an index's check
     for p, t in lists.items():
         data = [k for k, ft in t.elem.elem if ft.kind != 'function']
@@ -561,8 +600,22 @@ def flatten_dicts(fdef, arg_types):
             raise Unsupported(tree, f'{p} is a list of instances whose attributes it never reads')
         first[p] = flat[p, data[0]]
 
-    # names bound to an element: for p in ps, for i, p in enumerate(ps), p = ps[i]. Each becomes an index.
-    alias, binders = {}, set()
+    # q = p for an instance parameter p, at the top of the body, q assigned nowhere else and not named before: q is p
+    for k, s in enumerate(tree.body):
+        if isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name) and isinstance(s.value, ast.Name) \
+                and s.value.id in objects and s.targets[0].id not in types_of:
+            q, p = s.targets[0].id, s.value.id
+            stores = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == q and not isinstance(n.ctx, ast.Load)]
+            before = any(isinstance(n, ast.Name) and n.id == q for b in tree.body[:k] for n in ast.walk(b))
+            if len(stores) == 1 and not before:
+                for b in tree.body[k + 1:]:
+                    for n in ast.walk(b):
+                        if isinstance(n, ast.Name) and n.id == q:
+                            n.id = p
+                tree.body[k] = ast.copy_location(ast.Pass(), s)
+
+    # names bound to an element: for p in ps, for i, p in enumerate(ps), p = ps[i], q = p. Each becomes an index.
+    alias, binders, copies = {}, set(), set()
 
     def bind(name, ps, node):
         if alias.get(name, ps) != ps:
@@ -592,12 +645,36 @@ def flatten_dicts(fdef, arg_types):
         elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Subscript) \
                 and isinstance(n.value.value, ast.Name) and n.value.value.id in lists and not isinstance(n.value.slice, ast.Slice):
             bind(n.targets[0].id, n.value.value.id, n)
+    changed = True
+    while changed:                                # best = p, p an element: best is one too, its index copied
+        changed = False
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Name) \
+                    and n.value.id in alias and id(n) not in copies:
+                bind(n.targets[0].id, alias[n.value.id], n)
+                copies.add(id(n))
+                changed = True
     if set(alias) & (set(lists) | dicts | objects):
         raise Unsupported(tree, 'a parameter is also an element of a list')
     index = {name: fresh(f'sji__{name}') for name in alias}
 
     def column(ps, key, idx, ctx, node):
         return ast.copy_location(ast.Subscript(ast.Name(flat[ps, key], ast.Load()), idx, ctx), node)
+
+    def path_owner(owner, path):
+        """('p.pos', 'x') for owner p and path 'pos.x': the key flat has it under."""
+        *inner, last = path.split('.')
+        return ('.'.join([owner] + inner), last)
+
+    def owner_of(e):
+        """The owner e names: an instance parameter, one made here, or an object in an attribute of one ('p.pos')."""
+        if isinstance(e, ast.Name) and e.id in objects:
+            return e.id
+        if isinstance(e, ast.Attribute):
+            o = owner_of(e.value)
+            if o is not None and f'{o}.{e.attr}' in nested:
+                return f'{o}.{e.attr}'
+        return None
 
     def element_of(e):
         """(list, index expression) if e is an element: p bound above, or ps[i]."""
@@ -633,18 +710,41 @@ def flatten_dicts(fdef, arg_types):
             orelse = [x for s in n.orelse for x in (lambda r: r if isinstance(r, list) else [r])(self.visit(s))]
             return ast.copy_location(ast.For(ast.Name(index[name], ast.Store()), range_of(ps, n.iter), body, orelse), n)
 
+        def comprehension(self, n):
+            """In a comprehension, for i, p in enumerate(ps): i is p's index (plus the start) wherever it's read."""
+            for g in n.generators:
+                found = element_loop(g.target, g.iter)
+                if found and found[2] is not None:
+                    name, ps, counter, start = found
+                    value = ast.Name(index[name], ast.Load())
+                    if start is not None:
+                        value = ast.BinOp(value, ast.Add(), copy.deepcopy(start))
+                    for m in ast.walk(n):
+                        for field, v in ast.iter_fields(m):
+                            if isinstance(v, ast.Name) and v.id == counter and isinstance(v.ctx, ast.Load):
+                                setattr(m, field, ast.copy_location(copy.deepcopy(value), v))
+                            elif isinstance(v, list):
+                                v[:] = [ast.copy_location(copy.deepcopy(value), x) if isinstance(x, ast.Name) and x.id == counter
+                                        and isinstance(x.ctx, ast.Load) else x for x in v]
+                    g.target, g.iter = ast.Name(name, ast.Store()), ast.Name(ps, ast.Load())
+            return self.generic_visit(n)
+
+        visit_ListComp = visit_SetComp = visit_GeneratorExp = visit_DictComp = comprehension
+
         def visit_comprehension(self, n):
             found = element_loop(n.target, n.iter)
             if not found:
                 return self.generic_visit(n)
             name, ps, counter, start = found
-            if counter is not None:
-                raise Unsupported(n.iter, 'enumerate() of a list of instances in a comprehension')
             return ast.comprehension(ast.Name(index[name], ast.Store()), range_of(ps, n.iter), [self.visit(x) for x in n.ifs], n.is_async)
 
         def visit_Assign(self, n):
+            if id(n) in makers:
+                return self.construct(n)
             if id(n) not in binders:
                 return self.generic_visit(n)
+            if id(n) in copies:
+                return ast.copy_location(ast.Assign([ast.Name(index[n.targets[0].id], ast.Store())], ast.Name(index[n.value.id], ast.Load())), n)
             name, ps = n.targets[0].id, n.value.value.id
             idx = ast.copy_location(ast.Assign([ast.Name(index[name], ast.Store())], self.visit(n.value.slice)), n)
             check = ast.copy_location(ast.Assign([ast.Name(fresh('sjchk__'), ast.Store())],    # IndexError here, as in Python
@@ -653,11 +753,16 @@ def flatten_dicts(fdef, arg_types):
 
         def visit_Call(self, n):
             f = n.func
+            if isinstance(f, ast.Name) and f.id == 'isinstance' and len(n.args) == 2 and self.instance(n.args[0]):
+                owner = self.instance(n.args[0])[0]
+                mark = ast.copy_location(ClassOf(0), n.args[0])
+                mark.cls = types_of[owner].cls
+                return ast.copy_location(ast.Call(f, [mark, self.visit(n.args[1])], []), n)
             if isinstance(f, ast.Name) and f.id == 'len' and len(n.args) == 1 and isinstance(n.args[0], ast.Name) and n.args[0].id in lists:
                 return ast.copy_location(ast.Call(f, [ast.Name(first[n.args[0].id], ast.Load())], []), n)
             if isinstance(f, ast.Attribute):
                 el = element_of(f.value)
-                p = f.value.id if isinstance(f.value, ast.Name) and f.value.id in objects else None
+                p = owner_of(f.value)
                 owner = el[0] if el else p
                 if owner is not None and (owner, f.attr) in methods:
                     if el and not isinstance(el[1], (ast.Name, ast.Constant)):
@@ -667,15 +772,27 @@ def flatten_dicts(fdef, arg_types):
                     fields = [(k, ft) for k, ft in t.elem if ft.kind == 'function' or k in uses]   # only what it uses: the rest may have changed type
                     if el:
                         place = {k: column(owner, k, copy.deepcopy(el[1]), ast.Load(), n) for k, ft in fields if ft.kind != 'function'}
+                    elif owner in made_local:            # made here: its attributes are variables, typed as the compiler finds them
+                        place = {k: ast.copy_location(ast.Name(flat[owner, k], ast.Load()), n) for k in sorted(uses) if (owner, k) in flat}
                     else:
-                        place = {k: ast.copy_location(ast.Name(flat[owner, k], ast.Load()), n) for k, ft in fields if ft.kind != 'function'}
+                        sub = T.object_of(t.py, fields, t.methods, t.cls, t.writes)
+                        place = {k: ast.copy_location(ast.Name(flat[path_owner(owner, k)], ast.Load()), n) for k, _ in leaf_types(sub)}
                     me = SelfArg(list(place.values()), ast.Load())
                     me.object_type, me.slots = T.object_of(t.py, fields, t.methods, t.cls, t.writes), place
                     me.owner = owner
+                    if owner in made_local:
+                        me.local = t
                     passed = [self.argument(x) for x in n.args]
                     call = ast.Call(ast.copy_location(ast.Name(flat[owner, f.attr], ast.Load()), f), [ast.copy_location(me, n)] + [x for x, _ in passed],
                                     [self.visit(k) for k in n.keywords])
-                    call.sj_writes = [(flat[owner, k], copy.deepcopy(el[1]) if el else None) for k in sorted(writes)] + [w for _, ws in passed for w in ws]
+                    call.sj_writes = [(flat[owner, k], copy.deepcopy(el[1]) if el else None) for k in sorted(writes) if (owner, k) in flat] \
+                        + [w for _, ws in passed for w in ws]
+                    if not el and owner not in made_local:       # objects in its attributes: any of their numbers may be assigned
+                        call.sj_writes += [(flat[path_owner(owner, k)], None) for k, _ in leaf_types(T.object_of(t.py, fields, t.methods)) if '.' in k]
+                    if owner in made_local:             # no parameter holds the method: the call names it
+                        fn = methods[owner, f.attr].elem
+                        CALLEES[id(fn)] = fn
+                        call.sj_callee = id(fn)
                     return ast.copy_location(call, n)
             if isinstance(f, ast.Name) and f.id not in BUILTIN_NAMES and any(self.instance(a) for a in n.args):
                 passed = [self.argument(x) for x in n.args]
@@ -684,10 +801,60 @@ def flatten_dicts(fdef, arg_types):
                 return call
             return self.generic_visit(n)
 
+        def construct(self, n):
+            """v = C(args): the arguments in order, then each attribute as C.__init__ assigns it."""
+            v, call = n.targets[0].id, n.value
+            t = made[call.func.id]
+            params = t.recipe['params']
+            if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
+                raise Unsupported(call, f'{call.func.id}() with * or **')
+            positional = [p for p in params if not p[2]]
+            if len(call.args) > len(positional):
+                raise Unsupported(call, f'{call.func.id}() with more arguments than it takes')
+            out, given = [], {}
+            for p, a in list(zip(positional, call.args)) + [((k.arg,), k.value) for k in call.keywords]:
+                if p[0] in given or p[0] not in {q[0] for q in params}:
+                    raise Unsupported(call, f'{call.func.id}() with these arguments')
+                temp = fresh(f'sjc__{v}__{p[0]}')
+                out.append(ast.copy_location(ast.Assign([ast.Name(temp, ast.Store())], self.visit(a)), n))
+                given[p[0]] = ast.Name(temp, ast.Load())
+            for name, default, _ in params:
+                if name not in given:
+                    if default is None or type(default[1]) not in (int, float, bool):
+                        raise Unsupported(call, f'{call.func.id}() leaving out {name}, whose default isn\'t a number')
+                    given[name] = ast.Constant(default[1])
+
+            def value(src):
+                if src[0] == 'param':
+                    return copy.deepcopy(given[src[1]])
+                if src[0] == 'const':
+                    if type(src[1]) not in (int, float, bool):
+                        raise Unsupported(call, f'{call.func.id}() assigns a {type(src[1]).__name__}')
+                    return ast.Constant(src[1])
+                e = copy.deepcopy(src[1])
+                for m in ast.walk(e):
+                    for field, x in ast.iter_fields(m):
+                        if isinstance(x, ast.Name) and x.id in given:
+                            setattr(m, field, copy.deepcopy(given[x.id]))
+                        elif isinstance(x, list):
+                            x[:] = [copy.deepcopy(given[y.id]) if isinstance(y, ast.Name) and y.id in given else y for y in x]
+                return ast.Name(given[e.id].id, ast.Load()) if isinstance(e, ast.Name) and e.id in given else e
+            for a, src in t.recipe['assigns']:
+                out.append(ast.copy_location(ast.Assign([ast.Name(flat[v, a], ast.Store())], value(src)), n))
+            for s in out:
+                ast.fix_missing_locations(ast.copy_location(s, n))
+                for m in ast.walk(s):
+                    if hasattr(m, 'lineno'):
+                        m.lineno, m.col_offset, m.end_lineno, m.end_col_offset = n.lineno, n.col_offset, n.end_lineno, n.end_col_offset
+            if t.recipe['post_init']:
+                post = ast.copy_location(ast.Expr(ast.copy_location(ast.Call(ast.copy_location(ast.Attribute(ast.Name(v, ast.Load()), '__post_init__', ast.Load()), n), [], []), n)), n)
+                out.append(self.visit(ast.fix_missing_locations(post)))
+            return out
+
         def instance(self, a):
             """(owner, index expression or None) if a names an instance: a parameter, or an element of a list of them."""
-            if isinstance(a, ast.Name) and a.id in objects:
-                return a.id, None
+            if owner_of(a) is not None:
+                return owner_of(a), None
             el = element_of(a)
             if el and isinstance(a, ast.Subscript) and not isinstance(el[1], (ast.Name, ast.Constant)):
                 raise Unsupported(a, f'passes {a.value.id}[...] with an index that is an expression: name the element first')
@@ -702,19 +869,32 @@ def flatten_dicts(fdef, arg_types):
             owner, idx = found
             t = types_of[owner]
             data = [k for k, ft in t.elem if ft.kind != 'function']
-            if idx is None:
+            if owner in made_local:
+                data = list(dict.fromkeys(a for a, _ in made[made_local[owner]].recipe['assigns']))
+            if idx is None and owner not in made_local:
+                place = {k: ast.copy_location(ast.Name(flat[path_owner(owner, k)], ast.Load()), a) for k, _ in leaf_types(t)}
+            elif idx is None:
                 place = {k: ast.copy_location(ast.Name(flat[owner, k], ast.Load()), a) for k in data}
             else:
                 place = {k: column(owner, k, copy.deepcopy(idx), ast.Load(), a) for k in data}
             me = ast.copy_location(SelfArg(list(place.values()), ast.Load()), a)
             me.object_type, me.slots, me.passed, me.full, me.owner = t, place, True, (t, place), owner
-            return me, [(flat[owner, k], copy.deepcopy(idx)) for k in sorted(t.writes) if (owner, k) in flat]
+            if owner in made_local:
+                me.local, me.full = t, (None, place)
+            return me, [(flat[path_owner(owner, k)], copy.deepcopy(idx)) for k, _ in leaf_types(t) if k.split('.')[0] in t.writes or '.' in k] \
+                if idx is None and owner not in made_local else [(flat[owner, k], copy.deepcopy(idx)) for k in sorted(t.writes) if (owner, k) in flat]
 
         def visit_Attribute(self, n):
             el = element_of(n.value)
-            owner = el[0] if el else n.value.id if isinstance(n.value, ast.Name) else None
+            owner = el[0] if el else owner_of(n.value) or (n.value.id if isinstance(n.value, ast.Name) else None)
             if owner is not None and (owner, n.attr) in methods:
                 raise Unsupported(n, f'{owner}.{n.attr} is a method, and only calling it compiles')
+            if owner is not None and owner_of(n.value) == owner and (owner, n.attr) in flat and not el:
+                if isinstance(n.ctx, ast.Del):
+                    raise Unsupported(n, f'del {owner}.{n.attr}')
+                return ast.copy_location(ast.Name(flat[owner, n.attr], n.ctx), n)
+            if owner_of(n) is not None and not isinstance(n.ctx, ast.Load):
+                raise Unsupported(n, f'assigns {owner_of(n)}, an object in an attribute')
             if el and (owner, n.attr) in flat:
                 if isinstance(n.ctx, ast.Del):
                     raise Unsupported(n, f'del of an attribute of an element of {owner}')
@@ -723,6 +903,31 @@ def flatten_dicts(fdef, arg_types):
                 if isinstance(n.ctx, ast.Del):
                     raise Unsupported(n, f'del {n.value.id}.{n.attr}')
                 return ast.copy_location(ast.Name(flat[n.value.id, n.attr], n.ctx), n)
+            return self.generic_visit(n)
+
+        def visit_Return(self, n):
+            v = n.value
+            if isinstance(v, ast.Name) and v.id in made_local:       # a new instance: its attributes, made into one by the call
+                attrs = tuple(dict.fromkeys(a for a, _ in made[made_local[v.id]].recipe['assigns']))
+                if not attrs:
+                    raise Unsupported(n, f'returns an instance of {made_local[v.id]} with no attributes')
+                returned.append(('made', types_of[v.id].cls, attrs))
+                return ast.copy_location(ast.Return(ast.copy_location(ast.Tuple([ast.Name(flat[v.id, a], ast.Load()) for a in attrs], ast.Load()), v)), n)
+            if isinstance(v, ast.Name) and v.id in objects and v.id in pindex:
+                returned.append(('arg', None))
+                return ast.copy_location(ast.Return(ast.copy_location(ast.Constant(pindex[v.id]), v)), n)
+            if isinstance(v, ast.Attribute) and owner_of(v) is not None and owner_of(v).split('.')[0] in pindex:
+                base, *path = owner_of(v).split('.')
+                returned.append(('path', pindex[base], '.'.join(path)))
+                return ast.copy_location(ast.Return(ast.copy_location(ast.Constant(0), v)), n)
+            el = element_of(v) if v is not None else None
+            if el:
+                returned.append(('elem', pindex[el[0]]))
+                return ast.copy_location(ast.Return(self.visit(el[1]) if isinstance(v, ast.Subscript) else el[1]), n)
+            returned.append(None)
+            return self.generic_visit(n)
+
+        def visit_Lambda(self, n):
             return self.generic_visit(n)
 
         def visit_Name(self, n):
@@ -736,14 +941,41 @@ def flatten_dicts(fdef, arg_types):
                 raise Unsupported(n, f'{n.id}, an element of {alias[n.id]}, is used as an object, and only {n.id}.attribute compiles')
             return n
 
+    pindex = {p.arg: i for i, p in enumerate(params)}
+    returned = []
     tree = Flatten().visit(tree)
+    if any(returned):                            # returns an instance: the argument, or the element at an index
+        if len(set(returned)) != 1:
+            raise Unsupported(tree, 'returns an instance at one return and something else, or another kind of instance, at another')
+        tree.sj_instance_ret = returned[0]
+    tree.sj_names = {i: name for name, i in index.items()}      # for messages: the element's name, not its index's
     if methods or objects or lists:
         tree.body = shown_writes(tree.body)
     tree.args.posonlyargs, tree.args.args = [], new_params
     return ast.fix_missing_locations(tree), new_types, slots
 
 
+CALLEES = {}     # id -> a method a call to an instance made in the function names (Call.sj_callee): no parameter holds it
+
 BUILTIN_NAMES = frozenset(dir(__import__('builtins')))     # a call to one of these never gets an instance's attributes
+
+
+def leaf_types(t):
+    """An instance type's numbers and arrays, through the objects in its attributes: [(path, type)], in the order its
+    parameters come when it's flattened (breadth first, as flatten_dicts registers them)."""
+    out, todo = [], [('', t.elem)]
+    while todo:
+        prefix, fields = todo.pop(0)
+        for key, ft in fields:
+            if ft.kind == 'object':
+                todo.append((f'{prefix}{key}.', ft.elem))
+            elif ft.kind != 'function':
+                out.append((prefix + key, ft))
+    return out
+
+
+class ClassOf(ast.Constant):
+    """Stands for an instance in isinstance(): its class (cls), which is in the signature."""
 
 
 class SelfArg(ast.Tuple):
@@ -754,6 +986,7 @@ class SelfArg(ast.Tuple):
         new = SelfArg(copy.deepcopy(self.elts, memo), ast.Load())
         new.object_type, new.slots = self.object_type, self.slots
         new.passed, new.full, new.owner = getattr(self, 'passed', False), getattr(self, 'full', None), getattr(self, 'owner', None)
+        new.local = getattr(self, 'local', None)
         return ast.copy_location(new, self)
 
 
@@ -783,8 +1016,8 @@ def shown_writes(stmts):
                 writes |= {(name, ast.dump(i) if i is not None else None) for name, i in getattr(n, 'sj_writes', None) or ()}
                 for name, i in getattr(n, 'sj_writes', None) or ():
                     places[name, ast.dump(i) if i is not None else None] = i
-        if writes and (deferred or not isinstance(s, (ast.Expr, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Return))):
-            raise Unsupported(s, 'a method that assigns attributes, called in a loop header, a test, a comprehension or a lambda')
+        if writes and (deferred or not isinstance(s, (ast.Expr, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Return, ast.If, ast.While, ast.For))):
+            raise Unsupported(s, 'a method that assigns attributes, called in a comprehension, a lambda or a with or try header')
         def target(name, i, ctx):
             return ast.Name(name, ctx) if i is None else ast.Subscript(ast.Name(name, ast.Load()), copy.deepcopy(i), ctx)
         shown = [ast.copy_location(ast.Assign([target(name, places[name, d], ast.Store())], target(name, places[name, d], ast.Load())), s)
@@ -793,6 +1026,11 @@ def shown_writes(stmts):
             x.sj_shown = True                # says a call may have written it; not itself a write
         if isinstance(s, ast.Return):     # before it, then: nothing runs after, but the function's exits must write these back
             out += shown + [s]
+        elif isinstance(s, (ast.If, ast.While, ast.For)) and shown:
+            # the test or the header ran: what follows it in each way on may see the writes
+            s.body = copy.deepcopy(shown) + s.body
+            s.orelse = copy.deepcopy(shown) + s.orelse
+            out += [s] + (shown if isinstance(s, (ast.While, ast.For)) else [])
         else:
             out += [s] + shown
     return out
@@ -803,9 +1041,10 @@ class Callee:
     """What compiling a call to another function needs from it. hidden: for the globals its compiled tree takes as parameters
     after its real ones, their identity. hidden_map: identity of a global -> the parameter holding it, within this function."""
 
-    def __init__(self, identity, tree, globals_, filename, offset, boundscheck, parity, hidden=(), hidden_map=None, name=None):
+    def __init__(self, identity, tree, globals_, filename, offset, boundscheck, parity, hidden=(), hidden_map=None, name=None, npos=None):
         self.identity, self.tree, self.globals, self.filename, self.offset = identity, tree, globals_, filename, offset
         self.boundscheck, self.parity, self.hidden, self.hidden_map, self.name = boundscheck, parity, hidden, hidden_map, name
+        self.npos = npos                 # how many of the parameters can be given by position: those after are keyword-only
 
 
 class Unit:
@@ -852,6 +1091,8 @@ class Unit:
                     raise Unsupported(None, 'a variable in it is an int at some times and a float at others')
                 if any(t.kind == 'dict' for t in c.env.values()):
                     raise Unsupported(None, 'it reads a dict')
+                if c.instance_ret:
+                    raise Unsupported(None, 'it returns an instance')
             finally:
                 self.stack.pop()
             c.cname = f'sj_call_{len(self.callees)}'
@@ -865,6 +1106,8 @@ class Unit:
 class Compiler:
     def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, parity=True, counts=False, unit=None, hidden_map=None):
         fdef, arg_types, self.dict_slots = flatten_dicts(fdef, arg_types)
+        self.instance_ret = getattr(fdef, 'sj_instance_ret', None)
+        self.element_names = getattr(fdef, 'sj_names', {})   # ('arg', None): the int returned is an argument's index; ('elem', i): an index into argument i
         self.again = (arg_types, globals_, filename, line_offset, boundscheck, parity, counts, unit, hidden_map)
         self.unit = unit if unit is not None else Unit()
         self.hidden_map = hidden_map
@@ -950,6 +1193,8 @@ class Compiler:
         """Text with the variables a dict's keys became written as the user wrote them."""
         for flat, (_, _, written) in self.dict_slots.items():
             text = text.replace(flat, written)
+        for index, name in getattr(self, 'element_names', {}).items():
+            text = text.replace(index, name)
         return text
 
     def shown_types(self):
@@ -1678,9 +1923,22 @@ class Compiler:
             r = j
         return r
 
+    def local_object(self, e):
+        """The type an instance made in the function goes as: its attributes' types as they are here, and its methods."""
+        t = e.local
+        fields = [(k, self.typeof(x)) for k, x in e.slots.items()] + [kt for kt in t.elem if kt[1].kind == 'function']
+        return T.object_of(t.py, sorted(fields, key=lambda kv: kv[0]), t.methods, t.cls, t.writes)
+
     def typeof(self, e):
+        if isinstance(e, SelfArg) and getattr(e, 'local', None) is not None:
+            for x in e.elts:
+                if self.typeof(x).np == 'dyn':
+                    self.fail(e, f'{self.shown(x.id)} is a Python number at some times and a numpy one at others')
+            e.object_type = self.local_object(e)
+            e.elts = [e.slots[k] for k, ft in e.object_type.elem if ft.kind != 'function']
+            return e.object_type
         if isinstance(e, SelfArg):
-            for x, (k, ft) in zip(e.elts, [kt for kt in e.object_type.elem if kt[1].kind != 'function']):
+            for x, (k, ft) in zip(e.elts, leaf_types(e.object_type)):
                 if self.typeof(x) is not ft:
                     self.fail(e, f'{self.shown(x.id)} is {self.typeof(x).name} here, not {ft.name} as at the call')
             return e.object_type
@@ -1934,6 +2192,8 @@ class Compiler:
     # ---- calls to other @scram functions: a static C function per function and signature
     def callee_of(self, e):
         """The function this calls, if it's a @scram function at module level."""
+        if isinstance(e, ast.Call) and getattr(e, 'sj_callee', None) is not None:
+            return CALLEES[e.sj_callee]
         if not isinstance(e, ast.Call) or not isinstance(e.func, ast.Name) or e.func.id in self.cnames:
             return None
         t = self.env.get(e.func.id)
@@ -2051,18 +2311,28 @@ class Compiler:
         parameter left out gets its default, which must be a number: it was evaluated when the function was defined."""
         a = spec.tree.args
         names = [p.arg for p in a.posonlyargs + a.args][:len(a.posonlyargs + a.args) - len(spec.hidden)]
+        npos = spec.npos if spec.npos is not None else len(names)
         if any(isinstance(x, ast.Starred) for x in e.args) or any(k.arg is None for k in e.keywords):
             self.fail(e, f'calls {spec.tree.name}() with * or **')
+        if len(e.args) > npos:
+            self.fail(e, f'calls {spec.tree.name}() with more arguments by position than it takes')
         nodes = list(e.args) + [k.value for k in e.keywords]
         order = dict(zip(names, range(len(e.args))))
         for i, k in enumerate(e.keywords):
             if k.arg not in names or k.arg in order:
                 self.fail(e, f'calls {spec.tree.name}() with these arguments')
             order[k.arg] = len(e.args) + i
-        defaults = self.callee_defaults(fn, spec) if len(e.args) <= len(names) else ()
+        defaults = self.callee_defaults(fn, spec)[:npos] if len(e.args) <= len(names) else ()
+        kwdefaults = (getattr(getattr(fn, '_fn', None), '__kwdefaults__', None) or {})
         for i, n in enumerate(names):
-            if n not in order and i >= len(names) - len(defaults):
-                v = defaults[i - (len(names) - len(defaults))]
+            if n not in order and i >= npos and n in kwdefaults:
+                v = kwdefaults[n]
+                if type(v) not in (int, float, bool):
+                    self.fail(e, f'calls {spec.tree.name}() leaving out {n}, whose default is a {type(v).__name__}')
+                nodes.append(ast.copy_location(ast.Constant(v), e))
+                order[n] = len(nodes) - 1
+            elif n not in order and npos - len(defaults) <= i < npos:
+                v = defaults[i - (npos - len(defaults))]
                 if type(v) not in (int, float, bool):
                     self.fail(e, f'calls {spec.tree.name}() leaving out {n}, whose default is a {type(v).__name__}')
                 nodes.append(ast.copy_location(ast.Constant(v), e))
@@ -2178,7 +2448,7 @@ class Compiler:
         chosen += [(self.env[self.hidden_param(h)], self.hidden_param(h)) for h in spec.hidden]
         cargs, arrays = [], []
         for t, v in chosen:
-            if t.kind in ('function', 'enumclass'):
+            if t.kind in ('function', 'enumclass', 'classref', 'madeclass'):
                 continue
             if t.kind == 'array':
                 arrays.append(v)
@@ -2226,14 +2496,19 @@ class Compiler:
             if not (isinstance(x, SelfArg) and x.passed):
                 continue
             full, place = x.full
+            if full is None:                      # made in the function: typed as its variables are here
+                x.elts, x.slots = list(place.values()), dict(place)
+                full = self.local_object(x)
             uses = fn._uses_of(j, full.cls) if hasattr(fn, '_uses_of') else None
             if uses is None:
                 continue
             names = set(uses[0]).union(*(full.methods[m][0] for m in uses[2] if m in (full.methods or {})))
             fields = [(key, ft) for key, ft in full.elem if ft.kind == 'function' or key in names]
-            x.elts = [place[key] for key, ft in fields if ft.kind != 'function']
-            x.slots = {key: place[key] for key, ft in fields if ft.kind != 'function'}
             x.object_type = T.object_of(full.py, fields, full.methods, full.cls, full.writes)
+            x.elts = [place[key] for key, _ in leaf_types(x.object_type)]
+            x.slots = {key: place[key] for key, _ in leaf_types(x.object_type)}
+            if getattr(x, 'local', None) is not None:
+                x.local = T.object_of(full.py, [kt for kt in fields if kt[1].kind == 'function'], full.methods, full.cls, full.writes)
 
     def take_writes(self, e, me, c, io, j=0):
         """What a method assigned to self, into the caller's variables, before anything else: an exception it raised
@@ -3181,7 +3456,38 @@ class Compiler:
         second = np is not None and math.copysign(1.0, float(getattr(np, name)(math.nan, -math.nan))) < 0
         return self.hold(f'({a} != {a} ? ({b} != {b} ? {b if second else a} : {b}) : {b} != {b} ? {a} : {pick})', T.FLOAT)
 
+    def isinstance_of(self, e):
+        """isinstance(x, C), as a constant: x an instance (its class is in the signature), or a number against int, float
+        or bool; C a class at module level or a tuple of them. None if it isn't such a call."""
+        if not (isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == 'isinstance' and 'isinstance' not in self.env
+                and len(e.args) == 2 and not e.keywords):
+            return None
+        x, c = e.args
+        classes = []
+        for n in (c.elts if isinstance(c, ast.Tuple) else [c]):
+            t = self.env.get(n.id) if isinstance(n, ast.Name) else None
+            if t is not None and t.kind in ('classref', 'madeclass'):
+                classes.append(t.elem)
+            elif isinstance(n, ast.Name) and n.id in ('int', 'float', 'bool') and n.id not in self.env and n.id not in self.globals:
+                classes.append({'int': int, 'float': float, 'bool': bool}[n.id])
+            else:
+                self.fail(e, 'isinstance() with something other than classes at module level, int, float or bool')
+        if isinstance(x, ClassOf):
+            return any(issubclass(x.cls, k) for k in classes)
+        t = self.typeof(x)
+        if t.is_number and t.np != 'dyn' and not T.is_narrow_dyn(t):
+            py = ({'int': int, 'float': float, 'bool': bool}[t.kind]) if not t.np else None
+            if py is None:
+                import numpy
+                py = {'int': numpy.int64, 'float': numpy.float64, 'bool': numpy.bool_}.get(t.kind) if t.ctype in ('int64_t', 'double', 'int') else None
+                if py is None or t.name not in ('np.int64', 'np.float64', 'np.bool'):
+                    self.fail(e, f'isinstance() of a {t.name}')
+            return any(issubclass(py, k) for k in classes)
+        self.fail(e, f'isinstance() of a {t.name}')
+
     def call_type(self, e):
+        if self.isinstance_of(e) is not None:
+            return T.BOOL
         if self.callee_of(e) is not None:
             return self.callee_type(e)
         if self.c_function_of(e) is not None:
@@ -3423,7 +3729,7 @@ class Compiler:
         params = []
         for p in self.params:
             t = self.env[p]
-            if t.kind in ('function', 'enumclass'):
+            if t.kind in ('function', 'enumclass', 'classref', 'madeclass'):
                 continue
             if t.kind == 'array':
                 params += [f'{t.ctype}v_{p}', f'int64_t v_{p}__n'] + [f'int64_t v_{p}__n{k}' for k in range(1, t.ndim)]
@@ -5506,6 +5812,9 @@ class Compiler:
         return r, rf
 
     def call(self, e):
+        known = self.isinstance_of(e)
+        if known is not None:
+            return ('1' if known else '0'), flag_of(T.BOOL)
         nf = self.numpy_func(e.func)
         if nf:
             return self.numpy_call(e, nf)

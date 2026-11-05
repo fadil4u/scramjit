@@ -27,6 +27,7 @@ Python and through scramjit, and asserts the results are identical. They need nu
 | [`constants.py`](constants.py) | A filter with its settings at module level: a number, a tuple, an array, a dict | Clips each sample; each pass repeats over its own output | 0.52 s | 1.5 ms | 338x |
 | [`classes.py`](classes.py) | A temperature controller as a dataclass, with `@scram` on its method, which calls another, its state left on the object | Each step depends on the one before | 1.88 s | 39 ms | 48x |
 | [`particles.py`](particles.py) | Gravity between 200 particles in a plain list of dataclass instances, with methods, a helper taking two particles and a constant at module level | Every particle pulls on every other, each step on the last | 0.27 s | 13 ms | 21x |
+| [`vectors.py`](vectors.py) | Rays against a sphere with a small vector dataclass: a `Vec` made for each pixel, normalized by a method, handed to the sphere's method | Each pixel's hit depends on its ray, and its shade on the hit | 0.15 s | 5.4 ms | 27x |
 | [`config_dict.py`](config_dict.py) | An epidemic model with its settings and results in dicts | Each day depends on the one before | 0.081 s | 4.4 ms | 18x |
 
 One run of each on arm64 Linux, on a busy machine, so expect faster and somewhat different numbers. The

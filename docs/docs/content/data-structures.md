@@ -12,7 +12,7 @@ At a glance:
 | Lists | lists of numbers made in the function, passed in, returned, and at module level (from 0.0.4) | `append` and every method that resizes, `in`, slices, aliases (`ys = xs`), mixed ints and floats |
 | Lists of lists | rectangular, passed in, made in the function and returned (from 0.0.4) | ragged, one row in two places, `m[i, j]`, slices, replacing a row, three levels made in the function |
 | Dicts | passed in, reading and writing the keys the function names | building one, adding or deleting keys, `len`, `in`, `.get`, iterating, a key in a variable |
-| Instances (from 0.0.4) | passed in or at module level, `@scram` methods, reading and writing the attributes the function names, calling their methods, passing them to compiled functions, lists of them: plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | properties, static and class methods, an object in an attribute, making an instance, adding an attribute |
+| Instances (from 0.0.4) | passed in or at module level, made in the function, `@scram` methods; attributes read and written, objects in attributes; methods; passing them on, returning them, `isinstance`; lists of them: plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | properties, static and class methods, adding an attribute, a list made in the function |
 | Enums | `Enum` and `IntEnum` members with int values | `.name`, `Cell(1)`, iterating the class, `Flag` and string enums |
 | Module-level constants | numbers, tuples, arrays, dicts, lists, enum classes, instances (from 0.0.4) | strings, `None`, assigning with `global` |
 | Sets, strings | | all of them |
@@ -835,11 +835,135 @@ Using the list any other way (appending, `ps[i] = q`, slicing, passing it to a f
 
 A parameter the function never names can be anything: a label, a logger, an object it doesn't touch. It compiles, and nothing of it reaches the C.
 
+### Making instances
+
+`v = Vec(x, y)` in a compiled function compiles when making one runs none of the class's code but storing: a dataclass's own `__init__`, an `__init__` that only assigns `self.a = ...` from its parameters, or none at all. Defaults, keyword arguments, `kw_only`, `frozen`, `slots` and a `__post_init__` method work. The instance's attributes become variables, so making one in a loop costs nothing, and methods, passing it on and `isinstance` work as for one passed in:
+
+```python
+import dataclasses
+import math
+
+@dataclasses.dataclass
+class Vec:
+    x: float
+    y: float = 0.0
+
+    def norm(self):
+        return math.sqrt(self.x * self.x + self.y * self.y)
+
+@scram
+def longest(n):
+    best = 0.0
+    for i in range(n):
+        v = Vec(math.cos(i), math.sin(i) * 2.0)
+        best = max(best, v.norm())
+    return best
+```
+<!-- c: longest(10) -->
+```c-generated
+static int sj_call_0(double v_self__x, double v_self__y, int64_t *sj_tb, int64_t *sj_io) {
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    double t1 = v_self__x;
+    double t2 = v_self__x;
+    double t3 = (t1 * t2);
+    double t4 = v_self__y;
+    double t5 = v_self__y;
+    double t6 = (t4 * t5);
+    double t7 = (t3 + t6);
+    double t8 = t7;
+    double t9 = sqrt(t8);
+    if (t9 != t9 && t8 == t8) SJ_FAIL(3, 2, 4, 0);
+    if (isinf(t9) && isfinite(t8)) SJ_FAIL(3, 2, 4, 0);
+    { double t10 = t9; memcpy(&sj_io[0], &t10, 8); }
+    goto sj_done;
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+
+int sj_kernel(int64_t v_n, const uint64_t *sj_m, volatile int *sj_stop, int64_t *sj_io) {
+    *sj_stop = 0;
+    int64_t *sj_tb = sj_io + 5; sj_tb[0] = 0;
+    double v_best = 0;
+    int64_t v_i = 0;
+    double v_sjc__v__x = 0;
+    double v_sjc__v__y = 0;
+    double v_v__x = 0;
+    double v_v__y = 0;
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    v_best = 0x0.0p+0;
+    int64_t t1 = 0LL, t2 = v_n;
+    int64_t t3 = t1, t4 = t2;
+    for (;;) {
+        int64_t t5 = t4 > t3 && (uint64_t)t4 - (uint64_t)t3 > 65536 ? t3 + 65536 : t4;
+        for (; t3 < t5; t3++) {
+            v_i = t3;
+            int64_t t6 = v_i;
+            double t7 = (double)(t6);
+            double t8 = SJ_LIBM1(1)(t7);
+            if (t8 != t8 && t7 == t7) SJ_FAIL(3, 5, 4, 0);
+            if (isinf(t8) && isfinite(t7)) SJ_FAIL(3, 5, 4, 0);
+            v_sjc__v__x = t8;
+            int64_t t9 = v_i;
+            double t10 = (double)(t9);
+            double t11 = SJ_LIBM1(0)(t10);
+            if (t11 != t11 && t10 == t10) SJ_FAIL(3, 5, 4, 0);
+            if (isinf(t11) && isfinite(t10)) SJ_FAIL(3, 5, 4, 0);
+            double t12 = t11;
+            double t13 = 0x1.0000000000000p+1;
+            v_sjc__v__y = (t12 * t13);
+            v_v__x = v_sjc__v__x;
+            v_v__y = v_sjc__v__y;
+            double t14 = v_best;
+            int t15 = 0;
+            double t16 = v_v__x;
+            double t17 = v_v__y;
+            int64_t t18[5];
+            int t19 = sj_call_0(t16, t17, sj_tb, t18);
+            if (t19) { sj_tb[++sj_tb[0]] = ((int64_t)0 << 32) | t18[1]; sj_io[0] = t18[0]; sj_io[4] = t18[4]; SJ_FAIL(t19, 6, t18[2], t18[3]); }
+            double t20_d; memcpy(&t20_d, &t18[0], 8); double t20 = (double)t20_d;
+            double t21 = t20;
+            double t22 = t21;
+            if (t22 > t14) { t14 = t22; t15 = 0; }
+            double t23 = t14;
+            int t24 = t15;
+            v_best = t23;
+        }
+        if (t3 >= t4) break;
+        if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+    }
+    { double t25 = v_best; memcpy(&sj_io[0], &t25, 8); }
+    goto sj_done;
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+```
+
+Returning one gives a real instance of the class, its attributes in the order `__init__` assigns them, as Python would have made it. A `default_factory`, an `__init__` that does anything else (prints, calls, reads `self`), `__new__`, or a metaclass with its own `__call__` keep the function in Python. The class is part of the signature: give the name a new class and it compiles again, and a method changed on it later is noticed at the next call.
+
+### Objects in attributes
+
+`b.pos.x`, `self.pos.norm()` and `d.inner.pos.x += 1.0` compile: each number on the way is a variable, read at the call and written back if assigned. `return b.pos` returns that very object. Assigning an object (`a.pos = b.pos`) runs as Python, and so does an object reachable two ways (`b.pos is b.vel`, or one shared by two arguments), since a write through one must show through the other.
+
+### Other ways to use an instance
+
+- `q = p` at the top of the function makes `q` another name for `p`; `best = p` in a loop over a list of instances, then `best.x` after it, works too.
+- `return p`, `return ps[i]`, `return best` give back the very object.
+- `isinstance(p, Shape)`, also with a tuple of classes, is decided when the function compiles, from the class in the signature. So is `isinstance(x, float)` for a number.
+- A method can be called in an `if` or `while` test, or a loop header, even if it assigns attributes: `while body.step(dt):`.
+- Methods and functions can take keyword-only parameters: `p.step(dt, damping=0.5)`.
+
 Stays Python, for now:
 
-- an object in an attribute (`p.pos.x`), or a list in one
-- using the object any other way: `q = p`, `hasattr(p, 'x')`, `isinstance`, returning it
-- making an instance in the function
+- `hasattr(p, 'x')`, `getattr(p, name)`, `vars(p)`, and using the object any other way
+- a method that assigns attributes, called inside a comprehension or a lambda
+- an object in an attribute of a list's elements, or of an instance made in the function, and passing one on (`f(b.pos)`)
+- a function that makes an instance, called from another compiled function
 - one object passed under two names, including an object and its own `__dict__`
 - `self.__x` in a class, as Python renames it
 

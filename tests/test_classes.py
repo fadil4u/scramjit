@@ -374,7 +374,7 @@ def test_plain_instances(f, make, compiled):
     (only_a, lambda: [Prop()], False),
     (calls_method, lambda: [Method()], True),                      # a plain method (test_methods.py)
     (only_a, lambda: [HasDescriptor()], False),                     # a data descriptor beats the instance's dict
-    (nested, lambda: [Plain(inner=Plain(a=1.0))], False),
+    (nested, lambda: [Plain(inner=Plain(a=1.0))], True),            # an object in an attribute (test_nested_instances.py)
     (only_a, lambda: [3.5 + 1j], False),
     (only_a, lambda: ['text'], False),
 ])
@@ -671,7 +671,8 @@ def test_reason_says_what_is_wrong():
 
 
 def mixed_use(p):
-    q = p
+    if p.a > 0:
+        q = p                          # not at the top of the body: q might not be p
     return p.a
 
 

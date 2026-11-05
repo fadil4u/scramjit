@@ -392,7 +392,9 @@ Spills per line, once cimo can report them.
    results that must come back as real Python objects.
 9. **Call boundary cost:** about 1.4 µs with numbers (was 3.2) and 2.4 µs with an array (was 6.6), through
    a function generated per signature (`_make_plan`). For numbers: ctypes about 450 ns (the floor), cimo's
-   `Kernel.__call__` about 450 (see cimo's `TODO.md`), scramjit about 500. In Pyodide about 13 µs, not yet
+   `Kernel.__call__` about 450 then, now close to ctypes (cimo 2026-11-05: a void call 365 ns against 364, one int 501,
+   a numpy array 1,250 from 2,431, laptop), scramjit about 500. cimo also now takes a numpy integer for a 64-bit integer
+   parameter as its value (pointers are told apart), so calls needn't wrap such arguments in `int(...)`. In Pyodide about 13 µs, not yet
    broken down. Break-even is 30 to 50 loop iterations per call. A Gymnasium-style `step` is below it, with no loop
    at all: CartPole from a Python loop does 396k steps/s compiled against 698k plain, and 53M with the loop compiled too, which calls between compiled functions now allow without pasting. Rejected: caching an array's address (saves
    200 ns, but `resize(refcheck=False)` would corrupt memory silently); `__call__` by argument count (100 to

@@ -210,6 +210,13 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   which is what the dict order and a frozen dataclass need. Inner objects are owners of their own (`'p.pos'`), flattened breadth first; one object
   reachable two ways runs as Python. `isinstance` folds from the class in the signature. Keyword-only parameters are compiled as parameters
   after the others, the Python fallback getting them back by keyword.
+- **Object model (decided 2026-11-05, to build; `TODO.md`, "Object model").** The case-by-case flattening above can't compose: each
+  shape is its own AST rewrite, so combinations fall back. Instead: every statically named access path is mapped, at the call, to the
+  object it reaches; paths reaching one object share one variable, and that alias pattern is part of the signature, so kernels stay flat
+  with nothing to alias. Only where the code chooses an object by data (indexing a collection that may share, rebinding a reference,
+  walking a structure, keeping objects made in a loop) do objects live in per-class struct-of-arrays pools referenced by integer index.
+  Rejected: struct pointers everywhere, since cimo doesn't keep fields in registers through them even with `restrict` (1.2x to 1.8x
+  slower, measured), and CPython-style objects, whose cost is boxing, dispatch and hashing, not the indirection.
 - **numpy on single numbers (built 2026-11-02).** 25 of 26 functions matched libm bit for bit on 160,024 inputs on arm64 and in Pyodide, so they
   call it; `np.tanh` doesn't, natively. Types are the trap: `np.abs(4)` is int64 natively and int32 in Pyodide, `np.floor(4)` changed in numpy 2.1,
   `np.sqrt(True)` is float16, so those stay Python. `np.minimum(0.0, -0.0)` differs by platform, so the compiler asks the numpy present.

@@ -8,6 +8,75 @@ Biggest first. `requirements.md` is the spec; this is the work queue.
    docs describe the released version, and a feature on `main` but not on PyPI is released the same day or marked
    "from 0.0.4" wherever it's mentioned (`AGENTS.md`). `tests/test_version.py` checks the version agrees everywhere it's written.
 
+## Object model (next; replaces the case-by-case instance work)
+
+Decided 2026-11-05 (see "Object model" in `requirements.md`). Instances, lists and dicts are flattened today by AST rewrites that each
+know one shape (a parameter, an element, an inner object, a local made here, an argument), so every *combination* needs its own code
+and the rest falls back: inner objects of list elements, a function making instances called from compiled code (`a.add(b)` returning
+a new `Vec`), a list in an attribute, `[row, row]`, `b.pos is b.vel`, `callee(a, a)`, a writing method in a comprehension. The
+workarounds show the design's limit: `p__a = p__a` write markers, "mark every inner number written", `check_shared`'s refusals,
+parameter order kept equal in two places by hand (`leaf_types` vs `_push`; getting it wrong gave a wrong answer on 2026-11-05).
+Replace it with one model in which composition is free.
+
+**The model.**
+1. **Static paths are flat variables.** At the call, the dispatcher walks every access path the function names by a fixed path
+   (`a.x`, `a.y`, `b.pos.x`, `self.center.x` through a method, a dict's `p['k']`, through callees and methods transitively) and maps
+   each to the object it lands on, by identity (one memo per call). Paths that land on one object share one variable or buffer:
+   `a.y = a.x` gives one buffer, `b.pos is b.vel` one set of variables, `callee(a, a)` one set for both parameters. The **alias
+   pattern** (which static paths share an object) is part of the signature, like a dtype: inside the kernel there is nothing to
+   alias, every field is a register candidate, and today's flattening is the special case "every path a different object".
+   Checking the pattern costs O(paths in the code), never O(data).
+2. **Data-chosen objects use pools with integer indices.** Only where *which* object an access reaches depends on run-time data:
+   - indexing a collection that may share (`ps[i].x` with `ps` holding duplicates or objects reachable elsewhere): a struct-of-arrays
+     pool per class (one array per attribute, today's columns) and `ps` as an array of pool indices, so `ps[i].x` is
+     `pool_x[ps_ix[i]]`. A list of distinct objects needs no index array: the pool *is* the list (today's layout, which vectorizes);
+   - rebinding a reference (`a.pos = b.pos`, maybe under an `if`): `a.pos` becomes a stored index;
+   - walking a structure (`node = node.next`, trees): the shape is not put in the signature (a recompile per length); `next` is an
+     index field;
+   - objects made in a loop and kept (stored into an attribute or a list): allocated in the pool, which grows.
+   One indirection exactly where C would pay one; nothing anywhere else.
+3. **One marshaller at the boundary**, replacing `_object_fields`/`_objlist_type`/`_dict_type`/list copies: walks the graph from the
+   arguments and globals along the paths and pools the function needs, with the identity memo; checks each class as today (default
+   `__getattribute__`, no descriptor on a used name, the `__mro__`/dict identity guards of `_object_guards` for plans); builds the
+   variables, buffers and pools; after the kernel, writes back what changed (values that didn't change keep their identity, as
+   `_copy_back` does), and turns pool objects that escape (returned, stored into an argument) into Python objects: new instances via
+   `cls.__new__` plus `object.__setattr__` in `__init__`'s assignment order, as `instance_ret ('made', ...)` does now.
+4. **Construction compiles `__init__` as an ordinary method** on a fresh pool slot (or flat variables when the instance never escapes
+   and is never chosen by data), instead of `_init_recipe`'s "only assigns". Any compilable `__init__` works; `__new__`, a metaclass
+   `__call__` and non-plain `__init__` still refuse.
+5. **Calls between compiled functions pass references, not copies**: a static-path object as its variables by reference (C pointers to
+   the caller's locals, or the callee inlined with the caller's variables), a pool object as its index. No result-slot copy-back
+   (`take_writes`), no write markers: a callee's writes are where the caller reads. A callee returning a new instance returns a pool
+   index (or its fields, when it can be flat in the caller), which makes `a.add(b)` and `__add__` work.
+
+**What stays Python** (genuinely new surface, not combinations): attribute names known only at run time (`getattr(p, name)`,
+`hasattr`, `vars`), adding attributes (the layout is fixed per signature), a variable holding different classes at different times
+(later: a compile per class, or a tagged union), `__getattr__`. Properties are methods and can come after.
+
+**Speed, measured 2026-11-05 through cimo** (spring step, ns per step, arm64): locals 5.2; a struct pointer 6.1; a `restrict` pointer
+6.1; writes through one pointer and reads through another 11.6 against 6.4 for the same arithmetic in locals; `restrict` on both 11.6.
+cimo honours `restrict` for dependences, not for keeping fields in registers (no LICM scalar promotion; its `TODO.md`, "Keep struct
+fields in registers across a loop"). The model above avoids depending on that: static paths are locals, so only the pool indirection
+for data-chosen objects costs anything, and that is a gather C would do too. Also worth asking cimo for: struct-path alias analysis
+(`a->vx` and `b->x` can't overlap whether or not `a == b`), which `check_shared` does by hand today.
+
+**How to build it.** The ~200 class tests from 2026-11-05 are the specification and must pass unchanged in observable behaviour
+(`tests/test_classes.py`, `test_methods.py`, `test_instance_lists.py`, `test_passing_instances.py`, `test_instance_returns.py`,
+`test_isinstance.py`, `test_made_instances.py`, `test_nested_instances.py`, `test_dicts.py`, `test_list_args.py`, `test_nested_lists.py`);
+tests that assert a fallback for a combination the model now handles flip to compiled, each checked against Python. Then:
+1. Path analysis on the tree: every static path per parameter/global/local, through methods (by class at key time, `_methods_called`)
+   and callees (`_param_uses`), as one structure, replacing `_attrs_used`, `_element_attrs`, `_nested_uses`, `_passes`, `_returned`.
+2. Signature = per-path types + alias pattern + pool shapes; marshaller as in 3 above, with call plans for the common shapes (numbers
+   only, no sharing) so a call stays near 2 µs.
+3. Lowering: one flatten for all owners (parameters, globals, made locals, inner objects, elements) driven by the path table, replacing
+   `flatten_dicts`, `SelfArg`, `shown_writes`, `check_shared`, `take_writes`, `narrow_passed`; pools and indices as a new lowering for the
+   four data-chosen cases.
+4. Static preflight builds the same path table from class statements (`_static_self`, `_static_inner`, `_static_made` today).
+5. Measure before and after: `bench/`, `examples/classes.py`, `particles.py`, `vectors.py`, `lists.py`, `config_dict.py`; nothing that
+   compiles today may get slower.
+Done when the "Stays Python, for now" lists in `data-structures.md` hold only the genuinely-new surface above, the class examples are no
+slower, and `TODO.md`'s instance items are deleted.
+
 ## Demos
 
 1. **Standalone demo pages, one per demo, with the LLM demo's shell.** `docs/demos/llm/` is the

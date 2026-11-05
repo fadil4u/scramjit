@@ -63,7 +63,9 @@ Replace it with one model in which composition is free.
 cimo honours `restrict` for dependences, not for keeping fields in registers (no LICM scalar promotion; its `TODO.md`, "Keep struct
 fields in registers across a loop"). The model above avoids depending on that: static paths are locals, so only the pool indirection
 for data-chosen objects costs anything, and that is a gather C would do too. Also worth asking cimo for: struct-path alias analysis
-(`a->vx` and `b->x` can't overlap whether or not `a == b`), which `check_shared` does by hand today.
+(`a->vx` and `b->x` can't overlap whether or not `a == b`), which `check_shared` does by hand today. A called `@scram` function's `int64_t io[]`
+of results is registers after inlining now (cimo 2026-11-05: SROA follows the callee's copied pointer); a plain call
+measured the same as inline before and after (6.16 ns, laptop), so a gap through methods would be the struct one.
 
 **How to build it.** The ~200 class tests from 2026-11-05 are the specification and must pass unchanged in observable behaviour
 (`tests/test_classes.py`, `test_methods.py`, `test_instance_lists.py`, `test_passing_instances.py`, `test_instance_returns.py`,

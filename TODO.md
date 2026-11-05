@@ -247,7 +247,7 @@ Spills per line, once cimo can report them.
    and other functions that check their domain on every element, which only `parity=False` lets vectorize (a check after the
    loop would need its stores undone); float sums and `dot`, kept scalar on purpose, since their order is Python's. Re-run the
    probe on `bench/` and the examples when cimo lands conditions.
-2. **Narrow dtypes, what's left:** arithmetic, `**`, `sum()`, the exact numpy functions and most reductions compile (see "Narrow dtypes" in `types.md`).
+2. **Narrow dtypes, what's left:** arithmetic, `**`, `sum()`, the exact numpy functions and most reductions compile (see "Narrow dtypes" in `numpy.md`).
    Not yet: `np.sin`, `np.exp` and the like on float32 (numpy's own SIMD versions: check them against numpy per CPU first), float functions of narrow ints (float16 results),
    `.std()` and `.var()` on float32 (numpy computes them in float32), `.sum()` of signed ints on wasm32 (numpy totals in int32 there), and `np.int8(x)` of a float.
    A literal becoming narrow must fit exactly: not `s = 0.1` on float32, nor a parameter, and such a variable can't meet a Python number afterwards, since the type depends on its flag.
@@ -272,7 +272,7 @@ Spills per line, once cimo can report them.
    value of any type to come back as, and a `return` inside means returning either its value or the loop's outputs.
 7. **numpy calls in compiled functions:** `x * 2` and other whole-array arithmetic still run as Python.
    No cimo work is required for any step; its SIMD only adds speed. In this order:
-   - **numpy functions on single numbers: built.** See `loops-and-builtins.md`. Left in Python: `np.tanh` and `np.power`, which aren't libm's, and
+   - **numpy functions on single numbers: built.** See `numpy.md`. Left in Python: `np.tanh` and `np.power`, which aren't libm's, and
      combinations whose result depends on the platform or numpy version. Bit for bit checked on arm64, wasm and x86-64 with AVX2 (Windows, emulated). Check AVX-512, where numpy
      may use its own `exp` and `sin`. Not yet: `np.mod`, `np.floor_divide`, `np.degrees`, `np.radians`.
    - **Views: built,** as arguments and results too, with `.T`, slice assignment and tuples of views. Not yet: `a, b = m` (unpacking rows), `x[1:] += y`,
@@ -378,6 +378,10 @@ Spills per line, once cimo can report them.
       previous compile shouldn't redo their work; ask for a per-process cache of parsed headers and the
       prelude, or pass them pre-parsed.
     - Target: under 0.3 s warm for a 100-line function natively, under 1 s in Pyodide.
+    - **An edit above a function recompiles it.** Line numbers (`#line`, `SJ_FAIL`) and the file's path are in the C, so cimo's key changes: Gray-Scott first call 86 ms warm, 562 ms after
+      adding one line above it, or renaming the file; a comment that keeps the lines stays warm. Make lines relative to the function, added at the call boundary, and drop the path.
+    - **A warm first call (2026-11-05):** Gray-Scott about 47 ms: 13 generating C, 30 preprocessing it (14 of that the prelude), about 1 loading; `small` about 45, nearly all preprocessing.
+      A cold one is 96% cimo (496 ms, 13 generating). A cache keyed on the Python would save only warm time, and needs cimo's public cache export and import to skip the preprocessing.
 20. **Split `_compiler.py` into a package.** 4.8k lines holding every lowering in one file. Make
     `scramjit/_compiler/` with one module per concern, in the order the compile runs: `infer` (types),
     `index` (indexing, views, slices), `checks` (bounds checks and versioning), `calls` (`@scram` and C

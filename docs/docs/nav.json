@@ -16,7 +16,7 @@
         ["types", "Types and annotations"],
         ["loops-and-builtins", "Loops and builtins"],
         ["data-structures", "Python data structures"],
-        ["numpy", "numpy compatibility"],
+        ["numpy", "Working with numpy"],
         ["semantics", "Semantics"],
         ["gotchas", "Gotchas"],
         ["errors", "Fallback and errors"],

@@ -72,80 +72,9 @@ for v in x:          # x holds floats
 
 As in Python, `s` is the int `0` if the loop doesn't run, and a float otherwise. That works when the int is a literal or an argument, and `s` is only combined with floats, compared with them, or returned. Any other use, such as `s + 1`, `-s`, `t = s` or `if s:`, could differ between the two, so it runs as Python.
 
-## Narrow dtypes
+## numpy's dtypes
 
-Arithmetic on `float32`, `int32`, `int16`, `int8`, `uint32`, `uint16` and `uint8` compiles, as array elements and as numpy scalars passed in, and gives what numpy gives:
-
-```python
-@scram
-def brighten(image, amount):
-    for i in range(len(image)):
-        image[i] = image[i] + amount    # 250 + 10 wraps to 4
-```
-<!-- c: brighten(np.zeros(8, np.uint8), 10) -->
-```c-generated
-int sj_kernel(uint8_t *v_image, int64_t v_image__n, int64_t v_amount, volatile int *sj_stop, int64_t *sj_io) {
-    *sj_stop = 0;
-    int64_t v_i = 0;
-    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
-    int64_t t1 = 0LL, t2 = v_image__n;
-    int64_t t3 = t1, t4 = t2;
-    for (;;) {
-        int64_t t5 = t4 > t3 && (uint64_t)t4 - (uint64_t)t3 > 65536 ? t3 + 65536 : t4;
-        for (; t3 < t5; t3++) {
-            v_i = t3;
-            int64_t t6 = v_i;
-            int64_t t7 = t6;
-            uint8_t t8 = v_image[t7];
-            uint8_t t9 = t8;
-            int64_t t10 = v_amount;
-            int64_t t11 = t10;
-            if (t11 < 0LL || t11 > 255LL) SJ_FAIL(7, 9, t11, 5);
-            int64_t t12 = v_i;
-            int64_t t13 = t12;
-            uint8_t t14 = ((uint8_t)((uint32_t)t9 + (uint32_t)t10));
-            v_image[t13] = t14;
-        }
-        if (t3 >= t4) break;
-        if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
-    }
-sj_done:
-    return 0;
-sj_fail:
-    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
-    return sj_st;
-}
-```
-
-| With a `uint8` or `float32` | Result |
-|:---|:---|
-| a Python int | the same dtype; on an integer dtype an int that doesn't fit raises `OverflowError`, except with `/` |
-| a Python float | `float32` stays `float32`; an integer dtype gives `float64` |
-| another numpy scalar | numpy's promotion: `uint8` with `int8` is `int16`, `int32` with `float32` is `float64` |
-| `/` of two integers | `float64` |
-
-Comparisons follow the same rules, so `x[i] == 0.1` on a `float32` is true when `x[i]` is `np.float32(0.1)`.
-
-Half the memory per element also means twice the numbers in each vector register. On arm64, `y[i] = a * x[i] + y[i]` takes 0.15 ns per element on `float32` against 0.26 on `float64`. Bytes and shorts compile but don't vectorize yet. A running float total doesn't vectorize on any dtype, since parity keeps the order of its additions.
-
-A total may start as a literal, and is numpy's from the first `+=`:
-
-```python
-total = 0.0              # the Python float 0.0 if the loop doesn't run
-for i in range(len(x)):
-    total += x[i] * y[i]     # np.float32 from here on
-```
-
-The literal must fit the dtype exactly: `0`, `0.0` or `0.5` on `float32`, not `0.1` or `16777217`, and on an integer dtype an int, not a float. Starting from `0` on `float32`, the result is the int `0` when the loop doesn't run, as in Python. Such a variable can then only meet numpy scalars, or be compared with an int if it holds ints. Anything else keeps the function in Python.
-
-Also compiled, with numpy's result:
-
-- `**`: an integer dtype wraps, and a negative exponent raises `ValueError`. `float32` uses the C library's `powf`, as numpy does.
-- `sum()`: the total wraps or rounds at each step, as in Python with numpy scalars. Starting from Python's `0`, it's `0` when there's nothing to add, on `float32` too.
-- On `float32` scalars: `np.sqrt`, `np.abs`, `np.square`, `np.sign`, `np.floor`, `np.ceil`, `np.trunc`, `np.rint`, `np.copysign`, `np.minimum` and `np.maximum`, the tests such as `np.isnan`, and conversions such as `np.float32(x)` or `np.uint8(n)`. On integer dtypes, the same functions apart from those numpy gives a float for, since it picks a float as narrow as the int (`np.sqrt` of a `uint8` is a `float16`).
-- Reductions: `.max()`, `.min()`, `.argmax()`, `.argmin()`, `.any()` and `.all()`; `.sum()`, `.prod()` and `.mean()`, with an unsigned int's total as `np.uint64`, as numpy gives it; `.std()` and `.var()` on integer dtypes. On `float32`, `.std()` and `.var()` stay Python.
-
-Other numpy functions, such as `np.sin` or `np.exp` on `float32`, stay in Python: numpy has its own versions, whose last bits vary by CPU.
+`float32`, `int32`, `uint8` and the other narrow dtypes compile and follow numpy's rules: see [Narrow dtypes](numpy.md#narrow-dtypes).
 
 ## The narrowest type that is proven sufficient
 

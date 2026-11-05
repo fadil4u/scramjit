@@ -142,40 +142,13 @@ Sometimes the call still runs to the end first, and `KeyboardInterrupt` arrives 
 - **If the first compile happens off the main thread**, until one happens on it.
 - **In Pyodide**, where there's no Ctrl-C to catch.
 
-### numpy's warnings and `errstate` don't apply
-
-Compiled code does the arithmetic numpy would, and gets the same result, but numpy never sees it:
-
-```python
-def divide(a):
-    return a[0] / a[1]
-
-a = np.array([1.0, 0.0])
-divide(a)                       # inf, with a RuntimeWarning
-scram(divide)(a)                # inf, with no warning
-
-with np.errstate(all='raise'):
-    divide(a)                   # FloatingPointError
-    scram(divide)(a)            # inf
-```
-
-Check for `inf` and `nan` yourself if you rely on these.
-
 ### A short loop inside a Python loop gains nothing
 
 In a function that doesn't compile whole, each lifted loop is a call, which costs more than a few iterations do in Python. scramjit times a loop whose calls are all tiny both ways and keeps the faster, so this is bounded: a 3-iteration loop in a Python loop ran at 0.7x plain Python, a 40-iteration one at about the same speed, and longer ones far faster. Making the outer loop compile too removes the call.
 
-### A few whole-array calls are slower outside a loop
+### numpy
 
-numpy runs `max`, `min`, `argmax`, `argmin`, `any` and `all` with SIMD, which compiled code doesn't have yet. On 1,000,000 elements `x.max()` took 1.6 ms against numpy's 0.18, and `x.all()` 0.5 against 0.2. `x.sum()` and `x.mean()` are within about 15%, since numpy's sum isn't SIMD either. Inside a loop, where a numpy call costs about a microsecond each time, compiled code is far faster unless the arrays are huge. Preflight notes the calls this can affect that aren't in a loop.
-
-### min and max of two different NaNs
-
-`x.max()` with NaNs in the array gives NaN, as numpy does. If those NaNs have different signs, which one you get can differ, since numpy's depends on how its loops are laid out.
-
-### numpy's exact results depend on the CPU it uses
-
-The numpy functions that compile matched numpy bit for bit on arm64, in WebAssembly, and on x86-64 with AVX2. numpy can pick its own routines by CPU, notably with AVX-512, for functions such as `np.exp` and `np.sin`. Those may differ in the last bits from the C library's that compiled code calls. That case hasn't been checked. Results agree to rounding.
+numpy's warnings and `errstate`, whole-array calls that are slower outside a loop, and results that depend on the CPU are in [Working with numpy](numpy.md#gotchas).
 
 ### Debuggers, tracers and coverage don't see inside
 

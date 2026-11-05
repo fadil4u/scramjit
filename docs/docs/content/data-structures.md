@@ -2,7 +2,7 @@
 
 scramjit compiles Python's own data structures where it can hold them in plain C memory: tuples, lists, lists of lists, dicts with fixed keys, attributes of instances (from 0.0.4), enums, and constants at module level. This page lists exactly what works for each, how it's held, what is copied and when, and what keeps a function in Python. Anything that doesn't compile runs as Python with the same result and a `FallbackWarning` that says why, and the loops around it that do compile still do (see [Fallback and errors](errors.md)).
 
-The rule behind all of it: a structure compiles when it is **statically sized** (nothing resizes it at run time) and **statically typed** (the types of what it holds don't change). numpy arrays have their own page, [numpy compatibility](numpy.md).
+The rule behind all of it: a structure compiles when it is **statically sized** (nothing resizes it at run time) and **statically typed** (the types of what it holds don't change). numpy arrays have their own page, [Working with numpy](numpy.md).
 
 At a glance:
 

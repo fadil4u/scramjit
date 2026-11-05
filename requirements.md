@@ -188,6 +188,10 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   only through a call plan that checks those keys; the general path takes 9). A write goes back at both of the kernel's exits, so
   stores before an exception survive. The kernel's written variables are kept out of web splitting, since every exit reads them.
   Exact `dict` only, since a subclass can run code on a read, and one dict passed twice runs as Python.
+- **Instances (built 2026-11-05, from 0.0.4).** Flattened as dicts are, `p.a` becoming a variable. Python's lookup is what must be kept: at every call, walking the class's `__mro__`, an attribute compiles only if
+  no code of the class would run: `__getattribute__` the default one, no `__getattr__`, nothing on the class under that name but a plain value, a slot or a namedtuple's field, and for a write the default `__setattr__` and the
+  attribute on the instance already, since writing back one only on the class would add it even where no assignment ran. A call plan checks the same thing for 2.0 µs a call (10 without one; a dict takes 1.7) by comparing what each Python-made class holds
+  under those names with what it held: built-in classes can't change. `self.__x` stays Python, as the source doesn't show the name Python gives it. An object and its own `__dict__` count as one object passed twice.
 - **numpy on single numbers (built 2026-11-02).** 25 of 26 functions matched libm bit for bit on 160,024 inputs on arm64 and in Pyodide, so they
   call it; `np.tanh` doesn't, natively. Types are the trap: `np.abs(4)` is int64 natively and int32 in Pyodide, `np.floor(4)` changed in numpy 2.1,
   `np.sqrt(True)` is float16, so those stay Python. `np.minimum(0.0, -0.0)` differs by platform, so the compiler asks the numpy present.

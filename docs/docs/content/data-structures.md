@@ -1,6 +1,6 @@
 # Python data structures
 
-scramjit compiles Python's own data structures where it can hold them in plain C memory: tuples, lists, lists of lists, dicts with fixed keys, enums, and constants at module level. This page lists exactly what works for each, how it's held, what is copied and when, and what keeps a function in Python. Anything that doesn't compile runs as Python with the same result and a `FallbackWarning` that says why, and the loops around it that do compile still do (see [Fallback and errors](errors.md)).
+scramjit compiles Python's own data structures where it can hold them in plain C memory: tuples, lists, lists of lists, dicts with fixed keys, attributes of instances (from 0.0.4), enums, and constants at module level. This page lists exactly what works for each, how it's held, what is copied and when, and what keeps a function in Python. Anything that doesn't compile runs as Python with the same result and a `FallbackWarning` that says why, and the loops around it that do compile still do (see [Fallback and errors](errors.md)).
 
 The rule behind all of it: a structure compiles when it is **statically sized** (nothing resizes it at run time) and **statically typed** (the types of what it holds don't change). numpy arrays have their own page, [numpy compatibility](numpy.md).
 
@@ -12,9 +12,10 @@ At a glance:
 | Lists | lists of numbers made in the function, passed in, returned, and at module level (from 0.0.4) | `append` and every method that resizes, `in`, slices, aliases (`ys = xs`), mixed ints and floats |
 | Lists of lists | rectangular, passed in, made in the function and returned (from 0.0.4) | ragged, one row in two places, `m[i, j]`, slices, replacing a row, three levels made in the function |
 | Dicts | passed in, reading and writing the keys the function names | building one, adding or deleting keys, `len`, `in`, `.get`, iterating, a key in a variable |
+| Instances (from 0.0.4) | passed in or at module level, `@scram` methods, reading and writing the attributes the function names: plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | calling methods, properties, an object in an attribute, making an instance, adding an attribute |
 | Enums | `Enum` and `IntEnum` members with int values | `.name`, `Cell(1)`, iterating the class, `Flag` and string enums |
-| Module-level constants | numbers, tuples, arrays, dicts, lists, enum classes | strings, `None`, other objects, assigning with `global` |
-| Sets, strings, classes | | all of them |
+| Module-level constants | numbers, tuples, arrays, dicts, lists, enum classes, instances (from 0.0.4) | strings, `None`, assigning with `global` |
+| Sets, strings | | all of them |
 
 ## Tuples
 
@@ -386,6 +387,130 @@ Each of these makes that call run as Python, with the same result:
 
 And each of these keeps the function, or the loop it's in, in Python: adding or deleting a key, a key in a variable (`p[k]`), `len(p)`, `'a' in p`, `p.get()`, `p.items()` and other methods, iterating over `p`, returning `p`, a dict inside a dict (`p['a']['b']`), and building a dict inside the function. Loops that don't touch the dict that way can still be [lifted out](errors.md#loops-are-lifted-out).
 
+## Instances (from 0.0.4)
+
+An object **passed in** compiles when the function only reads and writes attributes it names. So does `self`, with `@scram` on a method. Nothing about the class has to change:
+
+```python
+import dataclasses
+
+@dataclasses.dataclass
+class Spring:
+    k: float
+    x: float
+    v: float
+    name: str = 'unused, so it can be anything'
+    steps: int = 0
+
+@scram
+def advance(s, dt, n):
+    for _ in range(n):
+        s.v -= s.k * s.x * dt
+        s.x += s.v * dt
+        s.steps += 1
+    return s.x
+```
+<!-- c: advance(Spring(1.0, 1.0, 0.0), 0.01, 10) -->
+```c-generated
+int sj_kernel(double v_s__k, int64_t v_s__steps, double v_s__v, double v_s__x, double v_dt, int64_t v_n, volatile int *sj_stop, int64_t *sj_io) {
+    *sj_stop = 0;
+    int64_t v__ = 0;
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    int64_t t1 = 0LL, t2 = v_n;
+    int64_t t3 = t1, t4 = t2;
+    for (;;) {
+        int64_t t5 = t4 > t3 && (uint64_t)t4 - (uint64_t)t3 > 65536 ? t3 + 65536 : t4;
+        for (; t3 < t5; t3++) {
+            v__ = t3;
+            double t6 = v_s__v;
+            double t7 = v_s__k;
+            double t8 = v_s__x;
+            double t9 = (t7 * t8);
+            double t10 = v_dt;
+            double t11 = (t9 * t10);
+            v_s__v = (t6 - t11);
+            double t12 = v_s__x;
+            double t13 = v_s__v;
+            double t14 = v_dt;
+            double t15 = (t13 * t14);
+            v_s__x = (t12 + t15);
+            int64_t t16 = v_s__steps;
+            int64_t t17 = 1LL;
+            v_s__steps = sj_add((int64_t)t16, (int64_t)t17);
+        }
+        if (t3 >= t4) break;
+        if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+    }
+    { double t18 = v_s__x; memcpy(&sj_io[0], &t18, 8); }
+    goto sj_done;
+sj_done:
+    sj_io[5] = (int64_t)v_s__steps;
+    sj_io[6] = 0;
+    memcpy(&sj_io[7], &v_s__v, 8);
+    sj_io[8] = 0;
+    memcpy(&sj_io[9], &v_s__x, 8);
+    sj_io[10] = 0;
+    return 0;
+sj_fail:
+    sj_io[5] = (int64_t)v_s__steps;
+    sj_io[6] = 0;
+    memcpy(&sj_io[7], &v_s__v, 8);
+    sj_io[8] = 0;
+    memcpy(&sj_io[9], &v_s__x, 8);
+    sj_io[10] = 0;
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+```
+
+```python
+@dataclasses.dataclass
+class Controller:
+    gain: float
+    total: float = 0.0
+
+    @scram
+    def run(self, errors):
+        for e in errors:
+            self.total += e * self.gain
+        return self.total
+```
+
+Each attribute the function uses becomes one C variable, read at the call. So `s.x` costs what a local does, all the loop work applies, and the C is what you'd get from locals. The object itself never reaches the C, so the rest of it can hold anything. A call takes about 2 µs, against 1.7 µs with a dict and 1.6 µs with the same numbers passed separately; with an array among the attributes, about 12 µs against 2.8 µs passed separately, since no call plan exists for that yet.
+
+A written attribute goes back to the object when the function ends, however it ends, so what was stored before an exception is there afterwards, as in Python.
+
+### What the class can do
+
+scramjit looks the attributes up as Python would, **at every call**, and compiles only if doing so runs none of the class's own code. Anything else runs as Python, with a `FallbackWarning` naming the attribute, so these all behave as they always did:
+
+| | Reading | Writing |
+|:---|:---|:---|
+| Plain class, dataclass, `SimpleNamespace` | compiles | compiles |
+| `__slots__`, `@dataclass(slots=True)` | compiles | compiles |
+| An attribute only on the class (`k = 3.0` in the class body) | compiles, and the instance's comes first if it has one | Python, since assigning adds it to the instance |
+| `namedtuple`, `typing.NamedTuple` | compiles | Python, which raises |
+| `@dataclass(frozen=True)` | compiles | Python, which raises |
+| A class with `__setattr__` | compiles | Python, which calls it |
+| `@property` and other descriptors, methods | Python | Python |
+| A class with `__getattribute__` or `__getattr__` | Python | Python |
+| An attribute that isn't there | Python, which raises `AttributeError` | Python, which adds it |
+
+Changing the class later is fine, since a new `@property` or `__setattr__` is noticed at the next call. So is giving an attribute a value of a new type, which compiles for that type, as with an argument.
+
+Attributes can hold numbers, numpy arrays and scalars, tuples of numbers and enum members. An array is the array itself: stores into `p.x[i]` reach it, and `return p.x` returns it. Assigning a new array to `p.x` runs as Python.
+
+An instance at module level works the same way, read at each call, like [other constants](#constants-at-module-level).
+
+Stays Python, for now:
+
+- calling a method, `p.norm()`, inside a compiled function; `@scram` on the method being called from Python is fine
+- an object in an attribute (`p.pos.x`), or a list in one
+- using the object any other way: passing `p` to a function, `q = p`, `hasattr(p, 'x')`, `isinstance`
+- making an instance in the function, or a list of instances
+- one object passed under two names, including an object and its own `__dict__`
+- `self.__x` in a class, as Python renames it
+
 ## Enums
 
 Members of an `Enum` or `IntEnum` whose values are ints compile, held as their values:
@@ -567,14 +692,15 @@ sj_fail:
 
 They behave like arguments, read at each call: a new value needs no recompile, a new type compiles for that type, and writes to a global array, list or dict reach it. Each costs about what an argument does, around 0.2 µs per call. A constant expression made only of literals, such as `MASK = (1 << 64) - 1`, keeps Python's value. A global that isn't there raises `NameError`, as usual.
 
-Still Python: strings, `None`, functions that aren't `@scram`, other objects, and assigning to a global with `global`.
+Still Python: strings, `None`, functions that aren't `@scram`, objects other than [instances that compile](#instances-from-004), and assigning to a global with `global`.
 
-## Sets, strings and classes
+## Sets and strings
 
-Sets, strings and classes keep a function in Python, as do lists and dicts that change size. Each would need allocation and a runtime inside compiled code. Classes, starting with reading and writing attributes on instances and dataclasses, are the next step: see [`TODO.md`](https://github.com/farizrahman4u/scramjit/blob/main/TODO.md).
+Sets and strings keep a function in Python, as do lists and dicts that change size. Each would need allocation and a runtime inside compiled code.
 
 ## Gotchas
 
+- **Attributes are read at the call, and written back at the end.** Inside one call that's invisible, but another thread changing the object during the call won't be seen, and won't see the writes until it ends. Nothing in compiled code can call back into Python, so only threads can see this.
 - **Copies, not references, at the call (lists).** A list passed in is copied in and the changes copied back when the call ends. Inside one call that's invisible. But another thread changing the same list during the call, or a callback that reads it, would see the old values. Nothing in compiled code can call back into Python, so only threads can see this.
 - **Identity in a changed row.** In a list of lists, a row whose numbers changed is replaced in one go, so `m[i][j] is old` can be false for a number that kept its value. Use `==`, as you would for numbers anyway.
 - **`[[0] * w] * h` stays Python,** on purpose: its rows are one list. Write `[[0] * w for _ in range(h)]` for a table, which is also what you'd want in plain Python.

@@ -502,18 +502,19 @@ class Safepoint(ast.Constant):
 
 def flatten_dicts(fdef, arg_types):
     """A dict parameter becomes one parameter per key the function uses, and p['a'] a plain variable, so
-    everything the compiler knows about variables applies. Any other use of p can't work this way. Returns the
-    function, the new parameter types, and {variable: (argument index, key, how the user wrote it)}."""
+    everything the compiler knows about variables applies. An instance does too, by attribute: p.a. Any other use of p
+    can't work this way. Returns the function, the new parameter types, and {variable: (argument index, key, how the
+    user wrote it)}."""
     a = fdef.args
     params = a.posonlyargs + a.args
-    if not any(t is not None and t.kind == 'dict' for t in arg_types) or len(params) != len(arg_types):
+    if not any(t is not None and t.kind in ('dict', 'object') for t in arg_types) or len(params) != len(arg_types):
         return fdef, arg_types, {}
     tree = copy.deepcopy(fdef)
     taken = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {p.arg for p in params}
     slots, flat = {}, {}
     new_params, new_types = [], []
     for i, (p, t) in enumerate(zip(tree.args.posonlyargs + tree.args.args, arg_types)):
-        if t.kind != 'dict':
+        if t.kind not in ('dict', 'object'):
             new_params.append(p)
             new_types.append(t)
             continue
@@ -523,23 +524,33 @@ def flatten_dicts(fdef, arg_types):
                 name += '_'
             taken.add(name)
             flat[p.arg, key] = name
-            slots[name] = (i, key, f'{p.arg}[{key!r}]')
+            slots[name] = (i, key, f'{p.arg}.{key}' if t.kind == 'object' else f'{p.arg}[{key!r}]')
             new_params.append(ast.copy_location(ast.arg(name), p))
             new_types.append(ft)
 
     class Flatten(ast.NodeTransformer):
         def visit_Subscript(self, n):
-            if isinstance(n.value, ast.Name) and isinstance(n.slice, ast.Constant) \
+            if isinstance(n.value, ast.Name) and n.value.id in dicts and isinstance(n.slice, ast.Constant) \
                     and type(n.slice.value) in (str, int) and (n.value.id, n.slice.value) in flat:
                 return ast.copy_location(ast.Name(flat[n.value.id, n.slice.value], n.ctx), n)
+            return self.generic_visit(n)
+
+        def visit_Attribute(self, n):
+            if isinstance(n.value, ast.Name) and n.value.id in objects and (n.value.id, n.attr) in flat:
+                if isinstance(n.ctx, ast.Del):
+                    raise Unsupported(n, f'del {n.value.id}.{n.attr}')
+                return ast.copy_location(ast.Name(flat[n.value.id, n.attr], n.ctx), n)
             return self.generic_visit(n)
 
         def visit_Name(self, n):
             if n.id in dicts:
                 raise Unsupported(n, f"{n.id} is used as a dict object, and only {n.id}['key'] with a key it has compiles")
+            if n.id in objects:
+                raise Unsupported(n, f'{n.id} is used as an object, and only {n.id}.attribute compiles')
             return n
 
     dicts = {p.arg for p, t in zip(params, arg_types) if t.kind == 'dict'}
+    objects = {p.arg for p, t in zip(params, arg_types) if t.kind == 'object'}
     tree = Flatten().visit(tree)
     tree.args.posonlyargs, tree.args.args = [], new_params
     return tree, new_types, slots

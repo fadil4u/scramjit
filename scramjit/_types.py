@@ -222,6 +222,7 @@ def is_int_enum(t):
 
 
 _DICTS = {}
+_OBJECTS = {}
 
 
 def dict_of(fields):
@@ -230,6 +231,14 @@ def dict_of(fields):
     if key not in _DICTS:
         _DICTS[key] = Type('dict[' + ', '.join(f'{k}: {n}' for k, n in key) + ']', None, 'dict', elem=list(fields))
     return _DICTS[key]
+
+
+def object_of(name, fields):
+    """An instance, by the attributes a function uses [(attribute, type)]: in C, one variable per attribute."""
+    full = name + '(' + ', '.join(f'{k}: {t.name}' for k, t in fields) + ')'
+    if full not in _OBJECTS:
+        _OBJECTS[full] = Type(full, None, 'object', elem=list(fields))
+    return _OBJECTS[full]
 
 
 def leaves(t):

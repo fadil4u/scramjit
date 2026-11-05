@@ -25,6 +25,7 @@ Python and through scramjit, and asserts the results are identical. They need nu
 | [`boxes.py`](boxes.py) | The box overlapping a query most, boxes as nested tuples `((x0, y0), (x1, y1))` | A Python function call per box | 4.21 s | 1.1 ms | 3872x |
 | [`lists.py`](lists.py) | A rolling maximum over a plain Python list, returning a list; all shortest paths in a list of lists, in place | Each window is scanned; every pair through every vertex | 0.31 s | 23 ms | 13x |
 | [`constants.py`](constants.py) | A filter with its settings at module level: a number, a tuple, an array, a dict | Clips each sample; each pass repeats over its own output | 0.52 s | 1.5 ms | 338x |
+| [`classes.py`](classes.py) | A temperature controller as a dataclass, with `@scram` on its method, its state left on the object | Each step depends on the one before | 1.41 s | 26 ms | 53x |
 | [`config_dict.py`](config_dict.py) | An epidemic model with its settings and results in dicts | Each day depends on the one before | 0.081 s | 4.4 ms | 18x |
 
 One run of each on arm64 Linux, on a busy machine, so expect faster and somewhat different numbers. The

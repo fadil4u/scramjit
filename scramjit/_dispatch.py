@@ -2,6 +2,7 @@
 
 import array
 import ast
+import collections
 import itertools
 import copy
 import enum
@@ -185,6 +186,92 @@ def _dict_keys(fdef):
     return {i: sorted(keys, key=repr) for i, keys in found.items()}
 
 
+def _attrs_used(fdef):
+    """For each parameter read as p.a: (the attributes, sorted; those it assigns), if it turns out to be an instance.
+    Not p.__a: in a class that means another name, which the source doesn't say."""
+    if fdef is None:
+        return {}
+    index = {p.arg: i for i, p in enumerate(fdef.args.posonlyargs + fdef.args.args)}
+    found = {}
+    for name, attr, written in _attribute_uses(fdef):
+        if name in index:
+            names, stores = found.setdefault(index[name], (set(), set()))
+            names.add(attr)
+            if written:
+                stores.add(attr)
+    return {i: (sorted(names), stores) for i, (names, stores) in found.items()}
+
+
+def _attribute_uses(fdef):
+    for n in ast.walk(fdef):
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and not (n.attr.startswith('__') and not n.attr.endswith('__')):
+            yield n.value.id, n.attr, not isinstance(n.ctx, ast.Load)
+
+
+def _in_class(cls, name):
+    """What the class holds under a name, as Python's attribute lookup finds it. _MISSING if nothing."""
+    for k in cls.__mro__:
+        if name in k.__dict__:
+            return k.__dict__[name]
+    return _MISSING
+
+
+_DEFAULT_GET = (object.__dict__['__getattribute__'], tuple.__dict__['__getattribute__'])    # both Python's own lookup
+_DEFAULT_SET = object.__dict__['__setattr__']
+_TUPLE_FIELD = type(collections.namedtuple('_', 'a').a)     # a namedtuple's field; property if its C version is missing
+
+
+def _in_slots(cls, name):
+    for k in cls.__mro__:
+        slots = k.__dict__.get('__slots__', ())
+        if name == slots or (not isinstance(slots, str) and name in slots):
+            return True
+    return False
+
+
+def _object_fields(x, names, written):
+    """[(attribute, type)] if reading these attributes runs no code of the object's, and assigning those written only
+    stores; if not, the reason as a string. This holds only for now, since a class can change: it's asked at every call."""
+    cls = type(x)
+    if not any(_in_class(cls, '__getattribute__') is d for d in _DEFAULT_GET):
+        return f'{cls.__name__} defines __getattribute__'
+    if _in_class(cls, '__getattr__') is not _MISSING:
+        return f'{cls.__name__} defines __getattr__'
+    if written and _in_class(cls, '__setattr__') is not _DEFAULT_SET:
+        return f'{cls.__name__} defines __setattr__ (a frozen dataclass does), and {sorted(written)[0]} is assigned'
+    held = getattr(x, '__dict__', None)
+    if type(held) is not dict:
+        held = {}
+    fields = []
+    for name in names:
+        c = _in_class(cls, name)
+        if c is _MISSING:
+            if name not in held:
+                return f'{cls.__name__} has no attribute {name}'     # assigning a new one, or Python's AttributeError
+        elif type(c) is _TUPLE_FIELD and _TUPLE_FIELD is not property and isinstance(x, tuple):
+            if name in written:
+                return f'{name} is a field of a namedtuple, and is assigned'
+        elif type(c) is types.MemberDescriptorType and _in_slots(cls, name):
+            pass
+        elif any(hasattr(type(c), m) for m in ('__get__', '__set__', '__delete__')):
+            return f'{cls.__name__}.{name} is a method, property or other descriptor, which runs Python'
+        elif name in written and name not in held:
+            return f'{name} is on the class and not yet on the instance, and is assigned'
+        v = getattr(x, name, _MISSING)
+        if v is _MISSING:
+            return f'{cls.__name__} has no attribute {name}'
+        t = _arg_type(v)
+        if t is None or t is T.U64 or t.kind in ('list', 'function', 'enumclass') or T.is_pylist(t):
+            return f'{name} is a {type(v).__name__}'
+        fields.append((name, t))
+    return fields
+
+
+def _member(x, key):
+    """What a dict holds under a key, or an instance under an attribute."""
+    return x[key] if type(x) is dict else getattr(x, key)
+
+
 def _push(cargs, x, t):
     """The C arguments for one Python argument."""
     if t.kind in ('function', 'enumclass'):
@@ -207,6 +294,9 @@ def _push(cargs, x, t):
     elif t.kind == 'dict':
         for key, ft in t.elem:
             _push(cargs, x[key], ft)
+    elif t.kind == 'object':
+        for key, ft in t.elem:
+            _push(cargs, getattr(x, key), ft)
     elif t.np:
         cargs.append(x.item())
     elif t is T.U64:
@@ -374,6 +464,30 @@ def functions():
     return list(_functions)
 
 
+def _object_guards(env, i, x, t, n, attrs, again):
+    """What a plan checks of an instance: that its class looks up these names as it did (a class can change, and only those
+    written in Python can), then what _object_fields checks of the object. The first fetched value of each attribute is
+    f{i}_{k}. Nothing here runs the object's code, once the class has been checked."""
+    names, written = attrs
+    cls = type(x)
+    env[f'cls{i}'], env[f'mro{i}'], env['MISSING'] = cls, cls.__mro__, _MISSING
+    out = [f'    if cls{i}.__mro__ is not mro{i}:\n        return slow({again})']
+    asked = list(names) + ['__getattribute__', '__getattr__'] + (['__setattr__'] if written else [])
+    for c, k in enumerate(k for k in cls.__mro__ if k.__flags__ & (1 << 9)):     # 1 << 9: a class made at run time
+        env[f'held{i}_{c}'] = k.__dict__
+        for a, name in enumerate(asked):
+            env[f'was{i}_{c}_{a}'] = k.__dict__.get(name, _MISSING)
+            out.append(f'    if held{i}_{c}.get({name!r}, MISSING) is not was{i}_{c}_{a}:\n        return slow({again})')
+    for k, (key, ft) in enumerate(t.elem):
+        env[f'type{i}_{k}'] = type(getattr(x, key))
+        out.append(f'    f{i}_{k} = getattr({n}, {key!r}, MISSING)\n    if type(f{i}_{k}) is not type{i}_{k}:\n        return slow({again})')
+        if ft is T.INT:
+            out.append(f'    if not -9223372036854775808 <= f{i}_{k} <= 9223372036854775807:\n        return slow({again})')
+        if key in written and type(_in_class(cls, key)) is not types.MemberDescriptorType:      # not on the class only: assigning would add it, whatever ran
+            out.append(f'    if {key!r} not in {n}.__dict__:\n        return slow({again})')
+    return out
+
+
 def _make_plan(f, entry, args):
     """A small function for calls with these argument types, or f._slow_call if they need the general
     path. It's generated because a call is where the time goes: what's known from the types is decided
@@ -411,6 +525,11 @@ def _make_plan(f, entry, args):
             cargs.extend(f's{i}[{k}]' for k in range(x.ndim))
         elif t.kind in ('tuple', 'list'):
             return f._slow_call
+        elif t.kind == 'object':
+            if not all(ft.is_number for _, ft in t.elem) or any(y.kind == 'dict' for y in entry.types):   # x, vars(x)
+                return f._slow_call
+            for k, (key, ft) in enumerate(t.elem):
+                cargs.append(f'f{i}_{k}.item()' if ft.np else f'f{i}_{k}')
         elif t.kind == 'dict':
             if not all(ft.is_number for _, ft in t.elem):
                 return f._slow_call
@@ -446,6 +565,8 @@ def _make_plan(f, entry, args):
                 if ft is T.INT:
                     src_guards.append(f'    if not -9223372036854775808 <= f{i}_{k} <= 9223372036854775807:\n        '
                                       f'return slow({again})')
+        elif t.kind == 'object':
+            src_guards.extend(_object_guards(env, i, args[i], t, n, f._attrs[i], again))
         elif t is T.U64:
             src_guards.append(f'    if not 9223372036854775808 <= {n} <= 18446744073709551615:\n        return slow({again})')
         elif t.kind == 'int' and not t.np:
@@ -476,10 +597,17 @@ def _make_plan(f, entry, args):
     saves = ''
     for n, (i, key, at, ot) in enumerate(entry.outs):
         env[f'okey{n}'], env[f'otype{n}'] = key, ot
-        saves += f'    {names[i]}[okey{n}] = box(io, {at}, {at + 8}, otype{n})\n'
+        if entry.types[i].kind == 'object':
+            saves += f'    {names[i]}.{key} = box(io, {at}, {at + 8}, otype{n})\n'
+        else:
+            saves += f'    {names[i]}[okey{n}] = box(io, {at}, {at + 8}, otype{n})\n'
     dicts = [names[i] for i, t in enumerate(entry.types) if t.kind == 'dict']
     if len(dicts) > 1:                 # two names for one dict: a write must show through both
         pairs = ' or '.join(f'{a} is {b}' for k, a in enumerate(dicts) for b in dicts[k + 1:])
+        src_guards.append(f'    if {pairs}:\n        return slow({again})')
+    objects = [names[i] for i, t in enumerate(entry.types) if t.kind == 'object']
+    if len(objects) > 1:
+        pairs = ' or '.join(f'{a} is {b}' for k, a in enumerate(objects) for b in objects[k + 1:])
         src_guards.append(f'    if {pairs}:\n        return slow({again})')
     src = f"""def plan({', '.join(real)}):
 {chr(10).join(src_guards)}
@@ -536,6 +664,7 @@ class Function:
             (p, fn.__annotations__.get(p)) for p in code.co_varnames[:code.co_argcount]) if a in _ANNOTATIONS]
         self._tree, self._why_not = self._parse(fn) if _loop is None else (_loop[0], None)
         self._dict_keys = _dict_keys(self._tree)
+        self._attrs = _attrs_used(self._tree)
         self._replans = 8         # how many times more a dict's new value types get a call plan of their own
         self._np = None
 
@@ -555,7 +684,7 @@ class Function:
             return None, 'not a plain def function'
         return fdef, None
 
-    # descriptor: work as a method too (self is then an argument, which falls back)
+    # descriptor: work as a method too (self is then an argument)
     def __get__(self, obj, cls=None):
         return self if obj is None else types.MethodType(self, obj)
 
@@ -622,7 +751,7 @@ class Function:
             return self._timed(key, entry, args)
         if entry is not PYTHON:
             self._plans[tuple(map(type, real))] = _make_plan(self, entry, args)
-        elif None not in key and not any(t.kind == 'array' for t in key) and dict not in map(type, args) and not self._hidden:
+        elif None not in key and not any(t.kind in ('array', 'object') for t in key) and dict not in map(type, args) and not self._hidden:
             self._plans[tuple(map(type, real))] = self._py   # these types always run as Python
         if entry is PYTHON:
             return self._py(*real)
@@ -649,7 +778,15 @@ class Function:
             loads |= _lift._split(st)[0]
         called = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
         g = self._fn.__globals__
-        self._hidden = sorted(n for n in loads - local - called if n in g and (_arg_type(g[n]) is not None or type(g[n]) is dict))
+        attrs = {}
+        for name, attr, written in _attribute_uses(tree):
+            names, stores = attrs.setdefault(name, (set(), set()))
+            names.add(attr)
+            if written:
+                stores.add(attr)
+        self._hidden = sorted(n for n in loads - local - called if n in g and (
+            _arg_type(g[n]) is not None or type(g[n]) is dict
+            or (n in attrs and type(_object_fields(g[n], sorted(attrs[n][0]), attrs[n][1])) is list)))
         callees = sorted(n for n in called - local if type(g.get(n)) is Function)
         self._hidden += callees + sorted(n for n in called - local if T.is_c_function(g.get(n)))
         self._hidden_from = [(g, n) for n in self._hidden]
@@ -665,6 +802,7 @@ class Function:
             self._ctree = copy.deepcopy(tree)
             self._ctree.args.args = self._ctree.args.args + [ast.copy_location(ast.arg(n), tree) for n in self._hidden]
             self._dict_keys = _dict_keys(self._ctree)
+            self._attrs = _attrs_used(self._ctree)
 
     def _hidden_names_read(self):
         """The globals this function itself reads, not those it reads only through what it calls."""
@@ -684,9 +822,9 @@ class Function:
             entry = self._specialize(key, args)
         if entry is PYTHON:
             return self._py(*real)
-        if self._replans and dict in map(type, args):    # writing p['s'] can change what the plan checks for
+        if self._replans and any(t.kind in ('dict', 'object') for t in entry.types):    # writing p['s'] can change what the plan checks for
             self._replans -= 1
-            self._plans[tuple(map(type, args))] = _make_plan(self, entry, args)
+            self._plans[tuple(map(type, real))] = _make_plan(self, entry, args)
         return self._run(entry, args)
 
     def _failed(self, entry, status, io):
@@ -820,6 +958,9 @@ class Function:
             if t is None and i >= real and self._hidden[i - real] not in self._hidden_names_read():
                 raise Unsupported(None, f'a function it calls reads the global {self._hidden_from[i - real][1]}, which is {_describe(x, t)}')
             if t is None:
+                fields = _object_fields(x, *self._attrs[i]) if i in self._attrs and type(x) is not dict else None
+                if type(fields) is str:
+                    raise Unsupported(None, f'an argument of type {_describe(x, t)} is not compiled: {fields}')
                 raise Unsupported(None, f'an argument of type {_describe(x, t)} is not compiled')
             if t.kind == 'function' and i < real:
                 raise Unsupported(None, 'a function passed as an argument')
@@ -871,14 +1012,27 @@ class Function:
         lists = [id(y) for x in args if type(x) is list for y in [x] + [r for r in x if type(r) is list]]
         if len(set(lists)) != len(lists):        # one list under two names: a copy each would hide the writes
             key = tuple(None if type(x) is list else t for x, t in zip(args, key))
-        if not self._dict_keys or dict not in map(type, args):
+        if not (self._attrs and None in key) and (not self._dict_keys or dict not in map(type, args)):
             return key
         seen, out = set(), list(key)
         for i, x in enumerate(args):
             if type(x) is dict:
                 out[i] = None if id(x) in seen else self._dict_type(x, self._dict_keys.get(i))
                 seen.add(id(x))          # two names for one dict: a write must show through both
+            elif out[i] is None and i in self._attrs:
+                out[i] = self._object_type(x, self._attrs[i], seen)
         return tuple(out)
+
+    @staticmethod
+    def _object_type(x, attrs, seen):
+        fields = _object_fields(x, *attrs)
+        if type(fields) is not list:             # first: asking anything else of x could run its code
+            return None
+        held = getattr(x, '__dict__', None)      # an instance and its own __dict__ are two names for one thing as well
+        ids = [id(x)] if held is None else [id(x), id(held)]
+        fresh = not seen.intersection(ids)
+        seen.update(ids)
+        return T.object_of(type(x).__qualname__, fields) if fresh else None
 
     @staticmethod
     def _dict_type(d, keys):
@@ -931,7 +1085,10 @@ class Function:
         if status == RERUN and entry.rerun:
             return self._py(*self._real(args))
         for i, key, at, ot in entry.outs:
-            args[i][key] = self._box(io, at, at + 8, ot)
+            if type(args[i]) is dict:
+                args[i][key] = self._box(io, at, at + 8, ot)
+            else:
+                setattr(args[i], key, self._box(io, at, at + 8, ot))
         if status:
             self._failed(entry, status, io)
         r = entry.ret
@@ -998,7 +1155,7 @@ class Function:
                         out.append(_lists_from(address, value[10::2][:typestr.ndim], typestr.elem))
                     else:
                         i, key = entry.array_args[which]
-                        out.append(args[i] if key is None else args[i][key])
+                        out.append(args[i] if key is None else _member(args[i], key))
                     continue
                 if block:
                     if made is None:
@@ -1010,7 +1167,7 @@ class Function:
                         address += root.__array_interface__['data'][0] - data
                 else:
                     i, key = entry.array_args[which]
-                    root = args[i] if key is None else args[i][key]
+                    root = args[i] if key is None else _member(args[i], key)
                 if same:
                     out.append(root)
                 else:

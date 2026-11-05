@@ -240,6 +240,7 @@ def assumed_signature(fdef, globals_=None, seen=()):
                 and n.value.attr == 'shape' and isinstance(n.value.value, ast.Name):
             ndim[n.value.value.id] = max(ndim.get(n.value.value.id, 1), len(n.targets[0].elts))
     keys = _assumed_dicts(fdef)
+    objects = _assumed_objects(fdef, ndim)
     ints = _assumed_ints(fdef) | passed_ints
     sig = []
     a = fdef.args
@@ -260,7 +261,9 @@ def assumed_signature(fdef, globals_=None, seen=()):
             literal[p.arg] = {int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(d.value)]
     for p in params:
         name = ast.unparse(p.annotation) if p.annotation is not None else None
-        if p.arg in literal and name is None and p.arg not in ndim and p.arg not in keys:
+        if p.arg in objects and name not in ann:
+            sig.append(T.object_of('object', sorted(objects[p.arg].items())))
+        elif p.arg in literal and name is None and p.arg not in ndim and p.arg not in keys:
             sig.append(literal[p.arg])
         elif p.arg in shapes and name is None and p.arg not in ndim and p.arg not in keys:
             sig.append(shapes[p.arg])
@@ -301,6 +304,27 @@ def _assumed_dicts(fdef):
                 and type(n.slice.value) is str:
             return n.value.id, n.slice.value
         return None
+    return _assumed_fields(fdef, key_of)
+
+
+ARRAY_ATTRIBUTES = {'T', 'dtype', 'shape', 'size', 'ndim', 'copy', 'flatten', 'astype', 'item', 'tolist', 'reshape', 'real', 'imag', 'flat'} | set(REDUCTIONS)
+
+
+def _assumed_objects(fdef, ndim):
+    """Parameters read as p.a, where that isn't what an array has and p isn't used as an array, are instances, as for dicts
+    above. p.a() is a method, which runs as Python: no type here says so, so the compile that follows finds it."""
+    calls = {id(n.func) for n in ast.walk(fdef) if isinstance(n, ast.Call)}
+    found = {n.value.id for n in ast.walk(fdef) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and id(n) not in calls
+             and n.attr not in ARRAY_ATTRIBUTES and n.value.id not in ndim}
+
+    def key_of(n):
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in found and id(n) not in calls:
+            return n.value.id, n.attr
+        return None
+    return _assumed_fields(fdef, key_of)
+
+
+def _assumed_fields(fdef, key_of):
     a = fdef.args
     names = {p.arg for p in a.posonlyargs + a.args}
     found = {}

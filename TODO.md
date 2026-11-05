@@ -300,7 +300,9 @@ Spills per line, once cimo can report them.
      function too, from `[[c] * w for _ in range(h)]` and its comprehension form (`[[c] * w] * h`, one row repeated, stays Python).
      Returned too. Not yet: making more than two levels, returning a row, numpy scalars as elements, and a call plan for list
      arguments (each call takes the general path).
-   - **Classes:** attribute reads and writes on instances and dataclasses, then method calls.
+   - **Instances: attributes built, from 0.0.4** (see "Instances" in `data-structures.md`), passed in, as `self` and at module level. Not yet, in this order: calling a method from compiled code (`p.norm()`,
+     with its writes coming back), an object in an attribute (`p.pos.x`, where two can share one), an instance made in the function, and a list of instances. A call plan for an array among the
+     attributes: about 12 µs per call now, against 2 for numbers and 2.8 for the array passed separately.
    - **Dicts, what's left:** a dict passed in compiles (see "Containers"). Not yet: nested dicts, a dict built in the function, returning
      one, `len(p)` and `'a' in p`, which are known from the keys. A function that could add a key still runs as Python.
 

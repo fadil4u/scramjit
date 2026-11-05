@@ -593,6 +593,46 @@ def test_static_understands_dict_arguments(tmp_path):
     assert states == {'step': 'compiled', 'table': 'compiled', 'not_fixed': 'python'}
 
 
+OBJECTS = '''
+import numpy as np
+from scramjit import scram
+
+class Spring:
+    @scram
+    def advance(self, dt, n):
+        for i in range(n):
+            self.x += self.v * dt
+            self.log[i] = self.x
+
+    @scram
+    def calls_a_method(self):
+        return self.norm() + 1.0
+
+@scram
+def reads(p, x):
+    s = 0.0
+    for i in range(len(x)):
+        s += x[i] * p.k
+    return s
+
+@scram
+def is_an_array(x):
+    return x.shape[0] + x.sum()
+
+@scram
+def passes_it_on(p):
+    return str(p.a)
+'''
+
+
+def test_static_understands_instances(tmp_path):
+    f = tmp_path / 'objects.py'
+    f.write_text(OBJECTS)
+    d = json.loads(_cli('preflight', f, '--json', '--no-suggest').stdout)
+    states = {x['name']: x['state'] for x in d['files'][0]['functions']}
+    assert states == {'advance': 'compiled', 'calls_a_method': 'python', 'reads': 'compiled', 'is_an_array': 'compiled', 'passes_it_on': 'python'}, states
+
+
 VIEWS = '''
 from scramjit import scram
 

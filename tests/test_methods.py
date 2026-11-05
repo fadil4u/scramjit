@@ -245,7 +245,7 @@ def passes_other(a, b):
     (recursive, lambda: [V(1.0, 2.0)], False),
     (in_while_test, lambda: [V(1.0, 2.0)], True),
     (writes_in_while_test, lambda: [V(3.0, 2.0)], True),
-    (writes_in_comprehension, lambda: [V(3.0, 2.0)], False),
+    (writes_in_comprehension, lambda: [V(3.0, 2.0)], True),       # its writes are shown after the statement
     (writes_in_if_test, lambda: [V(3.0, 2.0), 6], True),
     (writes_in_for_header, lambda: [V(3.0, 2.0, 2)], True),
     (static, lambda: [V(1.0, 2.0)], False),
@@ -435,3 +435,38 @@ def test_keyword_only_parameters():
     assert kw_scaled(3.0) == 6.0 and kw_scaled(3.0, add=1, k=1.0) == 4.0 and kw_scaled.signatures
     with pytest.raises(TypeError):
         kw_scaled(3.0, 2.0)
+
+
+
+@dataclasses.dataclass
+class W:
+    x: float
+    y: float
+
+    def grow(self, k):
+        self.x *= k
+        return self.x
+
+
+def writes_in_list_comprehension(ps):
+    return sum([p.grow(2.0) + p.y for p in ps], 0.0) + ps[0].x
+
+
+def writes_in_generator(ps):
+    return max(ps[i].grow(0.5) for i in range(len(ps))) + ps[-1].x
+
+
+def writes_in_lambda(p):
+    f = lambda: p.grow(2.0)
+    f()
+    return p.x
+
+
+@pytest.mark.parametrize('f,make,compiled', [
+    (writes_in_list_comprehension, lambda: [[W(3.0, 2.0), W(1.0, 5.0)]], True),
+    (writes_in_list_comprehension, lambda: (lambda w: [[w, W(1.0, 5.0), w]])(W(3.0, 2.0)), True),
+    (writes_in_generator, lambda: [[W(3.0, 2.0), W(1.0, 5.0)]], True),
+    (writes_in_lambda, lambda: [W(3.0, 2.0)], False),
+])
+def test_writing_methods_in_comprehensions(f, make, compiled):
+    same(f, make, compiled)

@@ -627,7 +627,7 @@ Each method compiles as a [call between functions](loops-and-builtins.md#calls-b
 
 A call to a method costs about 5 ns more than the same code written in the loop, since cimo doesn't yet keep a call's results in registers once it inlines it. That's 15 ns a step against 8.5 for the loop above, or 128 ns as Python.
 
-A method that assigns attributes must be called in a plain statement, such as `b.step(dt)`, `y = b.step(dt)`, `s += b.f()` or `return b.f()`, and not in an `if` or `while` test, a loop header, a comprehension or a lambda. One that only reads can be called anywhere. A method can read module-level values, which are read at each call as the function's own are. Keyword-only parameters, recursion, and a method that changes an attribute's type run as Python.
+A method that assigns attributes can be called in a statement, an `if` or `while` test, a loop header or a comprehension (`sum([p.grow(2.0) for p in ps], 0.0)`), but not in a lambda, which may run later, nor in a `with` or `try` header. One that only reads can be called anywhere. A method can read module-level values, which are read at each call as the function's own are. Keyword-only parameters, recursion, and a method that changes an attribute's type run as Python.
 
 ### Passing an instance on
 
@@ -995,7 +995,7 @@ An object can be reached two ways: `f(p, p)`, `b.pos is b.vel`, `c.pos is a.pos`
 Stays Python, for now:
 
 - `hasattr(p, 'x')`, `getattr(p, name)`, `vars(p)`, and using the object any other way
-- a method that assigns attributes, called inside a comprehension or a lambda
+- a method that assigns attributes, called inside a lambda
 - a method of an instance made in the function that uses an object it holds
 - an object and its own `__dict__` passed as two arguments
 - `self.__x` in a class, as Python renames it

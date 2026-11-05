@@ -1451,24 +1451,34 @@ def shown_writes(stmts):
             for h in s.handlers:
                 h.body = shown_writes(h.body)
         own = [v for f, v in ast.iter_fields(s) if f not in STATEMENTS]
-        writes, deferred, places = set(), False, {}
+        writes, deferred, places, inside = set(), False, {}, set()
         for v in own:
             for n in ast.walk(v) if isinstance(v, ast.AST) else [x for y in (v or []) if isinstance(y, ast.AST) for x in ast.walk(y)]:
-                if isinstance(n, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.Lambda)):
+                if isinstance(n, ast.Lambda):
                     deferred = deferred or any(getattr(m, 'sj_writes', None) for m in ast.walk(n))
-                if isinstance(n, ast.IfExp) or isinstance(n, ast.BoolOp):
-                    pass
+                if isinstance(n, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                    inside |= {id(m) for m in ast.walk(n)}      # runs within the statement: shown after it, as for a call
                 writes |= {(name, ast.dump(i) if i is not None else None) for name, i in getattr(n, 'sj_writes', None) or ()}
                 for name, i in getattr(n, 'sj_writes', None) or ():
-                    places[name, ast.dump(i) if i is not None else None] = i
+                    key = (name, ast.dump(i) if i is not None else None)
+                    places[key] = i
+                    if id(n) in inside and i is not None:       # an element the comprehension chose: its index is gone after
+                        places[key] = None
         if writes and (deferred or not isinstance(s, (ast.Expr, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Return, ast.If, ast.While, ast.For))):
-            raise Unsupported(s, 'a method that assigns attributes, called in a comprehension, a lambda or a with or try header')
+            raise Unsupported(s, 'a method that assigns attributes, called in a lambda or a with or try header')
+
         def target(name, i, ctx):
             return ast.Name(name, ctx) if i is None else ast.Subscript(ast.Name(name, ast.Load()), copy.deepcopy(i), ctx)
-        shown = [ast.copy_location(ast.Assign([target(name, places[name, d], ast.Store())], target(name, places[name, d], ast.Load())), s)
-                 for name, d in sorted(writes, key=lambda w: (w[0], w[1] or ''))]
-        for x in shown:
-            x.sj_shown = True                # says a call may have written it; not itself a write
+        shown = []
+        for name, d in sorted(writes, key=lambda w: (w[0], w[1] or '')):
+            if d is not None and places[name, d] is None:     # a list's element: shown written where nothing runs
+                at = ast.Constant(0)
+                mark = ast.Assign([target(name, at, ast.Store())], target(name, at, ast.Load()))
+                mark.sj_shown = True
+                shown.append(ast.fix_missing_locations(ast.copy_location(ast.If(ast.Constant(False), [ast.copy_location(mark, s)], []), s)))
+                continue
+            shown.append(ast.copy_location(ast.Assign([target(name, places[name, d], ast.Store())], target(name, places[name, d], ast.Load())), s))
+            shown[-1].sj_shown = True        # says a call may have written it; not itself a write
         if isinstance(s, ast.Return):     # before it, then: nothing runs after, but the function's exits must write these back
             out += shown + [s]
         elif isinstance(s, (ast.If, ast.While, ast.For)) and shown:

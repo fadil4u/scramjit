@@ -560,6 +560,7 @@ def flatten_dicts(fdef, arg_types):
         tree.body = [Rename().visit(s) for s in tree.body]
         ast.fix_missing_locations(tree)
     pools = {}                                   # a list with repeats -> its index list
+    inner_lists = {}                             # 'ps.pos' -> the type of the objects in that attribute of ps's elements
     refs = {}                                    # an element given by reference -> (its own list's name, its index's, its type)
     for i, (p, t) in enumerate(zip(tree.args.posonlyargs + tree.args.args, arg_types)):
         if t.kind == 'same':
@@ -583,14 +584,20 @@ def flatten_dicts(fdef, arg_types):
             continue
         fields = t.elem.elem if t.kind == 'objlist' else t.elem
         todo = [(p.arg, '', fields)]
+        popped = []
         while todo:                              # an object in an attribute is an owner of its own: 'p.pos'
             owner, prefix, fields = todo.pop(0)
+            popped.append((owner, prefix[:-1]))
             for k, (key, ft) in enumerate(fields):
                 if ft.kind == 'same' and t.kind == 'object':     # another name for an object met before: its variables
                     same[f'{owner}.{key}'] = target(*ft.elem, p.arg)
                     continue
                 if ft.kind == 'object' and t.kind == 'object':
                     nested[f'{owner}.{key}'] = ft
+                    todo.append((f'{owner}.{key}', f'{prefix}{key}.', ft.elem))
+                    continue
+                if ft.kind == 'object' and t.kind == 'objlist':     # each element's object there: a list per number, by path
+                    inner_lists[f'{owner}.{key}'] = ft
                     todo.append((f'{owner}.{key}', f'{prefix}{key}.', ft.elem))
                     continue
                 base = owner.replace('.', '__')
@@ -602,10 +609,11 @@ def flatten_dicts(fdef, arg_types):
                 slots[name] = (i, prefix + key if prefix else key, shown)     # a dict's key can be an int
                 new_params.append(ast.copy_location(ast.arg(name), p))
                 new_types.append(T.list_of(ft) if t.kind == 'objlist' and ft.kind != 'function' else ft)
-        if t.kind == 'objlist' and t.strided:     # after its attributes' lists: the index of the instance at each place
-            pools[p.arg] = fresh(f'{p.arg}__ix')
-            new_params.append(ast.copy_location(ast.arg(pools[p.arg]), p))
-            new_types.append(T.list_of(T.INT))
+        for owner, path in popped if t.kind == 'objlist' else ():     # after the lists: which object is at each place
+            if path in t.strided:
+                pools[owner] = fresh(f'{owner.replace(".", "__")}__ix')
+                new_params.append(ast.copy_location(ast.arg(pools[owner]), p))
+                new_types.append(T.list_of(T.INT))
 
     dicts = {p.arg for p, t in zip(params, arg_types) if t.kind == 'dict'}
     objects = {p.arg for p, t in zip(params, arg_types) if t.kind == 'object'}
@@ -613,6 +621,7 @@ def flatten_dicts(fdef, arg_types):
     types_of = {p.arg: (t.elem if t.kind == 'objlist' else t) for p, t in zip(params, arg_types)}
     for pl, _, et in refs.values():
         lists[pl], types_of[pl] = T.objlist_of(et), et
+    types_of.update(inner_lists)
     objects |= set(nested)
     types_of.update(nested)
     made = {p.arg: t for p, t in zip(params, arg_types) if t.kind == 'madeclass'}
@@ -664,12 +673,22 @@ def flatten_dicts(fdef, arg_types):
             makers[id(n)] = 'make'
     first = {}                                   # a list's first attribute, for len() and an index's check
     for p, t in lists.items():
-        data = [k for k, ft in t.elem.elem if ft.kind != 'function']
+        data = [k for k, _ in leaf_types(t.elem)]
         if not data:
             raise Unsupported(tree, f'{p} is a list of instances whose attributes it never reads')
-        first[p] = flat[p, data[0]]
-        if t.strided:                            # repeats: the attributes' lists are of each instance once
-            first[p] = pools[p]
+        first[p] = None
+        for path in [''] + data:                 # a list as long as ps: its index list, or a list of a number, or the index
+            *inner, last = path.split('.')       # list of the first pooled object on the way to one
+            chain = ['.'.join([p] + inner[:k]) for k in range(len(inner) + 1)]
+            pooled_on_way = [o for o in chain if o in pools]
+            if not path:
+                first[p] = pools.get(p)
+            elif pooled_on_way:
+                first[p] = pools[pooled_on_way[0]]
+            else:
+                first[p] = flat['.'.join([p] + inner), last]
+            if first[p] is not None:
+                break
 
     # q = p for an instance parameter p, at the top of the body, q assigned nowhere else and not named before: q is p
     for k, s in enumerate(tree.body):
@@ -732,15 +751,23 @@ def flatten_dicts(fdef, arg_types):
     index = {name: fresh(f'sji__{name}') for name in alias}
     index.update({p: ix for p, (_, ix, _) in refs.items()})
 
-    def pooled(ps, idx):
-        """Where an element's attributes are in their lists: its place, or in a list with repeats, its instance's."""
+    def pooled(ps, idx, node=None):
+        """Where the attributes of an element (of ps, or of an object in its elements: 'ps.vel') are in their lists: at its
+        place, or where repeats are pooled, through each level's index list."""
         idx = copy.deepcopy(idx)
-        return ast.Subscript(ast.Name(pools[ps], ast.Load()), idx, ast.Load()) if ps in pools and idx is not None else idx
+        if idx is None:
+            return None
+        parts = ps.split('.')
+        for k in range(1, len(parts) + 1):
+            o = '.'.join(parts[:k])
+            if o in pools:
+                idx = ast.Subscript(ast.Name(pools[o], ast.Load()), idx, ast.Load())
+                if node is not None:
+                    ast.copy_location(idx, node)
+        return idx
 
     def column(ps, key, idx, ctx, node):
-        if ps in pools:                          # which instance is at that place, then its attribute
-            idx = ast.copy_location(ast.Subscript(ast.Name(pools[ps], ast.Load()), idx, ast.Load()), node)
-        return ast.copy_location(ast.Subscript(ast.Name(flat[ps, key], ast.Load()), idx, ctx), node)
+        return ast.copy_location(ast.Subscript(ast.Name(flat[ps, key], ast.Load()), pooled(ps, idx, node), ctx), node)
 
     def path_owner(owner, path):
         """('p.pos', 'x') for owner p and path 'pos.x': the key flat has it under, through other names for an object."""
@@ -791,6 +818,10 @@ def flatten_dicts(fdef, arg_types):
             return alias[e.id], ast.Name(index[e.id], ast.Load())
         if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in lists and not isinstance(e.slice, ast.Slice):
             return e.value.id, e.slice
+        if isinstance(e, ast.Attribute):         # b.pos for an element b: an element of ps.pos, at b's index
+            inner = element_of(e.value)
+            if inner is not None and f'{inner[0]}.{e.attr}' in inner_lists:
+                return f'{inner[0]}.{e.attr}', inner[1]
         return None
 
     def range_of(ps, node):
@@ -905,6 +936,7 @@ def flatten_dicts(fdef, arg_types):
                         place = {k: ast.copy_location(ast.Name(flat[path_owner(owner, k)], ast.Load()), n) for k, _ in leaf_types(sub)}
                     me = SelfArg(list(place.values()), ast.Load())
                     me.object_type, me.slots = T.object_of(t.py, fields, t.methods, t.cls, t.writes), place
+                    me.names_used, me.writes_used = set(uses), set(writes)
                     me.owner = owner
                     if owner in made_local:
                         me.local = t
@@ -1398,6 +1430,8 @@ class SelfArg(ast.Tuple):
         new.object_type, new.slots = self.object_type, self.slots
         new.passed, new.full, new.owner = getattr(self, 'passed', False), getattr(self, 'full', None), getattr(self, 'owner', None)
         new.local, new.same, new.ref = getattr(self, 'local', None), getattr(self, 'same', None), getattr(self, 'ref', False)
+        if hasattr(self, 'writes_used'):
+            new.names_used, new.writes_used = self.names_used, self.writes_used
         return ast.copy_location(new, self)
 
 
@@ -2930,6 +2964,8 @@ class Compiler:
             if uses is None:
                 continue
             names = set(uses[0]).union(*(full.methods[m][0] for m in uses[2] if m in (full.methods or {})))
+            x.names_used = names
+            x.writes_used = set(uses[1]).union(*(full.methods[m][1] for m in uses[2] if m in (full.methods or {})))
             fields = [(key, ft) for key, ft in full.elem if ft.kind == 'function' or key in names]
             x.object_type = T.object_of(full.py, fields, full.methods, full.cls, full.writes)
             x.elts = [place[key] for key, _ in leaf_types(x.object_type)]
@@ -2979,8 +3015,14 @@ class Compiler:
             if at is not None and owner is not None and all(self.env.get(v.value.id, T.NONE).kind == 'list' and self.env[v.value.id].elem.np is False
                                                             for v in x.slots.values() if isinstance(v, ast.Subscript)):
                 elements.setdefault(owner, []).append(x)
+        def clash(a, b):                         # what's assigned through one is used through the other
+            wa = getattr(a, 'writes_used', None)
+            wb = getattr(b, 'writes_used', None)
+            if wa is None or wb is None:
+                return bool(a.object_type.writes)
+            return bool(wa & (getattr(b, 'names_used', set()) | wb) or wb & (getattr(a, 'names_used', set()) | wa))
         for owner, xs in elements.items():
-            if len(xs) > 1 and any(x.object_type.writes for x in xs):
+            if any(clash(a, b) for k, a in enumerate(xs) for b in xs[k + 1:]):
                 for x in xs:                     # by reference: a write through one is the other's, if they're one
                     x.ref = True
 

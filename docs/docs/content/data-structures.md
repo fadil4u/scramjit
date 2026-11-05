@@ -827,7 +827,7 @@ sj_fail:
 
 `for p in ps`, `for i, p in enumerate(ps)`, `p = ps[i]`, `ps[i].x`, `len(ps)`, `sum(p.x for p in ps)`, methods of an element, and passing an element on all compile. Each attribute the function uses is copied into a list of numbers at the call, so `p.x` costs what `xs[i]` does, and the values that changed are written back into the instances when it ends, however it ends. The copy takes about 0.15 µs per instance and attribute at each call. [`examples/particles.py`](https://github.com/farizrahman4u/scramjit/blob/main/examples/particles.py) is a full one: gravity between 200 particles, with methods, a helper function and a module-level constant.
 
-Every element must be the same class and hold the same type in each attribute used (all floats, say, not some ints). Anything else runs the call as Python. An instance can be in the list more than once, and two elements given to one call, as `pull(a, b)` in a loop over every pair, may be one instance: see [One object under several names](#one-object-under-several-names).
+Every element must be the same class and hold the same type in each attribute used (all floats, say, not some ints). Anything else runs the call as Python. Objects in the elements' attributes compile too: `b.pos.x` for `b` in `bs` is a list per number, by path, and `b.vel.scale(0.5)` or `speed(b.vel)` work as for any object. Several elements can hold one object (every particle's `material`, say): its numbers are then held once, and an index list says which object each element holds. An instance can be in the list more than once, and two elements given to one call, as `pull(a, b)` in a loop over every pair, may be one instance: see [One object under several names](#one-object-under-several-names).
 
 Using the list any other way (appending, `ps[i] = q`, slicing, passing it to a function, returning an element) runs as Python.
 
@@ -996,7 +996,7 @@ Stays Python, for now:
 
 - `hasattr(p, 'x')`, `getattr(p, name)`, `vars(p)`, and using the object any other way
 - a method that assigns attributes, called inside a comprehension or a lambda
-- an object in an attribute of a list's elements, and a method of an instance made in the function that uses an object it holds
+- a method of an instance made in the function that uses an object it holds
 - an object and its own `__dict__` passed as two arguments
 - `self.__x` in a class, as Python renames it
 

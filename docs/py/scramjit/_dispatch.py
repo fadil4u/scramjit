@@ -504,12 +504,37 @@ def _returned(fdef):
                   and n.func.id == 'isinstance' and n.args and isinstance(n.args[0], ast.Name) and n.args[0].id in index}
 
 
-def _element_attrs(fdef):
-    """For each parameter that may be a list of instances: the attributes its elements are used with, as _attrs_used
-    gives them, through for p in ps, for i, p in enumerate(ps), p = ps[i], and ps[i].a."""
+def _element_nested(fdef):
+    """For each parameter that may be a list of instances: {attribute: [used, assigned, called, {deeper}]} of the objects in
+    its elements' attributes, through the names _element_attrs follows: b.pos.x for b in bs."""
     if fdef is None:
         return {}
     index = {p.arg: i for i, p in enumerate(fdef.args.posonlyargs + fdef.args.args)}
+    alias = _element_alias(fdef, index)
+    called = {id(n.func) for n in ast.walk(fdef) if isinstance(n, ast.Call)}
+    out = {}
+    for n in ast.walk(fdef):
+        if not isinstance(n, ast.Attribute):
+            continue
+        path, e = [], n
+        while isinstance(e, ast.Attribute):
+            path.append(e.attr)
+            e = e.value
+        path.reverse()
+        ps = alias.get(e.id) if isinstance(e, ast.Name) else e.value.id if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) \
+            and e.value.id in index else None
+        if ps is None or len(path) < 2 or any(a.startswith('__') and not a.endswith('__') for a in path):
+            continue
+        node = out.setdefault(index[ps], {})
+        for a in path[:-2]:
+            node = node.setdefault(a, [set(), set(), set(), {}])[3]
+        _add_use(node.setdefault(path[-2], [set(), set(), set(), {}]), path[-1],
+                 'call' if id(n) in called else 'load' if isinstance(n.ctx, ast.Load) else 'store')
+    return out
+
+
+def _element_alias(fdef, index):
+    """{name: list parameter} for names bound to an element: for p in ps, for i, p in enumerate(ps), p = ps[i]."""
     alias = {}
     for n in ast.walk(fdef):
         target, it = (n.target, n.iter) if isinstance(n, (ast.For, ast.comprehension)) else (None, None)
@@ -521,6 +546,16 @@ def _element_attrs(fdef):
         if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Subscript) \
                 and isinstance(n.value.value, ast.Name) and n.value.value.id in index:
             alias[n.targets[0].id] = n.value.value.id
+    return alias
+
+
+def _element_attrs(fdef):
+    """For each parameter that may be a list of instances: the attributes its elements are used with, as _attrs_used
+    gives them, through for p in ps, for i, p in enumerate(ps), p = ps[i], and ps[i].a."""
+    if fdef is None:
+        return {}
+    index = {p.arg: i for i, p in enumerate(fdef.args.posonlyargs + fdef.args.args)}
+    alias = _element_alias(fdef, index)
     called = {id(n.func) for n in ast.walk(fdef) if isinstance(n, ast.Call)}
     found = {}
     for n in ast.walk(fdef):
@@ -535,16 +570,17 @@ def _element_attrs(fdef):
     return {i: (sorted(names), stores, calls) for i, (names, stores, calls) in found.items()}
 
 
-def _objlist_type(xs, attrs, seen, dicts=False):
-    """A list of instances, all one class whose lookups run no code, holding numbers in every attribute used, each
-    instance once and not passed otherwise. Its attributes are copied into a list of numbers each, at the call."""
+def _objlist_type(xs, attrs, seen, dicts=False, nested=None):
+    """A list of instances, all one class whose lookups run no code, holding numbers in every attribute used, or objects
+    of one class each doing the same (each its own object), and not passed otherwise. Its numbers are copied into a list
+    each, at the call, by path (pos.x)."""
     if not xs:
         return None
     cls = type(xs[0])
     if set(map(type, xs)) != {cls}:
         return None
     methods = {}
-    fields = _object_fields(xs[0], *attrs, methods=methods)
+    fields = _object_fields(xs[0], *attrs, methods=methods, nested=nested)
     if type(fields) is not list:
         return None
     ids = list(map(id, xs))
@@ -557,10 +593,21 @@ def _objlist_type(xs, attrs, seen, dicts=False):
     seen.update(ids)
     written = set(attrs[1]).union(*(w for _, w in methods.values()))
     has_dict = hasattr(xs[0], '__dict__')
+    levels, pooled = {}, set()
+    if not _inner_ok(xs, fields, levels, pooled):
+        return None
+    inner = [id(o) for objs in levels.values() for o in objs]
+    if len(set(inner)) != len(inner) or seen.intersection(inner) or set(inner) & set(ids):
+        return None                              # an object at two paths, or here and elsewhere: not yet
+    seen.update(inner)
+    if shared:
+        pooled.add('')
     for k, ft in fields:
         if ft.kind == 'function':
             if has_dict and any(k in x.__dict__ for x in xs):
                 return None
+            continue
+        if ft.kind == 'object':
             continue
         if ft not in (T.INT, T.FLOAT, T.BOOL):
             return None
@@ -578,11 +625,70 @@ def _objlist_type(xs, attrs, seen, dicts=False):
         if seen.intersection(held):
             return None
         seen.update(held)
-    return T.objlist_of(T.object_of(cls.__qualname__, fields, methods, cls, written), shared)
+    return T.objlist_of(T.object_of(cls.__qualname__, fields, methods, cls, written), pooled)
+
+
+def _inner_ok(xs, fields, levels, pooled, prefix=''):
+    """Every element's objects in attributes are of the class the first's are, holding the same types. levels: path -> the
+    objects there, each once; pooled gets the paths where one object is at several places."""
+    for k, ft in fields:
+        if ft.kind != 'object':
+            continue
+        try:
+            objs = list(map(operator.attrgetter(k), xs))
+        except AttributeError:
+            return False
+        if set(map(type, objs)) != {ft.cls}:
+            return False
+        once = list({id(o): o for o in objs}.values())
+        if len(once) != len(objs):
+            pooled.add(prefix + k)
+        objs = levels[prefix + k] = once
+        has_dict = hasattr(objs[0], '__dict__')
+        for k2, ft2 in ft.elem:
+            if ft2.kind == 'function':
+                if has_dict and any(k2 in o.__dict__ for o in objs):
+                    return False
+            elif ft2.kind != 'object':
+                want = {T.INT: int, T.FLOAT: float, T.BOOL: bool}.get(ft2)
+                vals = list(map(operator.attrgetter(k2), objs))
+                if want is None or set(map(type, vals)) != {want} or (want is int and not (-(1 << 63) <= min(vals) and max(vals) < 1 << 63)):
+                    return False
+        if not _inner_ok(objs, ft.elem, levels, pooled, prefix + k + '.'):
+            return False
+    return True
+
+
+def _pool_levels(pool, t):
+    """For a list of instances' type: [(path, the objects there each once, or at each place if not pooled; the index list
+    or None)], breadth first as its parameters come, the list itself first."""
+    out = [('', pool, None)]
+    objs_at = {'': pool}
+    todo = [('', t.elem.elem)]
+    while todo:
+        prefix, fields = todo.pop(0)
+        for key, ft in fields:
+            if ft.kind != 'object':
+                continue
+            path = prefix + key
+            objs = list(map(operator.attrgetter(key), objs_at[prefix[:-1]]))
+            ix = None
+            if path in t.strided:
+                where = {}
+                ix = array.array('q', (where.setdefault(id(o), len(where)) for o in objs))
+                objs = list({id(o): o for o in objs}.values())
+            objs_at[path] = objs
+            out.append((path, objs, ix))
+            todo.append((path + '.', ft.elem))
+    return out
 
 
 def _copy_back_attr(xs, key, a, et):
-    """Into the instances, the attribute's values the kernel changed: the others stay the very objects they were."""
+    """Into the instances, the attribute's values the kernel changed: the others stay the very objects they were. key may
+    be a path (pos.x)."""
+    if '.' in key:
+        *path, key = key.split('.')
+        xs = [_member(x, '.'.join(path)) for x in xs]
     for k, v in enumerate(a):
         old = getattr(xs[k], key)
         if et is T.FLOAT:
@@ -630,10 +736,10 @@ def _passes(fdef):
                 a = a.value                       # ps[i]: an element
             if isinstance(a, ast.Name) and (a.id in index or a.id in alias):
                 found.setdefault(index[alias.get(a.id, a.id)], []).append((target, pos))
-            elif isinstance(a, ast.Attribute):     # p.pos: an object in an attribute
+            elif isinstance(a, ast.Attribute):     # p.pos: an object in an attribute, of a parameter or an element
                 base, path = _chain(a)
-                if base in index:
-                    found.setdefault(index[base], []).append((target, pos, tuple(path)))
+                if base in index or base in alias:
+                    found.setdefault(index[alias.get(base, base)], []).append((target, pos, tuple(path)))
     return found
 
 
@@ -825,14 +931,14 @@ def _object_fields(x, names, written, calls=(), methods=None, nested=None, ids=N
                     return f'{name}: {got}'
                 fields.append((name, got))
                 continue
-            held = {}
-            got = _object_fields(v, sorted(sub[0]), sub[1], sub[2], held, sub[3], ids)
+            inner_methods = {}
+            got = _object_fields(v, sorted(sub[0]), sub[1], sub[2], inner_methods, sub[3], ids)
             if type(got) is str:
                 return f'{name}: {got}'
             if ids is not None:
                 ids.append(id(v))
-            w = set(sub[1]).union(*(w for _, w in held.values()))
-            fields.append((name, T.object_of(type(v).__qualname__, got, held, type(v), w)))
+            w = set(sub[1]).union(*(w for _, w in inner_methods.values()))
+            fields.append((name, T.object_of(type(v).__qualname__, got, inner_methods, type(v), w)))
             continue
         t = _arg_type(v)
         if t is None or t is T.U64 or t.kind in ('list', 'function', 'enumclass', 'classref') or T.is_pylist(t):
@@ -1556,9 +1662,9 @@ class Function:
             self._find_globals()
         new = []
         for t in key:
-            if t is None or t.kind not in ('object', 'objlist', 'madeclass'):
+            if t is None or t.kind not in ('object', 'objlist', 'madeclass', 'elemref'):
                 continue
-            for _, ft in (t.elem.elem if t.kind == 'objlist' else t.recipe['methods'] if t.kind == 'madeclass' else t.elem):
+            for _, ft in (t.elem.elem if t.kind in ('objlist', 'elemref') else t.recipe['methods'] if t.kind == 'madeclass' else t.elem):
                 w = ft.elem if ft.kind == 'function' else None
                 if type(w) is not Function or w._tree is None:
                     continue
@@ -1900,9 +2006,15 @@ class Function:
                 seen.add(id(x))          # two names for one dict: a write must show through both
             elif out[i] is None and type(x) is list and (i in self._elems or i in self._passes) and x:
                 uses = self._elems.get(i, empty)
+                tree = self._ctree or self._tree
+                if getattr(self, '_enested_for', None) is not tree:
+                    self._enested, self._enested_for = _element_nested(tree), tree
+                nested = self._enested.get(i)
                 if i in self._passes:
-                    uses = _param_uses(self, i, type(x[0]), uses, owners)
-                out[i] = _objlist_type(x, (sorted(uses[0]),) + tuple(uses[1:]), seen, dict in map(type, args))
+                    more = {}
+                    uses = _param_uses(self, i, type(x[0]), uses, owners, (), more)
+                    nested = _merge_nested(nested, more)
+                out[i] = _objlist_type(x, (sorted(uses[0]),) + tuple(uses[1:]), seen, dict in map(type, args), nested)
         return tuple(out)
 
     @staticmethod
@@ -1925,17 +2037,20 @@ class Function:
         columns = []
         for i, (x, t) in enumerate(zip(args, entry.types)):
             if t.kind == 'objlist':                 # a list of numbers per attribute, written back into the instances
-                pool = x
-                if t.strided:                       # repeats: each instance once, and which is at each place
+                pool, ixs = x, []
+                if '' in t.strided:                 # repeats: each instance once, and which is at each place
                     where = {}
-                    ix = array.array('q', (where.setdefault(id(y), len(where)) for y in x))
+                    ixs.append(array.array('q', (where.setdefault(id(y), len(where)) for y in x)))
                     pool = list({id(y): y for y in x}.values())
-                for key, ft in t.elem.elem:
-                    if ft.kind != 'function':
-                        a = array.array(_LIST_CODES[ft.name], map(operator.attrgetter(key), pool))
-                        columns.append((i, key, a, ft, pool))
-                        cargs += [a.buffer_info()[0], len(a)]
-                if t.strided:
+                levels = _pool_levels(pool, t)
+                at = {path: objs for path, objs, _ in levels}
+                ixs += [ix for _, _, ix in levels if ix is not None]
+                for key, ft in leaf_types(t.elem):     # breadth first through objects in attributes, as flattened
+                    path, _, last = key.rpartition('.')
+                    a = array.array(_LIST_CODES[ft.name], map(operator.attrgetter(last), at[path]))
+                    columns.append((i, key, a, ft, at[path], last))
+                    cargs += [a.buffer_info()[0], len(a)]
+                for ix in ixs:
                     copies.append((None, ix))       # kept alive for the call
                     cargs += [ix.buffer_info()[0], len(ix)]
                 continue
@@ -1962,9 +2077,9 @@ class Function:
             cargs.append(entry.counts)
         io = bytearray(entry.io_size)
         status = entry.kernel(*cargs, io)
-        for i, key, a, ft, pool in columns:
+        for i, key, a, ft, objs, last in columns:
             if (i, key) in entry.columns:
-                _copy_back_attr(pool, key, a, ft)
+                _copy_back_attr(objs, last, a, ft)
         for i, a in copies:                       # what was written, even before an exception, as Python would have
             if i is not None and i in entry.lists:
                 t = entry.types[i]

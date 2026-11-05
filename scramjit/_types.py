@@ -302,12 +302,15 @@ def elemref_of(elem):
 _OBJLISTS = {}
 
 
-def objlist_of(elem, shared=False):
+def objlist_of(elem, shared=frozenset()):
     """A list of instances, all one class, by the attributes a function uses (elem, an object type): in C, a list of
-    numbers per attribute. shared: some instance is in it more than once, so the lists are of the instances, each once
-    (a pool), and an index list says which is at each place (strided holds this flag)."""
+    numbers per attribute, by path. shared: the paths ('' for the list itself, 'vel' for its elements' vel) where one
+    object is at several places, so the lists there are of each object once (a pool), and an index list says which is
+    at each place (strided holds this set)."""
+    shared = frozenset([''] if shared is True else shared or ())
     if (elem, shared) not in _OBJLISTS:
-        t = _OBJLISTS[elem, shared] = Type(f'list[{elem.name}]' + (' with repeats' if shared else ''), None, 'objlist', elem=elem)
+        shown = (' with repeats' if '' in shared else '') + ''.join(f' sharing .{p}' for p in sorted(shared) if p)
+        t = _OBJLISTS[elem, shared] = Type(f'list[{elem.name}]{shown}', None, 'objlist', elem=elem)
         t.strided = shared
     return _OBJLISTS[elem, shared]
 

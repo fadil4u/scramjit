@@ -419,7 +419,8 @@ Spills per line, once cimo can report them.
     **Calling C, what's left:** modules with state, which need calling across modules (cimo: a call by address crashes once the callee uses `malloc`), `include_dirs=` and `link=`, returning a pointer or `uint64_t`, a C function's module compiled with `fma=` on alongside exact math in one file (needs `FP_CONTRACT` in cimo).
 17. **Compile time on large functions, what's left:** versioning's copies are capped (`VERSION_TOTAL`, `VERSION_MIN` in
     `_compiler.py`), most deeply nested loops first: a generated 60-loop function 14.7 to 5.1 s, `bench/llm.py` unchanged.
-    The cost is cimo's, which grows with the square of a function's size (its `TODO.md`); raise the cap when that's linear.
+    The cost was mostly cimo's, now much less (cimo 2026-11-05): this shape of function, 60 loops all versioned (4,150 lines
+    of C), 32.6 to 7.9 s, 120 small loops 21.4 to 2.7 s; what's left grows about 3x per doubling. Raise the cap to match.
     Depth is a guess at which loops run most: a profile (`counts=True`) would know.
 18. **scramjit against Numba and Cython: measure, then close the gaps.** The README compares with
     CPython and hand-written C; the question everyone will ask is how it compares with what they use

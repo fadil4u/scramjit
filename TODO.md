@@ -382,7 +382,8 @@ Spills per line, once cimo can report them.
       adding one line above it, or renaming the file; a comment that keeps the lines stays warm. **Done here (2026-11-05):** the C's lines count from the function's
       `def` and `#line` names `sj` (or `sj<k>`, the k-th function called) instead of the file, put back for tracebacks (`_failed`), preflight's notes (`py_line`) and
       cimo's messages (`cimo_diagnostic`); moved 3 lines down and renamed, Gray-Scott's first call stayed warm. `tests/test_line_independence.py`.
-      cimo's half ("Line markers out of the cache key", its `TODO.md`) would let `#line` name the real file again; not needed for the cache any more.
+      cimo's half is done too (2026-11-05: its key leaves out line markers, blank lines and indentation), so `#line` could name the real file again; `__LINE__`
+      and `__FILE__` still go into the key wherever they're used.
     - **A warm first call (2026-11-05):** Gray-Scott about 47 ms: 13 generating C, 30 preprocessing it (14 of that the prelude), about 1 loading; `small` about 45, nearly all preprocessing.
       A cold one is 96% cimo (496 ms, 13 generating). A cache keyed on the Python would save only warm time, and needs cimo's public cache export and import to skip the preprocessing.
 20. **Split `_compiler.py` into a package.** 4.8k lines holding every lowering in one file. Make

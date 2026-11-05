@@ -974,7 +974,7 @@ def drift(p, v, n, dt):
 
 The callee hands back the new instance's attributes, and the name it's assigned to holds them as variables, as for `v = Vec(x, y)`. A parameter given new instances, like `p` here, starts as the argument's numbers; that is only what Python does if nothing is written through it first and it isn't returned or compared with `is`, so then it stays Python. A new instance used inside an expression, `(a - b).norm()` or `f(a + b)`, is made first into a variable of its own, as Python would make it at that point; so it stays Python where that would move it past a call that may assign something (name it first), or where it's made on one side of a condition (`(a + b).x if c else 0.0`). `a + b` calls `type(a).__add__`, also `-`, `*`, `/`, `//`, `%`, `**`, `@` and unary `-` and `+`; it stays Python if the method can return `NotImplemented`, or if `b` is an instance of another class, whose reflected method Python may try first.
 
-An instance made here can hold other objects: `b = Body(Vec(x, y), v)` makes `b.pos` another name for the new `Vec`, and `b.vel` for `v`, so writes through either name are seen through the other. Returning `b` gives a new `Body` holding a new `Vec` and `v` itself. A method of `b` that uses those objects, or passing `b` on, stays Python for now.
+An instance made here can hold other objects: `b = Body(Vec(x, y), v)` makes `b.pos` another name for the new `Vec`, and `b.vel` for `v`, so writes through either name are seen through the other. Returning `b` gives a new `Body` holding a new `Vec` and `v` itself, and `b.step(dt)` or `f(b)` see those objects as theirs: writes through `self.pos` reach the new `Vec`, and through `self.vel`, `v`.
 
 ### Objects in attributes
 
@@ -994,11 +994,8 @@ An object can be reached two ways: `f(p, p)`, `b.pos is b.vel`, `c.pos is a.pos`
 
 Stays Python, for now:
 
-- `hasattr(p, 'x')`, `getattr(p, name)`, `vars(p)`, and using the object any other way
-- a method that assigns attributes, called inside a lambda
-- a method of an instance made in the function that uses an object it holds
-- an object and its own `__dict__` passed as two arguments
-- `self.__x` in a class, as Python renames it
+- `hasattr(p, 'x')`, `getattr(p, name)`, `vars(p)` and `p.__dict__` (also passed alongside `p`): attribute names known only at run time
+- a method that assigns attributes, called inside a lambda, which may run at any later time
 
 ## Enums
 

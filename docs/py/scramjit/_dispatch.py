@@ -176,6 +176,25 @@ def _raise_chain(exc, frames):
     run(0)
 
 
+def _mangle(fdef, qualname):
+    """A function defined in a class: __x in it means _Class__x, as Python compiles it. Done on the tree once, so
+    everything after sees the names Python uses."""
+    parts = qualname.split('.')
+    if len(parts) < 2 or parts[-2] == '<locals>' or not parts[-2].lstrip('_'):
+        return
+    cls = parts[-2].lstrip('_')
+
+    def mangled(name):
+        return f'_{cls}{name}' if name.startswith('__') and not name.endswith('__') else name
+    for n in ast.walk(fdef):
+        if isinstance(n, ast.Attribute):
+            n.attr = mangled(n.attr)
+        elif isinstance(n, ast.Name):
+            n.id = mangled(n.id)
+        elif isinstance(n, ast.arg):
+            n.arg = mangled(n.arg)
+
+
 def _dict_keys(fdef):
     """For each parameter subscripted by a constant string or int: the keys, if it turns out to be a dict."""
     if fdef is None:
@@ -1002,6 +1021,23 @@ def _construction_uses(f):
                 given[p] = index[a.id]
         attrs = {a: given[src[1]] for a, src in recipe['assigns'] if src[0] == 'param' and src[1] in given}
         v = n.targets[0].id
+        cls = g[n.value.func.id]
+        for c in ast.walk(tree):                 # through v's methods, and what v is given to: what they do with those attributes
+            w, at = None, None
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and isinstance(c.func.value, ast.Name) and c.func.value.id == v:
+                w, at = _in_class(cls, c.func.attr), 0
+                w = _method(w) if type(w) in (Function, types.FunctionType) else None
+            elif isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and type(g.get(c.func.id)) is Function:
+                at = next((k for k, x in enumerate(c.args) if isinstance(x, ast.Name) and x.id == v), None)
+                w = g[c.func.id] if at is not None else None
+            if w is None or w._tree is None:
+                continue
+            more = {}
+            _param_uses(w, at, cls, w._attrs.get(at, ((), set(), set())), None, (), more)
+            more = _merge_nested(more, w._nested.get(at, {}))
+            for a, sub in more.items():
+                if a in attrs:
+                    _node_merge(out.setdefault(attrs[a], [set(), set(), set(), {}]), [sub[0], sub[1], sub[2], sub[3]])
         called = {id(c.func) for c in ast.walk(tree) if isinstance(c, ast.Call)}
         for m in ast.walk(tree):
             if not isinstance(m, ast.Attribute):
@@ -1547,6 +1583,7 @@ class Function:
         fdef = tree.body[0] if tree.body else None
         if not isinstance(fdef, ast.FunctionDef):
             return None, 'not a plain def function'
+        _mangle(fdef, fn.__qualname__)
         return fdef, None
 
     def _uses_of(self, idx, cls):

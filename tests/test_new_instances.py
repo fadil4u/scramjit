@@ -206,3 +206,48 @@ def rebound_and_returned(p, v, n):
 ])
 def test_a_parameter_given_a_new_instance(f, make_args, compiled):
     same(f, make_args, compiled)
+
+
+@dataclasses.dataclass
+class Mover:
+    pos: V
+    vel: V
+
+    def step(self, dt):
+        self.pos.x += self.vel.x * dt
+        self.pos.y += self.vel.y * dt
+        return self.pos.x
+
+
+@scram(cache=False)
+def energy(m):
+    return m.vel.x * m.vel.x + m.vel.y * m.vel.y + m.pos.y
+
+
+def method_of_holder(a, n):
+    m = Mover(V(a, 0.0), V(1.0, 2.0))
+    s = 0.0
+    for i in range(n):
+        s += m.step(0.1)
+    return s + m.pos.y
+
+
+def method_of_holder_of_argument(p, v, n):
+    m = Mover(p, v)
+    for i in range(n):
+        m.step(0.5)
+    return p.x + v.y
+
+
+def passes_holder(a):
+    m = Mover(V(a, 1.0), V(3.0, 4.0))
+    return energy(m)
+
+
+@pytest.mark.parametrize('f,make_args', [
+    (method_of_holder, lambda: [1.5, 10]),
+    (method_of_holder_of_argument, lambda: [V(1.0, 2.0), V(0.5, -1.0), 4]),
+    (passes_holder, lambda: [2.0]),
+])
+def test_instances_holding_objects(f, make_args):
+    same(f, make_args, True)

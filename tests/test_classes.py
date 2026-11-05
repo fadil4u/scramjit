@@ -675,19 +675,19 @@ def mixed_use(p):
     return p.a
 
 
-def test_private_names_stay_python():
+def test_private_names_are_the_names_python_gives_them():
     class Hidden:
         def __init__(self):
             self.__a = 2.0
             setattr(self, '__a', 'the wrong one')
 
-        @scram(cache=False)
+        @scram(cache=False, fallback=False)
         def read(self):
+            self.__a += 1.0
             return self.__a * 2.0
 
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', FallbackWarning)
-        assert Hidden().read() == 4.0
+    h = Hidden()
+    assert h.read() == 6.0 and h._Hidden__a == 3.0 and Hidden.read.signatures
 
 
 def test_boundscheck_off_and_parity_off_keep_attributes():

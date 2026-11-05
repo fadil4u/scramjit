@@ -928,9 +928,7 @@ def flatten_dicts(fdef, arg_types):
                     if el:
                         place = {k: column(owner, k, copy.deepcopy(el[1]), ast.Load(), n) for k, ft in fields if ft.kind != 'function'}
                     elif owner in made_local:            # made here: its attributes are variables, typed as the compiler finds them
-                        if holds_object(owner, uses):
-                            raise Unsupported(n, f'{owner}.{f.attr}() uses {holds_object(owner, uses)}, an object it holds')
-                        place = {k: ast.copy_location(ast.Name(flat[owner, k], ast.Load()), n) for k in sorted(uses) if (owner, k) in flat}
+                        place, held = made_place(owner, sorted(uses), n)
                     else:
                         sub = T.object_of(t.py, fields, t.methods, t.cls, t.writes)
                         place = {k: ast.copy_location(ast.Name(flat[path_owner(owner, k)], ast.Load()), n) for k, _ in leaf_types(sub)}
@@ -939,7 +937,7 @@ def flatten_dicts(fdef, arg_types):
                     me.names_used, me.writes_used = set(uses), set(writes)
                     me.owner = owner
                     if owner in made_local:
-                        me.local = t
+                        me.local, me.held = t, held
                     passed = [self.argument(x) for x in n.args]
                     call = ast.Call(ast.copy_location(ast.Name(flat[owner, f.attr], ast.Load()), f), [ast.copy_location(me, n)] + [x for x, _ in passed],
                                     [self.visit(k) for k in n.keywords])
@@ -947,6 +945,8 @@ def flatten_dicts(fdef, arg_types):
                         + [w for _, ws in passed for w in ws]
                     if not el and owner not in made_local:       # objects in its attributes: any of their numbers may be assigned
                         call.sj_writes += [(flat[path_owner(owner, k)], None) for k, _ in leaf_types(T.object_of(t.py, fields, t.methods)) if '.' in k]
+                    if owner in made_local:             # objects it holds: any of their numbers may be assigned
+                        call.sj_writes += [(v.id, None) for k, v in place.items() if '.' in k]
                     if owner in made_local:             # no parameter holds the method: the call names it
                         fn = methods[owner, f.attr].elem
                         CALLEES[id(fn)] = fn
@@ -1041,22 +1041,23 @@ def flatten_dicts(fdef, arg_types):
             owner, idx = found
             t = types_of[owner] if idx is not None or owner in made_local else handed(owner, types_of[owner])
             data = [k for k, ft in t.elem if ft.kind != 'function']
+            held = {}
             if owner in made_local:
                 data = list(dict.fromkeys(a for a, _ in made[made_local[owner]].recipe['assigns']))
-                if holds_object(owner, data):
-                    raise Unsupported(a, f'passes {owner}, made here and holding an object in {holds_object(owner, data)}')
             if idx is None and owner not in made_local:
                 place = {k: ast.copy_location(ast.Name(flat[path_owner(owner, k)], ast.Load()), a) for k, _ in leaf_types(t)}
             elif idx is None:
-                place = {k: ast.copy_location(ast.Name(flat[owner, k], ast.Load()), a) for k in data}
+                place, held = made_place(owner, data, a)
             else:
                 place = {k: column(owner, k, copy.deepcopy(idx), ast.Load(), a) for k in data}
             me = ast.copy_location(SelfArg(list(place.values()), ast.Load()), a)
             me.object_type, me.slots, me.passed, me.full, me.owner = t, place, True, (t, place), owner
             if owner in made_local:
-                me.local, me.full = t, (None, place)
+                me.local, me.full, me.held = t, (None, place), held
+            if owner in made_local:
+                return me, [(flat[owner, k], None) for k in sorted(t.writes) if (owner, k) in flat] + [(v.id, None) for k, v in place.items() if '.' in k]
             return me, [(flat[path_owner(owner, k)], copy.deepcopy(idx)) for k, _ in leaf_types(t) if k.split('.')[0] in t.writes or '.' in k] \
-                if idx is None and owner not in made_local else [(flat[owner, k], pooled(owner, idx)) for k in sorted(t.writes) if (owner, k) in flat]
+                if idx is None else [(flat[owner, k], pooled(owner, idx)) for k in sorted(t.writes) if (owner, k) in flat]
 
         def visit_Attribute(self, n):
             el = element_of(n.value)
@@ -1325,6 +1326,30 @@ def flatten_dicts(fdef, arg_types):
         elif isinstance(n, (ast.For, ast.While)):
             looped.update(id(m) for b in n.body + n.orelse for m in ast.walk(b))
 
+    def made_place(owner, keys, node):
+        """For an instance made here, given to a callee: {path: variable} of its numbers, through the objects it holds, and
+        {path: the held object's type (a made class's, or a parameter's object type)}."""
+        place, held = {}, {}
+
+        def expand(prefix, o, keys, stack):
+            for k in keys:
+                path, to = f'{prefix}{k}', same.get(f'{o}.{k}')
+                if to is None:
+                    if (o, k) in flat:
+                        place[path] = ast.copy_location(ast.Name(flat[o, k], ast.Load()), node)
+                elif to in made_local and to not in stack:
+                    t2 = made[made_local[to]]
+                    held[path] = t2
+                    expand(path + '.', to, list(dict.fromkeys(a for a, _ in t2.recipe['assigns'])), stack + (to,))
+                elif to in types_of and types_of[to].kind == 'object' and not same_targets(types_of[to]):
+                    held[path] = types_of[to]
+                    for lk, _ in leaf_types(types_of[to]):
+                        place[f'{path}.{lk}'] = ast.copy_location(ast.Name(flat[path_owner(to, lk)], ast.Load()), node)
+                else:
+                    raise Unsupported(node, f'{owner} holds {to}, which can\'t be passed this way')
+        expand('', owner, keys, (owner,))
+        return place, held
+
     def holds_object(v, keys):
         """Of an instance made here, an attribute among keys that is another name for an object."""
         return next((k for k in keys if f'{v}.{k}' in same), None)
@@ -1430,6 +1455,7 @@ class SelfArg(ast.Tuple):
         new.object_type, new.slots = self.object_type, self.slots
         new.passed, new.full, new.owner = getattr(self, 'passed', False), getattr(self, 'full', None), getattr(self, 'owner', None)
         new.local, new.same, new.ref = getattr(self, 'local', None), getattr(self, 'same', None), getattr(self, 'ref', False)
+        new.held = getattr(self, 'held', None)
         if hasattr(self, 'writes_used'):
             new.names_used, new.writes_used = self.names_used, self.writes_used
         return ast.copy_location(new, self)
@@ -2381,10 +2407,23 @@ class Compiler:
         return r
 
     def local_object(self, e):
-        """The type an instance made in the function goes as: its attributes' types as they are here, and its methods."""
-        t = e.local
-        fields = [(k, self.typeof(x)) for k, x in e.slots.items()] + [kt for kt in t.elem if kt[1].kind == 'function']
-        return T.object_of(t.py, sorted(fields, key=lambda kv: kv[0]), t.methods, t.cls, t.writes)
+        """The type an instance made in the function goes as: its attributes' types as they are here, and its methods;
+        an object it holds, as a made one's attributes are here, or as a parameter's object is."""
+        held = getattr(e, 'held', None) or {}
+
+        def build(prefix, t):
+            fields = []
+            for a in dict.fromkeys(k[len(prefix):].split('.')[0] for k in e.slots if k.startswith(prefix)):
+                full = prefix + a
+                if full in e.slots:
+                    fields.append((a, self.typeof(e.slots[full])))
+                elif held[full].kind == 'object':
+                    fields.append((a, held[full]))
+                else:
+                    fields.append((a, build(full + '.', held[full])))
+            fields += [kt for kt in (t.recipe['methods'] if t.kind == 'madeclass' else t.elem) if kt[1].kind == 'function']
+            return T.object_of(t.py, sorted(fields, key=lambda kv: kv[0]), t.methods, t.cls, t.writes)
+        return build('', e.local)
 
     def typeof(self, e):
         if isinstance(e, SelfArg) and getattr(e, 'same', None) is not None:
@@ -2396,7 +2435,7 @@ class Compiler:
                 if self.typeof(x).np == 'dyn':
                     self.fail(e, f'{self.shown(x.id)} is a Python number at some times and a numpy one at others')
             e.object_type = self.local_object(e)
-            e.elts = [e.slots[k] for k, ft in e.object_type.elem if ft.kind != 'function']
+            e.elts = [e.slots[k] for k, _ in leaf_types(e.object_type)]
             return e.object_type
         if isinstance(e, SelfArg):
             for x, (k, ft) in zip(e.elts, leaf_types(e.object_type)):

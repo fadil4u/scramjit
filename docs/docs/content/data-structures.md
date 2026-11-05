@@ -946,6 +946,36 @@ sj_fail:
 
 Returning one gives a real instance of the class, its attributes in the order `__init__` assigns them, as Python would have made it. A `default_factory`, an `__init__` that does anything else (prints, calls, reads `self`), `__new__`, or a metaclass with its own `__call__` keep the function in Python. The class is part of the signature: give the name a new class and it compiles again, and a method changed on it later is noticed at the next call.
 
+### Methods and functions that return a new instance
+
+A method or function returning a new instance compiles where it's called, and so do operators that call one:
+
+```python
+@dataclass
+class Vec:
+    x: float
+    y: float
+
+    def __add__(self, o):
+        return Vec(self.x + o.x, self.y + o.y)
+
+    def __mul__(self, k):
+        return Vec(self.x * k, self.y * k)
+
+    def norm(self):
+        return math.sqrt(self.x * self.x + self.y * self.y)
+
+@scram
+def drift(p, v, n, dt):
+    for i in range(n):
+        p = p + v * dt          # each new Vec is two variables
+    return p.norm()
+```
+
+The callee hands back the new instance's attributes, and the name it's assigned to holds them as variables, as for `v = Vec(x, y)`. A parameter given new instances, like `p` here, starts as the argument's numbers; that is only what Python does if nothing is written through it first and it isn't returned or compared with `is`, so then it stays Python. A new instance used inside an expression, `(a - b).norm()` or `f(a + b)`, is made first into a variable of its own, as Python would make it at that point; so it stays Python where that would move it past a call that may assign something (name it first), or where it's made on one side of a condition (`(a + b).x if c else 0.0`). `a + b` calls `type(a).__add__`, also `-`, `*`, `/`, `//`, `%`, `**`, `@` and unary `-` and `+`; it stays Python if the method can return `NotImplemented`, or if `b` is an instance of another class, whose reflected method Python may try first.
+
+An instance made here can hold other objects: `b = Body(Vec(x, y), v)` makes `b.pos` another name for the new `Vec`, and `b.vel` for `v`, so writes through either name are seen through the other. Returning `b` gives a new `Body` holding a new `Vec` and `v` itself. A method of `b` that uses those objects, or passing `b` on, stays Python for now.
+
 ### Objects in attributes
 
 `b.pos.x`, `self.pos.norm()` and `d.inner.pos.x += 1.0` compile: each number on the way is a variable, read at the call and written back if assigned. `return b.pos` returns that very object. Assigning an object (`a.pos = b.pos`) runs as Python.
@@ -966,8 +996,7 @@ Stays Python, for now:
 
 - `hasattr(p, 'x')`, `getattr(p, name)`, `vars(p)`, and using the object any other way
 - a method that assigns attributes, called inside a comprehension or a lambda
-- an object in an attribute of a list's elements, or of an instance made in the function, and passing one on (`f(b.pos)`)
-- a function that makes an instance, called from another compiled function
+- an object in an attribute of a list's elements, and a method of an instance made in the function that uses an object it holds
 - an object and its own `__dict__` passed as two arguments
 - `self.__x` in a class, as Python renames it
 

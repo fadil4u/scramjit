@@ -22,7 +22,7 @@ import warnings
 import weakref
 
 from . import _types as T
-from ._compiler import Callee, Compiler, Unit, array_record_slots, cimo_diagnostic, leaf_types, ret_arrays, ret_pairs
+from ._compiler import OPERATORS, Callee, Compiler, Unit, array_record_slots, cimo_diagnostic, leaf_types, ret_arrays, ret_pairs, returns_made
 from ._errors import CompileError, FallbackWarning, Unsupported
 from . import _interrupt
 from . import _lift
@@ -210,6 +210,8 @@ def _made_locals(fdef, classes):
         if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call) \
                 and isinstance(n.value.func, ast.Name) and n.value.func.id in classes:
             out[n.targets[0].id] = n.value.func.id
+        elif isinstance(n, ast.Return) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and n.value.func.id in classes:
+            out[f'sjret__{n.lineno}_{n.col_offset}'] = n.value.func.id      # return C(...): made, and handed back
     return out
 
 
@@ -279,29 +281,146 @@ def _init_recipe(cls):
     return {'params': params, 'assigns': assigns, 'post_init': _in_class(cls, '__post_init__') is not _MISSING, 'frozen': bool(frozen)}
 
 
-def _made_class_type(f, cls, name):
-    """The type of a class the function makes instances of, under this name; None if they can't be compiled."""
+def _local_classes(f, owners):
+    """{name: class} for the names in f holding an instance it makes: v = C(...), and v = g(...), v = x.m(...) or v = x + y
+    when what's called returns a new instance. owners: the classes of names known already (its instance parameters)."""
+    tree = f._ctree or f._tree
+    g = f._fn.__globals__
+    known, out = dict(owners or {}), {}
+    for _ in range(8):
+        grew = False
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and n.targets[0].id not in out:
+                cls = _made_by(n.value, g, known)
+                if cls is not None:
+                    out[n.targets[0].id] = known[n.targets[0].id] = cls
+                    grew = True
+        if not grew:
+            break
+    return out
+
+
+def _made_by(e, g, known):
+    """The class of the new instance an expression makes: C(...), or a call of a function or method returning one."""
+    if isinstance(e, ast.Call) and isinstance(e.func, ast.Name):
+        x = g.get(e.func.id)
+        if isinstance(x, type) and not issubclass(x, (enum.Enum, BaseException)):
+            return x
+        if type(x) is Function and x._tree is not None:
+            return returns_made(x._tree, x._fn.__globals__)
+        return None
+    w = None
+    if isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute):
+        c = _class_of(e.func.value, g, known)
+        w = _in_class(c, e.func.attr) if c is not None else None
+    elif isinstance(e, (ast.BinOp, ast.UnaryOp)) and type(e.op) in OPERATORS:
+        c = _class_of(e.left if isinstance(e, ast.BinOp) else e.operand, g, known)
+        w = _in_class(c, OPERATORS[type(e.op)]) if c is not None else None
+    if type(w) is Function or type(w) is types.FunctionType:
+        w = _method(w)
+        if w._tree is not None:
+            return returns_made(w._tree, w._fn.__globals__)
+    return None
+
+
+def _class_of(e, g, known):
+    """The class of the instance an expression is: a name whose class is known, or a new instance."""
+    if isinstance(e, ast.Name):
+        return known.get(e.id)
+    return _made_by(e, g, known)
+
+
+def _unnamed_uses(tree, g, known, cls):
+    """(attribute, 'load' or 'call') used directly on a new instance of cls that has no name: (a - b).norm(), (a + b).x."""
+    called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and not isinstance(n.value, ast.Name) and _made_by(n.value, g, known) is cls:
+            yield n.attr, 'call' if id(n) in called else 'load'
+        elif isinstance(n, (ast.BinOp, ast.UnaryOp)) and type(n.op) in OPERATORS:
+            x = n.left if isinstance(n, ast.BinOp) else n.operand
+            if not isinstance(x, ast.Name) and _made_by(x, g, known) is cls:
+                yield OPERATORS[type(n.op)], 'call'
+
+
+def _callees_of(f, known):
+    """[(compiled function, {its parameter: class})] for what f calls: functions at module level by name, and methods of
+    names whose class is known, operators too."""
+    tree = f._ctree or f._tree
+    g = f._fn.__globals__
+    out = []
+    for n in ast.walk(tree):
+        w, me = None, None
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and type(g.get(n.func.id)) is Function:
+            out.append((g[n.func.id], {}))
+            continue
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+            me = _class_of(n.func.value, g, known)
+            w = _in_class(me, n.func.attr) if me is not None else None
+        elif isinstance(n, (ast.BinOp, ast.UnaryOp)) and type(n.op) in OPERATORS:
+            me = _class_of(n.left if isinstance(n, ast.BinOp) else n.operand, g, known)
+            w = _in_class(me, OPERATORS[type(n.op)]) if me is not None else None
+        if type(w) is Function or type(w) is types.FunctionType:
+            w = _method(w)
+            ps = w._tree.args.posonlyargs + w._tree.args.args if w._tree is not None else []
+            if ps:
+                out.append((w, {ps[0].arg: me}))
+    return out
+
+
+def _made_uses(f, cls, owners, seen=None):
+    """(attributes used, assigned, methods called) of the instances of cls that f, or anything it calls, makes; None if
+    nothing does. owners: {name: class} of f's instance parameters."""
+    seen = set() if seen is None else seen
+    if id(f) in seen or f._tree is None:
+        return None
+    seen.add(id(f))
+    tree = f._ctree or f._tree
+    g = f._fn.__globals__
+    mine = _local_classes(f, owners)
+    known = dict(owners or {})
+    known.update(mine)
+    local = {v for v, c in mine.items() if c is cls}
+    handed = any(isinstance(n, ast.Return) and n.value is not None and _made_by(n.value, g, known) is cls
+                 or isinstance(n, (ast.Call, ast.BinOp, ast.UnaryOp)) and _made_by(n, g, known) is cls for n in ast.walk(tree))
+    uses = None
+    if local or handed:
+        uses = (set(), set(), set())
+        for v, attr, how in _attribute_uses(tree):
+            if v in local:
+                _add_use(uses, attr, how)
+        for attr, how in _unnamed_uses(tree, g, known, cls):
+            _add_use(uses, attr, how)
+        for n in ast.walk(tree):                 # passed on: what the callee makes of it
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                h = g.get(n.func.id)
+                for pos, a in enumerate(n.args):
+                    if isinstance(a, ast.Name) and a.id in local and type(h) is Function and h._tree is not None:
+                        u = _param_uses(h, pos, cls, h._attrs.get(pos, ((), set(), set())))
+                        for k in range(3):
+                            uses[k].update(u[k])
+    for h, theirs in _callees_of(f, known):      # what they make and hand back, or make for themselves
+        u = _made_uses(h, cls, theirs, seen)
+        if u is not None:
+            uses = uses or (set(), set(), set())
+            for k in range(3):
+                uses[k].update(u[k])
+    return uses
+
+
+def _made_class_type(f, cls, name, owners=None):
+    """The type of a class the function, or what it calls, makes instances of, under this name; None if they can't be
+    compiled, or nothing makes any."""
+    found = _made_uses(f, cls, owners)
+    if found is None:
+        return None
     recipe = _init_recipe(cls)
     if type(recipe) is str:
         f._made_why = recipe
         return None
     recipe = dict(recipe)
-    tree = f._ctree or f._tree
-    local = {v for v, c in _made_locals(tree, {name}).items()}
-    uses = (set(), set(), set())
-    for v, attr, how in _attribute_uses(tree):
-        if v in local:
-            _add_use(uses, attr, how)
+    uses = found
     if recipe['post_init']:
         uses[2].add('__post_init__')
-    for n in ast.walk(tree):                     # passed on: what the callee makes of it
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
-            g = f._fn.__globals__.get(n.func.id)
-            for pos, a in enumerate(n.args):
-                if isinstance(a, ast.Name) and a.id in local and type(g) is Function and g._tree is not None:
-                    u = _param_uses(g, pos, cls, g._attrs.get(pos, ((), set(), set())))
-                    for k in range(3):
-                        uses[k].update(u[k])
     assigned = {a for a, _ in recipe['assigns']}
     found = _methods_called(None, uses[2], cls) if uses[2] else {}
     if type(found) is str:
@@ -491,14 +610,18 @@ def _passes(fdef):
             alias[n.targets[0].id] = n.value.value.id
     found = {}
     for n in ast.walk(fdef):
-        if not isinstance(n, ast.Call):
+        if isinstance(n, ast.BinOp) and isinstance(n.left, ast.Name) and type(n.op) in OPERATORS:
+            target, given = ('m', n.left.id, OPERATORS[type(n.op)]), [n.right]       # a + b passes b to a.__add__
+        elif isinstance(n, ast.Call):
+            f = n.func
+            target = ('f', f.id) if isinstance(f, ast.Name) else ('m', f.value.id, f.attr) \
+                if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) else None
+            given = n.args
+        else:
             continue
-        f = n.func
-        target = ('f', f.id) if isinstance(f, ast.Name) else ('m', f.value.id, f.attr) \
-            if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) else None
         if target is None:
             continue
-        for pos, a in enumerate(n.args):
+        for pos, a in enumerate(given):
             if isinstance(a, ast.Subscript) and isinstance(a.value, ast.Name) and a.value.id in index:
                 a = a.value                       # ps[i]: an element
             if isinstance(a, ast.Name) and (a.id in index or a.id in alias):
@@ -537,6 +660,8 @@ def _owner_classes(f, args):
         if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Subscript) \
                 and isinstance(n.value.value, ast.Name) and n.value.value.id in lists:
             out[n.targets[0].id] = lists[n.value.value.id]
+    for v, c in _local_classes(f, out).items():         # v = a + b, v = a.add(b): new instances, of the class the call returns
+        out.setdefault(v, c)
     return out
 
 
@@ -593,9 +718,13 @@ def _add_use(entry, attr, how):
 
 
 def _attribute_uses(fdef):
-    """(name, attribute, 'load', 'store' or 'call') for each name.attribute."""
+    """(name, attribute, 'load', 'store' or 'call') for each name.attribute; name + x calls name.__add__, if it's an instance."""
     called = {id(n.func) for n in ast.walk(fdef) if isinstance(n, ast.Call)}
     for n in ast.walk(fdef):
+        if isinstance(n, ast.BinOp) and isinstance(n.left, ast.Name) and type(n.op) in OPERATORS:
+            yield n.left.id, OPERATORS[type(n.op)], 'call'
+        elif isinstance(n, ast.UnaryOp) and isinstance(n.operand, ast.Name) and type(n.op) in OPERATORS:
+            yield n.operand.id, OPERATORS[type(n.op)], 'call'
         if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and not (n.attr.startswith('__') and not n.attr.endswith('__')):
             yield n.value.id, n.attr, 'call' if id(n) in called else 'load' if isinstance(n.ctx, ast.Load) else 'store'
 
@@ -740,6 +869,41 @@ def _methods_called(x, calls, cls=None):
                 found[m][0].update(found[k][0])
                 found[m][1].update(found[k][1])
     return found
+
+
+def _construction_uses(f):
+    """{parameter index: use tree} for parameters given to v = C(...), C a class at module level whose __init__ only stores:
+    what f does through the attribute each becomes (v.pos.x is the parameter's x)."""
+    tree = f._ctree or f._tree
+    index = {p.arg: i for i, p in enumerate(tree.args.posonlyargs + tree.args.args)}
+    g = f._fn.__globals__
+    out = {}
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call)
+                and isinstance(n.value.func, ast.Name) and isinstance(g.get(n.value.func.id), type)):
+            continue
+        given = {}
+        recipe = _init_recipe(g[n.value.func.id])
+        if type(recipe) is str:
+            continue
+        positional = [p for p, _, kw in recipe['params'] if not kw]
+        for p, a in list(zip(positional, n.value.args)) + [(k.arg, k.value) for k in n.value.keywords]:
+            if isinstance(a, ast.Name) and a.id in index:
+                given[p] = index[a.id]
+        attrs = {a: given[src[1]] for a, src in recipe['assigns'] if src[0] == 'param' and src[1] in given}
+        v = n.targets[0].id
+        called = {id(c.func) for c in ast.walk(tree) if isinstance(c, ast.Call)}
+        for m in ast.walk(tree):
+            if not isinstance(m, ast.Attribute):
+                continue
+            base, path = _chain(m)
+            if base != v or not path or len(path) < 2 or path[0] not in attrs:
+                continue
+            node = out.setdefault(attrs[path[0]], [set(), set(), set(), {}])
+            for a in path[1:-1]:
+                node = node[3].setdefault(a, [set(), set(), set(), {}])
+            _add_use(node, path[-1], 'call' if id(m) in called else 'load' if isinstance(m.ctx, ast.Load) else 'store')
+    return out
 
 
 def _node_merge(into, node):
@@ -1442,8 +1606,7 @@ class Function:
             or (n in attrs and type(_object_fields(g[n], sorted(attrs[n][0]), attrs[n][1], attrs[n][2])) is list)))
         callees = sorted(n for n in called - local if type(g.get(n)) is Function)
         self._hidden += callees + sorted(n for n in called - local if T.is_c_function(g.get(n)))
-        self._made = sorted(n for n in called - local if isinstance(g.get(n), type) and not issubclass(g[n], enum.Enum)
-                            and _made_locals(tree, {n}))      # classes it makes instances of: in the signature, by identity
+        self._made = sorted(n for n in called - local if isinstance(g.get(n), type) and not issubclass(g[n], (enum.Enum, BaseException)))      # classes it makes instances of: in the signature, by identity
         self._hidden += self._made
         self._hidden_from = [(g, n) for n in self._hidden]
         for n in callees:                # what they read is read at each call too, and may be in another module
@@ -1681,13 +1844,18 @@ class Function:
         lists = [id(y) for x in args if type(x) is list for y in [x] + [r for r in x if type(r) is list]]
         if len(set(lists)) != len(lists):        # one list under two names: a copy each would hide the writes
             key = tuple(None if type(x) is list else t for x, t in zip(args, key))
-        made = getattr(self, '_made', ())
-        if made:
+        if self._hidden and any(t is not None and t.kind == 'classref' for t in key):
             out = list(key)
             real = len(args) - len(self._hidden)
+            owners = None
             for k, name in enumerate(self._hidden):
-                if name in made and out[real + k] is not None:
-                    out[real + k] = _made_class_type(self, args[real + k], name)
+                x = args[real + k]
+                if out[real + k] is not None and out[real + k].kind == 'classref' and not issubclass(x, enum.Enum):
+                    if owners is None:
+                        owners = _owner_classes(self, args)
+                    t = _made_class_type(self, x, name, owners)
+                    if t is not None or name in getattr(self, '_made', ()):
+                        out[real + k] = t          # made here, or by what it calls: how, in the signature
             key = tuple(out)
         if not ((self._attrs or self._elems or self._passes or self._unused or self._returned) and None in key) \
                 and (not self._dict_keys or dict not in map(type, args)):
@@ -1707,6 +1875,15 @@ class Function:
                 nested = _merge_nested(nested, more)
             node = [set(uses[0]), set(uses[1]), set(uses[2]), {}]
             _node_merge(node, [(), (), (), nested or {}])
+            name = (self._ctree or self._tree).args.args[i].arg if i < len((self._ctree or self._tree).args.args) else None
+            if name is not None and any(isinstance(n, ast.Name) and n.id == name and not isinstance(n.ctx, ast.Load)
+                                        for n in ast.walk(self._ctree or self._tree)):
+                recipe = _init_recipe(type(x))   # given a new instance: it starts as a copy of all __init__ assigns
+                if type(recipe) is dict:
+                    node[0] |= {a for a, _ in recipe['assigns']}
+            built = _construction_uses(self).get(i)
+            if built is not None:                # given to C(...): what's done through the attribute it becomes
+                _node_merge(node, built)
             roots.append((i, x, node))
         if roots:
             found, ids = _object_graph(roots)
@@ -1792,11 +1969,19 @@ class Function:
         r = entry.ret
         if entry.instance_ret and entry.instance_ret[0] == 'made':     # a new instance, filled as its __init__ fills it
             _, cls, attrs = entry.instance_ret
-            values = self._box_tuple(io, r) if not entry.records else self._array_result(entry, io, args)
-            obj = cls.__new__(cls)
-            for a, v in zip(attrs, values):
-                object.__setattr__(obj, a, v)
-            return obj
+            values = iter(self._box_tuple(io, r) if not entry.records else self._array_result(entry, io, args))
+
+            def build(cls, attrs):
+                obj = cls.__new__(cls)
+                for a in attrs:
+                    if type(a) is tuple:         # an object it holds: made too, or an argument's, as it is
+                        a, held = a
+                        v = build(held[1], held[2]) if held[0] == 'made' else _member(args[held[1]], held[2]) if held[2] else args[held[1]]
+                    else:
+                        v = next(values)
+                    object.__setattr__(obj, a, v)
+                return obj
+            return build(cls, attrs)
         if r is T.NONE:
             return None
         if entry.records:

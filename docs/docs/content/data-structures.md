@@ -12,7 +12,7 @@ At a glance:
 | Lists | lists of numbers made in the function, passed in, returned, and at module level (from 0.0.4) | `append` and every method that resizes, `in`, slices, aliases (`ys = xs`), mixed ints and floats |
 | Lists of lists | rectangular, passed in, made in the function and returned (from 0.0.4) | ragged, one row in two places, `m[i, j]`, slices, replacing a row, three levels made in the function |
 | Dicts | passed in, reading and writing the keys the function names | building one, adding or deleting keys, `len`, `in`, `.get`, iterating, a key in a variable |
-| Instances (from 0.0.4) | passed in or at module level, `@scram` methods, reading and writing the attributes the function names, calling their methods: plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | properties, static and class methods, an object in an attribute, making an instance, adding an attribute |
+| Instances (from 0.0.4) | passed in or at module level, `@scram` methods, reading and writing the attributes the function names, calling their methods, passing them to compiled functions, lists of them: plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | properties, static and class methods, an object in an attribute, making an instance, adding an attribute |
 | Enums | `Enum` and `IntEnum` members with int values | `.name`, `Cell(1)`, iterating the class, `Flag` and string enums |
 | Module-level constants | numbers, tuples, arrays, dicts, lists, enum classes, instances (from 0.0.4) | strings, `None`, assigning with `global` |
 | Sets, strings | | all of them |
@@ -627,13 +627,219 @@ Each method compiles as a [call between functions](loops-and-builtins.md#calls-b
 
 A call to a method costs about 5 ns more than the same code written in the loop, since cimo doesn't yet keep a call's results in registers once it inlines it. That's 15 ns a step against 8.5 for the loop above, or 128 ns as Python.
 
-A method that assigns attributes must be called in a plain statement, such as `b.step(dt)`, `y = b.step(dt)`, `s += b.f()` or `return b.f()`, and not in an `if` or `while` test, a loop header, a comprehension or a lambda. One that only reads can be called anywhere. Keyword-only parameters, recursion, a method that reads a module-level value, and one that changes an attribute's type run as Python.
+A method that assigns attributes must be called in a plain statement, such as `b.step(dt)`, `y = b.step(dt)`, `s += b.f()` or `return b.f()`, and not in an `if` or `while` test, a loop header, a comprehension or a lambda. One that only reads can be called anywhere. A method can read module-level values, which are read at each call as the function's own are. Keyword-only parameters, recursion, and a method that changes an attribute's type run as Python.
+
+### Passing an instance on
+
+An instance can be given to another `@scram` function, or to a method, as an argument: `dist(p, q)`, `a.dist2(b)`. It goes as the attributes that function uses, and what it assigns comes back the same way a method's does.
+
+### Lists of instances
+
+A plain list of instances of one class compiles too:
+
+```python
+import dataclasses
+
+@dataclasses.dataclass
+class Particle:
+    x: float
+    v: float = 0.0
+    bounces: int = 0
+
+    def drift(self, dt):
+        self.x += self.v * dt
+        if self.x < 0.0:
+            self.v = -self.v
+            self.bounces += 1
+
+@scram
+def step(particles, dt, n):
+    for _ in range(n):
+        for p in particles:
+            p.v -= 9.8 * dt
+            p.drift(dt)
+    return sum((p.x for p in particles), 0.0)
+```
+<!-- c: step([Particle(1.0), Particle(2.0)], 0.01, 10) -->
+```c-generated
+static int sj_call_0(int64_t v_self__bounces, double v_self__v, double v_self__x, double v_dt, int64_t *sj_tb, int64_t *sj_io) {
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    double t1 = v_self__x;
+    double t2 = v_self__v;
+    double t3 = v_dt;
+    double t4 = (t2 * t3);
+    v_self__x = (t1 + t4);
+    double t5 = v_self__x;
+    double t6 = 0x0.0p+0;
+    if ((t5 < t6)) {
+        v_self__v = (-(v_self__v));
+        int64_t t7 = v_self__bounces;
+        int64_t t8 = 1LL;
+        v_self__bounces = sj_add((int64_t)t7, (int64_t)t8);
+    }
+sj_done:
+    sj_io[5] = (int64_t)v_self__bounces;
+    sj_io[6] = 0;
+    memcpy(&sj_io[7], &v_self__v, 8);
+    sj_io[8] = 0;
+    memcpy(&sj_io[9], &v_self__x, 8);
+    sj_io[10] = 0;
+    return 0;
+sj_fail:
+    sj_io[5] = (int64_t)v_self__bounces;
+    sj_io[6] = 0;
+    memcpy(&sj_io[7], &v_self__v, 8);
+    sj_io[8] = 0;
+    memcpy(&sj_io[9], &v_self__x, 8);
+    sj_io[10] = 0;
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+
+int sj_kernel(int64_t *v_particles__bounces, int64_t v_particles__bounces__n, double *v_particles__v, int64_t v_particles__v__n, double *v_particles__x, int64_t v_particles__x__n, double v_dt, int64_t v_n, volatile int *sj_stop, int64_t *sj_io) {
+    *sj_stop = 0;
+    int64_t *sj_tb = sj_io + 5; sj_tb[0] = 0;
+    int64_t v__ = 0;
+    int64_t v_sji__p = 0;
+    int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;
+    int64_t t1 = 0LL, t2 = v_n;
+    int64_t t3 = t1, t4 = t2;
+    for (;;) {
+        int64_t t5 = t4 > t3 && (uint64_t)t4 - (uint64_t)t3 > 65536 ? t3 + 65536 : t4;
+        for (; t3 < t5; t3++) {
+            v__ = t3;
+            int64_t t6 = v_particles__bounces__n;
+            int64_t t7 = 0LL, t8 = t6;
+            int64_t t9 = t7, t10 = t8;
+            for (;;) {
+                int64_t t11 = t10 > t9 && (uint64_t)t10 - (uint64_t)t9 > 65536 ? t9 + 65536 : t10;
+                for (; t9 < t11; t9++) {
+                    v_sji__p = t9;
+                    int64_t t12 = v_sji__p;
+                    int64_t t13 = t12;
+                    if ((uint64_t)t13 >= (uint64_t)v_particles__v__n) SJ_FAIL(5, 5, 0, 0);
+                    double t14 = v_particles__v[t13];
+                    double t15 = t14;
+                    double t16 = 0x1.399999999999ap+3;
+                    double t17 = v_dt;
+                    double t18 = (t16 * t17);
+                    v_particles__v[t13] = (t15 - t18);
+                    int64_t t19 = v_sji__p;
+                    int64_t t20 = t19;
+                    int64_t t21 = v_particles__bounces[t20];
+                    int64_t t22 = t21;
+                    int64_t t23 = t22;
+                    int64_t t24 = v_sji__p;
+                    int64_t t25 = t24;
+                    if ((uint64_t)t25 >= (uint64_t)v_particles__v__n) SJ_FAIL(5, 6, 0, 0);
+                    double t26 = v_particles__v[t25];
+                    double t27 = t26;
+                    double t28 = t27;
+                    int64_t t29 = v_sji__p;
+                    int64_t t30 = t29;
+                    if ((uint64_t)t30 >= (uint64_t)v_particles__x__n) SJ_FAIL(5, 6, 0, 0);
+                    double t31 = v_particles__x[t30];
+                    double t32 = t31;
+                    double t33 = t32;
+                    double t34 = v_dt;
+                    int64_t t35[11];
+                    int t36 = sj_call_0(t23, t28, t33, t34, sj_tb, t35);
+                    int64_t t37 = (int64_t)t35[5];
+                    int64_t t38 = v_sji__p;
+                    int64_t t39 = t38;
+                    int64_t t40 = t37;
+                    v_particles__bounces[t39] = t40;
+                    double t41_d; memcpy(&t41_d, &t35[7], 8); double t41 = (double)t41_d;
+                    int64_t t42 = v_sji__p;
+                    int64_t t43 = t42;
+                    if ((uint64_t)t43 >= (uint64_t)v_particles__v__n) SJ_FAIL(5, 6, 1, 0);
+                    double t44 = t41;
+                    v_particles__v[t43] = t44;
+                    double t45_d; memcpy(&t45_d, &t35[9], 8); double t45 = (double)t45_d;
+                    int64_t t46 = v_sji__p;
+                    int64_t t47 = t46;
+                    if ((uint64_t)t47 >= (uint64_t)v_particles__x__n) SJ_FAIL(5, 6, 1, 0);
+                    double t48 = t45;
+                    v_particles__x[t47] = t48;
+                    if (t36) { sj_tb[++sj_tb[0]] = ((int64_t)0 << 32) | t35[1]; sj_io[0] = t35[0]; sj_io[4] = t35[4]; SJ_FAIL(t36, 6, t35[2], t35[3]); }
+                    int64_t t49 = v_sji__p;
+                    int64_t t50 = t49;
+                    int64_t t51 = v_particles__bounces[t50];
+                    int64_t t52 = v_sji__p;
+                    int64_t t53 = t52;
+                    int64_t t54 = t51;
+                    v_particles__bounces[t53] = t54;
+                    int64_t t55 = v_sji__p;
+                    int64_t t56 = t55;
+                    if ((uint64_t)t56 >= (uint64_t)v_particles__v__n) SJ_FAIL(5, 6, 0, 0);
+                    double t57 = v_particles__v[t56];
+                    int64_t t58 = v_sji__p;
+                    int64_t t59 = t58;
+                    if ((uint64_t)t59 >= (uint64_t)v_particles__v__n) SJ_FAIL(5, 6, 1, 0);
+                    double t60 = t57;
+                    v_particles__v[t59] = t60;
+                    int64_t t61 = v_sji__p;
+                    int64_t t62 = t61;
+                    if ((uint64_t)t62 >= (uint64_t)v_particles__x__n) SJ_FAIL(5, 6, 0, 0);
+                    double t63 = v_particles__x[t62];
+                    int64_t t64 = v_sji__p;
+                    int64_t t65 = t64;
+                    if ((uint64_t)t65 >= (uint64_t)v_particles__x__n) SJ_FAIL(5, 6, 1, 0);
+                    double t66 = t63;
+                    v_particles__x[t65] = t66;
+                }
+                if (t9 >= t10) break;
+                if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+            }
+        }
+        if (t3 >= t4) break;
+        if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+    }
+    double t67 = 0.0, t68 = 0.0; int t69 = 0;
+    int64_t t70 = 0LL, t71 = v_particles__bounces__n, t72 = 1LL;
+    uint64_t t73 = t72 > 0 ? (t70 < t71 ? ((uint64_t)t71 - (uint64_t)t70 - 1) / (uint64_t)t72 + 1 : 0) : (t70 > t71 ? ((uint64_t)t70 - (uint64_t)t71 - 1) / (0 - (uint64_t)t72) + 1 : 0);
+    t67 = (double)(0x0.0p+0);
+    uint64_t t74 = 0, t75 = t73;
+    for (;;) {
+        uint64_t t76 = t75 > t74 && (uint64_t)t75 - (uint64_t)t74 > 65536 ? t74 + 65536 : t75;
+        for (; t74 < t76; t74++) {
+            int64_t t77 = (int64_t)((uint64_t)t70 + t74 * (uint64_t)t72);
+            int64_t t78 = t77;
+            int64_t t79 = t78 < 0 ? t78 + v_particles__x__n : t78;
+            if ((uint64_t)t79 >= (uint64_t)v_particles__x__n) SJ_FAIL(5, 7, 0, 0);
+            double t80 = v_particles__x[t79];
+            double t81 = t80;
+            if (!t69) { double tt = t67 + t81; if (fabs(t67) >= fabs(t81)) t68 += (t67 - tt) + t81; else t68 += (t81 - tt) + t67; t67 = tt; } else t67 = t67 + t81;
+        }
+        if (t74 >= t75) break;
+        if (*sj_stop) SJ_FAIL(8, 0, 0, 0);
+    }
+    if (!t69 && t68 != 0.0 && isfinite(t68)) t67 += t68;
+    { double t82 = t67; memcpy(&sj_io[0], &t82, 8); }
+    goto sj_done;
+sj_done:
+    return 0;
+sj_fail:
+    sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;
+    return sj_st;
+}
+```
+
+`for p in ps`, `for i, p in enumerate(ps)`, `p = ps[i]`, `ps[i].x`, `len(ps)`, `sum(p.x for p in ps)`, methods of an element, and passing an element on all compile. Each attribute the function uses is copied into a list of numbers at the call, so `p.x` costs what `xs[i]` does, and the values that changed are written back into the instances when it ends, however it ends. The copy takes about 0.15 µs per instance and attribute at each call. [`examples/particles.py`](https://github.com/farizrahman4u/scramjit/blob/main/examples/particles.py) is a full one: gravity between 200 particles, with methods, a helper function and a module-level constant.
+
+Every element must be the same class and hold the same type in each attribute used (all floats, say, not some ints), and an instance can be in the list only once. Anything else runs the call as Python. Two elements of one list may be the same instance, so a call given two of them, as `pull(a, b)` in a loop over every pair, compiles only if what it assigns through one it doesn't use through the other. `pull` assigning `a.vx` while reading `b.x` is fine; assigning `a.x` while reading `b.x` runs as Python.
+
+Using the list any other way (appending, `ps[i] = q`, slicing, passing it to a function, returning an element) runs as Python.
+
+### Parameters the function doesn't use
+
+A parameter the function never names can be anything: a label, a logger, an object it doesn't touch. It compiles, and nothing of it reaches the C.
 
 Stays Python, for now:
 
 - an object in an attribute (`p.pos.x`), or a list in one
-- using the object any other way: passing `p` to a function, `q = p`, `hasattr(p, 'x')`, `isinstance`
-- making an instance in the function, or a list of instances
+- using the object any other way: `q = p`, `hasattr(p, 'x')`, `isinstance`, returning it
+- making an instance in the function
 - one object passed under two names, including an object and its own `__dict__`
 - `self.__x` in a class, as Python renames it
 

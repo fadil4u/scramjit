@@ -115,7 +115,7 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | Numbers and n-D numpy arrays, including dtypes like `uint8`; `Enum` and `IntEnum` members | Making instances; properties |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | Sets, `str` |
 | Dicts passed in, reading and writing keys it names | Dicts that gain keys, or built in the function |
-| Attributes of instances and dataclasses, passed in or as `self`, read and written, and calls to their methods (from 0.0.4) | Properties, instances made in the function |
+| Attributes of instances and dataclasses, passed in or as `self`, read and written; calls to their methods; passing them on; lists of them (from 0.0.4) | Properties, instances made in the function |
 | numpy functions on single numbers: `np.sqrt(x[i])`, `np.sin`, `np.minimum` | numpy calls that make arrays: `np.sqrt(x)`, `x.sum(axis=0)` |
 | numpy reductions to one number: `x.sum()`, `np.max(m[i])`, `x.std()`, `x.argmax()` | `np.dot`, `np.linalg` |
 
@@ -215,7 +215,7 @@ Pre-release: the API may still change.
 - A function that doesn't compile whole has its loops compiled on their own, where they fit.
 - Data structures: dicts passed in with keys that don't change, tuples to any depth, enums, local lists, and module-level
   numbers, tuples, arrays and dicts compile. On `main`, from 0.0.4: lists passed in, lists of lists, and attributes of
-  instances and dataclasses, `self` and calls to their methods included.
+  instances and dataclasses, `self`, calls to their methods, passing them to compiled functions and lists of them included.
 - Next: see [`TODO.md`](https://github.com/farizrahman4u/scramjit/blob/main/TODO.md).
 
 ## Development

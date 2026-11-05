@@ -83,6 +83,29 @@ class StaticCallee:
     def __init__(self, fdef, globals_):
         self.fdef, self.globals = fdef, globals_
 
+    def _uses_of(self, idx, cls, stack=()):
+        """(attributes used, assigned, methods called) of parameter idx, through the functions of this module it's passed to."""
+        params = self.fdef.args.posonlyargs + self.fdef.args.args
+        if idx >= len(params) or (self.fdef.name, idx) in stack:
+            return set(), set(), set()
+        me = params[idx].arg
+        called = {id(n.func) for n in ast.walk(self.fdef) if isinstance(n, ast.Call)}
+        names, writes, calls = set(), set(), set()
+        for n in ast.walk(self.fdef):
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == me:
+                if id(n) in called:
+                    calls.add(n.attr)
+                else:
+                    names.add(n.attr)
+                    if not isinstance(n.ctx, ast.Load):
+                        writes.add(n.attr)
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and isinstance(self.globals.get(n.func.id), StaticCallee):
+                for pos, a in enumerate(n.args):
+                    if isinstance(a, ast.Name) and a.id == me:
+                        u = self.globals[n.func.id]._uses_of(pos, cls, stack + ((self.fdef.name, idx),))
+                        names, writes, calls = names | u[0], writes | u[1], calls | u[2]
+        return names, writes, calls
+
     def _callee(self):
         tree, _ = with_globals(self.fdef, self.globals)
         count = len(self.fdef.args.posonlyargs + self.fdef.args.args)
@@ -108,6 +131,7 @@ def module_globals(tree):
     out = {}
     for s in tree.body:
         if isinstance(s, ast.ClassDef):
+            out.setdefault(CLASSES, []).append(s)
             for d in s.body:
                 if isinstance(d, ast.FunctionDef):
                     d.sj_class = s           # self.m() in it can be found in the class
@@ -188,6 +212,8 @@ def assumed_signature(fdef, globals_=None, seen=()):
     ndim = {}
     passed_ints = set()
     passed_tuples = {}
+    passed_objects = {}                # name -> {attribute: type}, from the functions it's passed to
+    passed_methods = {}                # name -> what those types say of their methods
     for n in ast.walk(fdef):
         f = (globals_ or {}).get(n.func.id) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) else None
         c = (globals_ or {}).get(n.func.value.id) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) else None
@@ -205,6 +231,11 @@ def assumed_signature(fdef, globals_=None, seen=()):
                     passed_ints.add(a.id)
                 elif isinstance(a, ast.Name) and t.kind == 'tuple':
                     passed_tuples.setdefault(a.id, t)
+                elif isinstance(a, (ast.Name, ast.Subscript)) and t.kind == 'object':
+                    name = a.id if isinstance(a, ast.Name) else a.value.id if isinstance(a.value, ast.Name) else None
+                    if name is not None:
+                        passed_objects.setdefault(name, {}).update(t.elem)
+                        passed_methods.setdefault(name, {}).update(t.methods or {})
     for n in ast.walk(fdef):
         if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name):
             k = len(n.slice.elts) if isinstance(n.slice, ast.Tuple) else 1
@@ -244,7 +275,18 @@ def assumed_signature(fdef, globals_=None, seen=()):
                 and n.value.attr == 'shape' and isinstance(n.value.value, ast.Name):
             ndim[n.value.value.id] = max(ndim.get(n.value.value.id, 1), len(n.targets[0].elts))
     keys = _assumed_dicts(fdef)
+    alias = _element_names(fdef)
+    lists = _assumed_fields(fdef, lambda n: (alias[n.value.id], n.attr) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                            and n.value.id in alias and n.attr not in ARRAY_ATTRIBUTES else None)
+    for name, fields in passed_objects.items():          # an element passed on: what the callee uses is the list's too
+        if name in alias:
+            lists.setdefault(alias[name], {}).update(fields)
+    for name in lists:
+        ndim.pop(name, None)
     objects = _assumed_objects(fdef, ndim)
+    for name, fields in passed_objects.items():
+        if name not in alias and name not in lists:
+            objects.setdefault(name, {}).update(fields)
     ints = _assumed_ints(fdef) | passed_ints
     sig = []
     a = fdef.args
@@ -265,8 +307,13 @@ def assumed_signature(fdef, globals_=None, seen=()):
             literal[p.arg] = {int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(d.value)]
     for p in params:
         name = ast.unparse(p.annotation) if p.annotation is not None else None
-        if p.arg in objects and name not in ann:
-            sig.append(T.object_of('object', sorted(objects[p.arg].items())))
+        if p.arg in lists and name not in ann:
+            methods = {}
+            for k in [p.arg] + [k for k, v in alias.items() if v == p.arg]:
+                methods.update(passed_methods.get(k, {}))
+            sig.append(T.objlist_of(T.object_of('object', sorted(lists[p.arg].items()), methods)))
+        elif p.arg in objects and name not in ann:
+            sig.append(T.object_of('object', sorted(objects[p.arg].items()), passed_methods.get(p.arg)))
         elif p.arg in literal and name is None and p.arg not in ndim and p.arg not in keys:
             sig.append(literal[p.arg])
         elif p.arg in shapes and name is None and p.arg not in ndim and p.arg not in keys:
@@ -281,15 +328,24 @@ def assumed_signature(fdef, globals_=None, seen=()):
             sig.append(T.INT)
         else:
             sig.append(T.FLOAT)
-    cls = getattr(fdef, 'sj_class', None)
-    if cls is not None and params:
-        me = params[0].arg
+    for i, p in enumerate(params):        # methods called on a parameter, or on an element of one: from its class statement
+        names = {p.arg} | {k for k, v in alias.items() if v == p.arg}
         calls = {n.func.attr for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                 and isinstance(n.func.value, ast.Name) and n.func.value.id == me}
-        if calls:
-            t = _static_self(fdef, cls, sig[0], calls, globals_, seen)
-            if t is not None:
-                sig[0] = t
+                 and isinstance(n.func.value, ast.Name) and n.func.value.id in names}
+        if not calls:
+            continue
+        own = getattr(fdef, 'sj_class', None)
+        if i == 0 and own is not None:
+            cls = own
+        else:                              # the one class in the module with all these methods, if there's one
+            found = [c for c in (globals_ or {}).get(CLASSES, []) if calls <= {d.name for d in c.body if isinstance(d, ast.FunctionDef)}]
+            if len(found) != 1:
+                continue
+            cls = found[0]
+        t = sig[i].elem if sig[i].kind == 'objlist' else sig[i]
+        t = _static_self(fdef, cls, t if t.kind == 'object' else T.object_of('object', []), calls, globals_, seen)
+        if t is not None:
+            sig[i] = T.objlist_of(t) if sig[i].kind == 'objlist' or p.arg in lists else t
     return sig
 
 
@@ -345,7 +401,30 @@ def _assumed_dicts(fdef):
     return _assumed_fields(fdef, key_of)
 
 
+CLASSES = ' classes'          # in module_globals: the module's class statements (not a name anything can have)
+
 ARRAY_ATTRIBUTES = {'T', 'dtype', 'shape', 'size', 'ndim', 'copy', 'flatten', 'astype', 'item', 'tolist', 'reshape', 'real', 'imag', 'flat'} | set(REDUCTIONS)
+
+
+def _element_names(fdef):
+    """{name: list}: names bound to an element by for p in ps, for i, p in enumerate(ps) or p = ps[i], ps a parameter."""
+    params = {p.arg for p in fdef.args.posonlyargs + fdef.args.args}
+    out = {}
+    for n in ast.walk(fdef):
+        target, it = (n.target, n.iter) if isinstance(n, (ast.For, ast.comprehension)) else (None, None)
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == 'enumerate' and it.args and isinstance(target, ast.Tuple) \
+                and len(target.elts) == 2:
+            it, target = it.args[0], target.elts[1]
+        if isinstance(target, ast.Name) and isinstance(it, ast.Name) and it.id in params:
+            out[target.id] = it.id
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Subscript) \
+                and isinstance(n.value.value, ast.Name) and n.value.value.id in params and not isinstance(n.value.slice, ast.Slice):
+            out[n.targets[0].id] = n.value.value.id
+    calls = {id(n.func) for n in ast.walk(fdef) if isinstance(n, ast.Call)}
+    used = {n.value.id for n in ast.walk(fdef) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and id(n) not in calls
+            and n.attr not in ARRAY_ATTRIBUTES}
+    passed = {a.id for n in ast.walk(fdef) if isinstance(n, ast.Call) for a in n.args if isinstance(a, ast.Name)}
+    return {k: v for k, v in out.items() if k in used or k in passed}    # an element of an array is a number
 
 
 def _assumed_objects(fdef, ndim):
@@ -462,6 +541,13 @@ def _number_tree(v):
     return None
 
 
+def _methods_named(fdef, globals_):
+    """The module's methods that x.m() in fdef may call, by name: what they read from module level fdef passes them."""
+    names = {n.func.attr for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    return [StaticCallee(d, globals_) for c in (globals_ or {}).get(CLASSES, []) for d in c.body
+            if isinstance(d, ast.FunctionDef) and d.name in names and d is not fdef]
+
+
 def with_globals(fdef, globals_):
     """fdef with what it reads from module level as parameters, as a call would pass them: annotated if they're plain numbers,
     so their types are known. A name whose value can't be known counts if the function indexes it, as an array."""
@@ -472,6 +558,7 @@ def with_globals(fdef, globals_):
     called = {n.func.id for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     indexed = {n.value.id for n in ast.walk(fdef) if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)}
     seen, stack = {fdef.name}, [globals_[n] for n in called - local if isinstance(globals_.get(n), StaticCallee)]
+    stack += _methods_named(fdef, globals_)
     while stack:                       # a global read by a function this calls is passed through it
         f = stack.pop()
         if f.fdef.name in seen:
@@ -480,6 +567,7 @@ def with_globals(fdef, globals_):
         inner = _lift.local_names(f.fdef)
         for st in f.fdef.body:
             loads |= _lift._split(st)[0] - inner
+        stack += _methods_named(f.fdef, globals_)
         for n in ast.walk(f.fdef):
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id not in inner:
                 called.add(n.func.id)

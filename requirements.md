@@ -197,6 +197,12 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   before its status is checked, so an exception keeps them. A writing call stays out of tests, loop headers and comprehensions, and `p__a = p__a` after its
   statement shows the write to every analysis that looks for assignments. Which function runs is the class's at each call, as for attributes; one on the
   instance runs Python. A call costs 5 to 6 ns more than inline code, as every call between compiled functions does: cimo keeps the result array in memory.
+- **Lists of instances, passing instances (built 2026-11-05, from 0.0.4).** A list of one class's instances is a list of numbers per attribute used,
+  copied in at the call and written back where a value changed (identity kept for the rest); `for p in ps`, `enumerate`, `p = ps[i]` make `p` an index,
+  checked where Python would raise. An instance or element passed to a function or method goes as the attributes the callee uses (`_param_uses`, through
+  what it passes it to), narrowed at compile time. Two elements of one list may be one instance, so a call given two compiles only if what it assigns
+  through one it doesn't use through the other. Only real assignments count there: the `p__a = p__a` markers say a call may write, not that it does.
+  A method's globals join the caller's when a call's types name the method (`_add_method_globals`), so the caller's globals can grow after its first call.
 - **numpy on single numbers (built 2026-11-02).** 25 of 26 functions matched libm bit for bit on 160,024 inputs on arm64 and in Pyodide, so they
   call it; `np.tanh` doesn't, natively. Types are the trap: `np.abs(4)` is int64 natively and int32 in Pyodide, `np.floor(4)` changed in numpy 2.1,
   `np.sqrt(True)` is float16, so those stay Python. `np.minimum(0.0, -0.0)` differs by platform, so the compiler asks the numpy present.

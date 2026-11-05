@@ -223,7 +223,7 @@ def passes_other(a, b):
     (order_left, lambda: [V(1.0, 2.0, 3)], True),
     (order_right, lambda: [V(1.0, 2.0, 3)], True),
     (reads_changed_in_loop, lambda: [V(1.0, 2.0, 3), 4], True),
-    (reads_global, lambda: [V(1.0, 2.0)], False),
+    (reads_global, lambda: [V(1.0, 2.0)], True),            # the method's global becomes the caller's
     (changes_type, lambda: [V(1.0, 2.0)], False),
     (recursive, lambda: [V(1.0, 2.0)], False),
     (in_while_test, lambda: [V(1.0, 2.0)], True),
@@ -344,3 +344,46 @@ def test_lifted_loop_calls_methods():
         p = V(8.0, 4.0)
         assert g(p, 3) == ('3', 1.0) and (p.y, p.n) == (0.5, 3)
     assert g._native_loops()
+
+
+SPRING_K = 4.0
+
+
+@dataclasses.dataclass
+class Spring:
+    x: float
+    v: float = 0.0
+
+    def force(self):
+        return -SPRING_K * self.x
+
+    def step(self, dt):
+        self.v += self.force() * dt
+        self.x += self.v * dt
+
+
+@scram(cache=False)
+def run_springs(s, dt, n):
+    for _ in range(n):
+        s.step(dt)
+    return s.x
+
+
+@scram(cache=False)
+def run_spring_list(ss, dt, n):
+    for _ in range(n):
+        for s in ss:
+            s.step(dt)
+    return ss[0].x
+
+
+def test_methods_reading_globals():
+    global SPRING_K
+    a, b = Spring(1.0), Spring(1.0)
+    assert run_springs(a, 0.01, 100) == run_springs.__wrapped__(b, 0.01, 100) and a == b and run_springs.signatures
+    SPRING_K = 9.0                                 # read at each call, as a global is
+    a, b = Spring(1.0), Spring(1.0)
+    assert run_springs(a, 0.01, 100) == run_springs.__wrapped__(b, 0.01, 100) and a == b
+    xs, ys = [Spring(1.0), Spring(0.5)], [Spring(1.0), Spring(0.5)]
+    assert run_spring_list(xs, 0.01, 50) == run_spring_list.__wrapped__(ys, 0.01, 50) and xs == ys and run_spring_list.signatures
+    SPRING_K = 4.0

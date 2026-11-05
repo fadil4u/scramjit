@@ -8,6 +8,7 @@ import copy
 import enum
 import math
 import functools
+import operator
 import inspect
 import struct
 import sys
@@ -199,6 +200,177 @@ def _attrs_used(fdef):
     return {i: (sorted(names), stores, calls) for i, (names, stores, calls) in found.items()}
 
 
+def _element_attrs(fdef):
+    """For each parameter that may be a list of instances: the attributes its elements are used with, as _attrs_used
+    gives them, through for p in ps, for i, p in enumerate(ps), p = ps[i], and ps[i].a."""
+    if fdef is None:
+        return {}
+    index = {p.arg: i for i, p in enumerate(fdef.args.posonlyargs + fdef.args.args)}
+    alias = {}
+    for n in ast.walk(fdef):
+        target, it = (n.target, n.iter) if isinstance(n, (ast.For, ast.comprehension)) else (None, None)
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == 'enumerate' and it.args and isinstance(target, ast.Tuple) \
+                and len(target.elts) == 2:
+            it, target = it.args[0], target.elts[1]
+        if isinstance(target, ast.Name) and isinstance(it, ast.Name) and it.id in index:
+            alias[target.id] = it.id
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Subscript) \
+                and isinstance(n.value.value, ast.Name) and n.value.value.id in index:
+            alias[n.targets[0].id] = n.value.value.id
+    called = {id(n.func) for n in ast.walk(fdef) if isinstance(n, ast.Call)}
+    found = {}
+    for n in ast.walk(fdef):
+        if not isinstance(n, ast.Attribute) or (n.attr.startswith('__') and not n.attr.endswith('__')):
+            continue
+        v = n.value
+        ps = alias.get(v.id) if isinstance(v, ast.Name) else v.value.id if isinstance(v, ast.Subscript) and isinstance(v.value, ast.Name) \
+            and v.value.id in index else None
+        if ps is not None:
+            how = 'call' if id(n) in called else 'load' if isinstance(n.ctx, ast.Load) else 'store'
+            _add_use(found.setdefault(index[ps], (set(), set(), set())), n.attr, how)
+    return {i: (sorted(names), stores, calls) for i, (names, stores, calls) in found.items()}
+
+
+def _objlist_type(xs, attrs, seen, dicts=False):
+    """A list of instances, all one class whose lookups run no code, holding numbers in every attribute used, each
+    instance once and not passed otherwise. Its attributes are copied into a list of numbers each, at the call."""
+    if not xs:
+        return None
+    cls = type(xs[0])
+    if set(map(type, xs)) != {cls}:
+        return None
+    methods = {}
+    fields = _object_fields(xs[0], *attrs, methods=methods)
+    if type(fields) is not list:
+        return None
+    ids = list(map(id, xs))
+    if len(set(ids)) != len(ids) or seen.intersection(ids):
+        return None                              # one instance in two places: a write must show through both
+    seen.update(ids)
+    written = set(attrs[1]).union(*(w for _, w in methods.values()))
+    has_dict = hasattr(xs[0], '__dict__')
+    for k, ft in fields:
+        if ft.kind == 'function':
+            if has_dict and any(k in x.__dict__ for x in xs):
+                return None
+            continue
+        if ft not in (T.INT, T.FLOAT, T.BOOL):
+            return None
+        want = {T.INT: int, T.FLOAT: float, T.BOOL: bool}[ft]
+        try:
+            values = list(map(operator.attrgetter(k), xs))      # in C: the class was checked, so this runs none of its code
+        except AttributeError:
+            return None
+        if set(map(type, values)) != {want} or (want is int and not (-(1 << 63) <= min(values) and max(values) < 1 << 63)):
+            return None
+        if k in written and has_dict and type(_in_class(cls, k)) is not types.MemberDescriptorType and not all(k in d for d in map(vars, xs)):
+            return None                          # assigning would add it to an instance that only had the class's
+    if dicts and has_dict:                       # an instance's own __dict__, passed as a dict too, is one thing under two names
+        held = list(map(id, map(vars, xs)))
+        if seen.intersection(held):
+            return None
+        seen.update(held)
+    return T.objlist_of(T.object_of(cls.__qualname__, fields, methods, cls, written))
+
+
+def _copy_back_attr(xs, key, a, et):
+    """Into the instances, the attribute's values the kernel changed: the others stay the very objects they were."""
+    for k, v in enumerate(a):
+        old = getattr(xs[k], key)
+        if et is T.FLOAT:
+            if old == v and math.copysign(1.0, old) == math.copysign(1.0, v) or (old != old and v != v):
+                continue
+        elif old == v and type(old) is type(bool(v) if et is T.BOOL else v):
+            continue
+        setattr(xs[k], key, bool(v) if et is T.BOOL else v)
+
+
+def _passes(fdef):
+    """{parameter index: [(target, position)]}: a parameter, or an element of one (for p in ps, p = ps[i]), passed as a
+    positional argument to a function at module level, ('f', name), or to a method, ('m', its owner's name, method)."""
+    if fdef is None:
+        return {}
+    names = [p.arg for p in fdef.args.posonlyargs + fdef.args.args]
+    index = {n: i for i, n in enumerate(names)}
+    alias = {}
+    for n in ast.walk(fdef):
+        target, it = (n.target, n.iter) if isinstance(n, (ast.For, ast.comprehension)) else (None, None)
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == 'enumerate' and it.args and isinstance(target, ast.Tuple) \
+                and len(target.elts) == 2:
+            it, target = it.args[0], target.elts[1]
+        if isinstance(target, ast.Name) and isinstance(it, ast.Name) and it.id in index:
+            alias[target.id] = it.id
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Subscript) \
+                and isinstance(n.value.value, ast.Name) and n.value.value.id in index:
+            alias[n.targets[0].id] = n.value.value.id
+    found = {}
+    for n in ast.walk(fdef):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        target = ('f', f.id) if isinstance(f, ast.Name) else ('m', f.value.id, f.attr) \
+            if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) else None
+        if target is None:
+            continue
+        for pos, a in enumerate(n.args):
+            if isinstance(a, ast.Subscript) and isinstance(a.value, ast.Name) and a.value.id in index:
+                a = a.value                       # ps[i]: an element
+            if isinstance(a, ast.Name) and (a.id in index or a.id in alias):
+                found.setdefault(index[alias.get(a.id, a.id)], []).append((target, pos))
+    return found
+
+
+def _unused(fdef):
+    """The parameters the function never names: anything can be passed there."""
+    if fdef is None:
+        return set()
+    named = {n.id for s in fdef.body for n in ast.walk(s) if isinstance(n, ast.Name)}
+    return {i for i, p in enumerate(fdef.args.posonlyargs + fdef.args.args) if p.arg not in named}
+
+
+def _owner_classes(f, args):
+    """{name: class} for the parameters that are instances, and for names bound to an element of a list of them."""
+    names = [p.arg for p in f._tree.args.posonlyargs + f._tree.args.args]
+    out = {n: type(x) for n, x in zip(names, args) if type(x) is not list}
+    lists = {n: type(x[0]) for n, x in zip(names, args) if type(x) is list and x}
+    for n in ast.walk(f._tree):
+        target, it = (n.target, n.iter) if isinstance(n, (ast.For, ast.comprehension)) else (None, None)
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == 'enumerate' and it.args and isinstance(target, ast.Tuple) \
+                and len(target.elts) == 2:
+            it, target = it.args[0], target.elts[1]
+        if isinstance(target, ast.Name) and isinstance(it, ast.Name) and it.id in lists:
+            out[target.id] = lists[it.id]
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Subscript) \
+                and isinstance(n.value.value, ast.Name) and n.value.value.id in lists:
+            out[n.targets[0].id] = lists[n.value.value.id]
+    return out
+
+
+def _param_uses(f, idx, cls, base, owners=None, stack=()):
+    """(attributes used, those assigned, methods called) of an instance of cls given to f as parameter idx, through the
+    functions and methods f passes it to. base: f's own uses of it. A target that can't be found adds nothing: the call
+    to it won't compile either."""
+    names, writes, calls = set(base[0]), set(base[1]), set(base[2])
+    if (id(f), idx) in stack:
+        return names, writes, calls
+    stack = stack + ((id(f), idx),)
+    for target, pos in f._passes.get(idx, ()):
+        g, at = None, pos
+        if target[0] == 'f':
+            g = f._fn.__globals__.get(target[1])
+        elif owners is not None and target[1] in owners:
+            c = _in_class(owners[target[1]], target[2])
+            g, at = (c if type(c) is Function or type(c) is types.FunctionType else None), pos + 1
+            g = None if g is None else _method(g)
+        if type(g) is not Function or g._tree is None:
+            continue
+        inner = _param_uses(g, at, cls, g._attrs.get(at, ((), set(), set())), None, stack)
+        names |= inner[0]
+        writes |= inner[1]
+        calls |= inner[2]
+    return names, writes, calls
+
+
 def _add_use(entry, attr, how):
     names, stores, calls = entry
     if how == 'call':
@@ -321,7 +493,7 @@ def _methods_called(x, calls):
             return f'{cls.__name__}.{m}: {w._why_not}'
         if not (w._tree.args.posonlyargs + w._tree.args.args):
             return f'{cls.__name__}.{m} takes no self'
-        names, stores, inner = w._attrs.get(0, ((), set(), set()))
+        names, stores, inner = _param_uses(w, 0, cls, w._attrs.get(0, ((), set(), set())))
         found[m] = (set(names), set(stores), w)
         called[m] = set(inner)
         todo += sorted(inner)
@@ -345,7 +517,7 @@ def _push(cargs, x, t):
     if t.kind == 'enum':
         cargs.append(x._value_)
         return
-    if t.kind == 'list':
+    if t.kind in ('list', 'objlist'):
         raise AssertionError('lists are passed by _run, which copies them back')
     if t.kind == 'array' and t.strided:
         cargs.append(x.ctypes.data)
@@ -467,12 +639,13 @@ def _copy_back(lst, a, et):
 
 class Compiled:
     __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun', 'outs', 'lists',
-                 'counts', 'count_lines', 'count_heads', 'count_rest', 'array_args', 'records', 'io_size', 'free', 'frames', 'tb_at')
+                 'counts', 'count_lines', 'count_heads', 'count_rest', 'array_args', 'records', 'io_size', 'free', 'frames', 'columns', 'tb_at')
 
     def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None, stop=False, rerun=False):
         self.rerun = rerun
         self.outs = []                        # written dict keys: (argument index, key, byte in io, type)
         self.lists = set()                    # the arguments that are lists the kernel writes
+        self.columns = set()                  # (argument, attribute) of lists of instances the kernel writes
         self.counts = None                    # preflight --counts: the int64 counters the kernel adds to
         self.count_lines, self.count_heads, self.count_rest = (), {}, {}
         self.checks, self.hoisted, self.gotchas, self.stop = checks or {}, hoisted, gotchas or {}, stop
@@ -530,11 +703,11 @@ def functions():
     return list(_functions)
 
 
-def _object_guards(env, i, x, t, n, attrs, again):
+def _object_guards(env, i, x, t, n, again):
     """What a plan checks of an instance: that its class looks up these names as it did (a class can change, and only those
     written in Python can), then what _object_fields checks of the object. The first fetched value of each attribute is
     f{i}_{k}. Nothing here runs the object's code, once the class has been checked."""
-    written = set(attrs[1]).union(*(w for _, w in (t.methods or {}).values()))
+    written = t.writes
     cls = type(x)
     env[f'cls{i}'], env[f'mro{i}'], env['MISSING'] = cls, cls.__mro__, _MISSING
     out = [f'    if cls{i}.__mro__ is not mro{i}:\n        return slow({again})']
@@ -593,7 +766,7 @@ def _make_plan(f, entry, args):
             env[f'd{i}'] = x.dtype
             cargs.append(f'p{i}' if x.flags.writeable else n)
             cargs.extend(f's{i}[{k}]' for k in range(x.ndim))
-        elif t.kind in ('tuple', 'list'):
+        elif t.kind in ('tuple', 'list', 'objlist'):
             return f._slow_call
         elif t.kind == 'object':
             if not all(ft.is_number or ft.kind == 'function' for _, ft in t.elem) or any(y.kind == 'dict' for y in entry.types):   # x, vars(x)
@@ -637,7 +810,7 @@ def _make_plan(f, entry, args):
                     src_guards.append(f'    if not -9223372036854775808 <= f{i}_{k} <= 9223372036854775807:\n        '
                                       f'return slow({again})')
         elif t.kind == 'object':
-            src_guards.extend(_object_guards(env, i, args[i], t, n, f._attrs[i], again))
+            src_guards.extend(_object_guards(env, i, args[i], t, n, again))
         elif t is T.U64:
             src_guards.append(f'    if not 9223372036854775808 <= {n} <= 18446744073709551615:\n        return slow({again})')
         elif t.kind == 'int' and not t.np:
@@ -736,6 +909,9 @@ class Function:
         self._tree, self._why_not = self._parse(fn) if _loop is None else (_loop[0], None)
         self._dict_keys = _dict_keys(self._tree)
         self._attrs = _attrs_used(self._tree)
+        self._elems = _element_attrs(self._tree)
+        self._passes = _passes(self._tree)
+        self._unused = _unused(self._tree)
         self._replans = 8         # how many times more a dict's new value types get a call plan of their own
         self._np = None
 
@@ -754,6 +930,10 @@ class Function:
         if not isinstance(fdef, ast.FunctionDef):
             return None, 'not a plain def function'
         return fdef, None
+
+    def _uses_of(self, idx, cls):
+        """What this function makes of an instance of cls given as parameter idx: for a caller passing one."""
+        return _param_uses(self, idx, cls, self._attrs.get(idx, ((), set(), set())))
 
     # descriptor: work as a method too (self is then an argument)
     def __get__(self, obj, cls=None):
@@ -813,8 +993,7 @@ class Function:
                 raise TypeError(f'{self.__name__}() argument {p!r} must be {_ANNOTATIONS[ann]}, '
                                 f'not {type(args[i]).__name__}')
         real = args
-        args = self._with_globals(args)
-        key = self._key(args)
+        args, key = self._args_and_key(args)
         entry = self._cache.get(key)
         if entry is None:
             entry = self._specialize(key, args)
@@ -822,11 +1001,52 @@ class Function:
             return self._timed(key, entry, args)
         if entry is not PYTHON:
             self._plans[tuple(map(type, real))] = _make_plan(self, entry, args)
-        elif None not in key and not any(t.kind in ('array', 'object') for t in key) and dict not in map(type, args) and not self._hidden:
+        elif None not in key and not any(t.kind in ('array', 'object', 'objlist') for t in key) and dict not in map(type, args) and not self._hidden:
             self._plans[tuple(map(type, real))] = self._py   # these types always run as Python
         if entry is PYTHON:
             return self._py(*real)
         return self._run(entry, args)
+
+    def _args_and_key(self, real):
+        """The arguments with the globals after them, and the call's signature. A method found in it may read globals
+        this function doesn't know of yet: they become more of its globals, and the arguments are taken again."""
+        args = self._with_globals(real)
+        key = self._key(args)
+        if self._tree is not None and self._add_method_globals(key):
+            args = self._with_globals(real)
+            key = self._key(args)
+        return args, key
+
+    def _add_method_globals(self, key):
+        """Take the globals of the methods in these types, the instances' and the lists'. True if any were new."""
+        if self._hidden is None:
+            self._find_globals()
+        new = []
+        for t in key:
+            if t is None or t.kind not in ('object', 'objlist'):
+                continue
+            for _, ft in (t.elem.elem if t.kind == 'objlist' else t.elem):
+                w = ft.elem if ft.kind == 'function' else None
+                if type(w) is not Function or w._tree is None:
+                    continue
+                if w._hidden is None:
+                    w._find_globals()
+                for og, on in w._hidden_from:
+                    if not any(og is a and on == b for a, b in self._hidden_from + new):
+                        new.append((og, on))
+        if not new:
+            return False
+        tree = self._ctree or self._tree
+        for og, on in new:
+            name = f'sjg{len(self._hidden)}_{on}'
+            self._hidden.append(name)
+            self._hidden_from.append((og, on))
+        self._ctree = copy.deepcopy(self._tree)
+        self._ctree.args.args = self._ctree.args.args + [ast.copy_location(ast.arg(n), tree) for n in self._hidden]
+        self._dict_keys, self._attrs, self._elems = _dict_keys(self._ctree), _attrs_used(self._ctree), _element_attrs(self._ctree)
+        self._passes = _passes(self._ctree)
+        self._plans.clear()             # a plan reads the globals it was made with
+        return True
 
     def _with_globals(self, args):
         """The arguments, and after them the globals the function reads, as they are now."""
@@ -871,6 +1091,9 @@ class Function:
             self._ctree.args.args = self._ctree.args.args + [ast.copy_location(ast.arg(n), tree) for n in self._hidden]
             self._dict_keys = _dict_keys(self._ctree)
             self._attrs = _attrs_used(self._ctree)
+            self._elems = _element_attrs(self._ctree)
+            self._passes = _passes(self._ctree)
+            self._unused = _unused(self._tree)
 
     def _hidden_names_read(self):
         """The globals this function itself reads, not those it reads only through what it calls."""
@@ -883,8 +1106,7 @@ class Function:
     def _slow(self, args):
         """A call a plan turned down: an int past 64 bits, an array of another shape of type."""
         real = args
-        args = self._with_globals(args)
-        key = self._key(args)
+        args, key = self._args_and_key(args)
         entry = self._cache.get(key)
         if entry is None:
             entry = self._specialize(key, args)
@@ -1028,7 +1250,7 @@ class Function:
             if t is None and i >= real and self._hidden[i - real] not in self._hidden_names_read():
                 raise Unsupported(None, f'a function it calls reads the global {self._hidden_from[i - real][1]}, which is {_describe(x, t)}')
             if t is None:
-                fields = _object_fields(x, *self._attrs[i]) if i in self._attrs and type(x) is not dict else None
+                fields = _object_fields(x, *self._attrs[i]) if i in self._attrs and type(x) not in (dict, list) else None
                 if type(fields) is str:
                     raise Unsupported(None, f'an argument of type {_describe(x, t)} is not compiled: {fields}')
                 raise Unsupported(None, f'an argument of type {_describe(x, t)} is not compiled')
@@ -1059,6 +1281,7 @@ class Function:
                          c.shown_types(), c.checks, c.hoisted_lines, c.gotchas, c.uses_stop, c.uses_rerun)
         entry.outs = [(i, k, 8 * c.out_slot(n), c.env[flat]) for n, (flat, i, k) in enumerate(c.outs)]
         entry.lists = c.written_lists()
+        entry.columns = c.written_columns()
         entry.array_args = c.array_args
         entry.records = [(8 * c.record_slot(k), struct.Struct(f'<{array_record_slots(t)}q'), t.elem.name[3:] if not T.is_pylist(t) else t)
                          for k, t in enumerate(ret_arrays(c.ret))]
@@ -1083,15 +1306,27 @@ class Function:
         lists = [id(y) for x in args if type(x) is list for y in [x] + [r for r in x if type(r) is list]]
         if len(set(lists)) != len(lists):        # one list under two names: a copy each would hide the writes
             key = tuple(None if type(x) is list else t for x, t in zip(args, key))
-        if not (self._attrs and None in key) and (not self._dict_keys or dict not in map(type, args)):
+        if not ((self._attrs or self._elems or self._passes or self._unused) and None in key) and (not self._dict_keys or dict not in map(type, args)):
             return key
         seen, out = set(), list(key)
+        owners = _owner_classes(self, args) if self._passes else None
+        empty = ((), set(), set())
         for i, x in enumerate(args):
             if type(x) is dict:
                 out[i] = None if id(x) in seen else self._dict_type(x, self._dict_keys.get(i))
                 seen.add(id(x))          # two names for one dict: a write must show through both
-            elif out[i] is None and i in self._attrs:
-                out[i] = self._object_type(x, self._attrs[i], seen)
+            elif out[i] is None and type(x) is list and (i in self._elems or i in self._passes) and x:
+                uses = self._elems.get(i, empty)
+                if i in self._passes:
+                    uses = _param_uses(self, i, type(x[0]), uses, owners)
+                out[i] = _objlist_type(x, (sorted(uses[0]),) + tuple(uses[1:]), seen, dict in map(type, args))
+            elif out[i] is None and i in self._unused and i not in self._attrs and i not in self._passes:
+                out[i] = T.object_of(type(x).__qualname__, [], None, type(x))     # never read: nothing of it reaches the C
+            elif out[i] is None and (i in self._attrs or i in self._passes):
+                uses = self._attrs.get(i, empty)
+                if i in self._passes:
+                    uses = _param_uses(self, i, type(x), uses, owners)
+                out[i] = self._object_type(x, (sorted(uses[0]),) + tuple(uses[1:]), seen)
         return tuple(out)
 
     @staticmethod
@@ -1104,7 +1339,8 @@ class Function:
         ids = [id(x)] if held is None else [id(x), id(held)]
         fresh = not seen.intersection(ids)
         seen.update(ids)
-        return T.object_of(type(x).__qualname__, fields, methods) if fresh else None
+        written = set(attrs[1]).union(*(w for _, w in methods.values()))
+        return T.object_of(type(x).__qualname__, fields, methods, type(x), written) if fresh else None
 
     @staticmethod
     def _dict_type(d, keys):
@@ -1123,7 +1359,15 @@ class Function:
     def _run(self, entry, args):
         cargs = []
         copies = []
+        columns = []
         for i, (x, t) in enumerate(zip(args, entry.types)):
+            if t.kind == 'objlist':                 # a list of numbers per attribute, written back into the instances
+                for key, ft in t.elem.elem:
+                    if ft.kind != 'function':
+                        a = array.array(_LIST_CODES[ft.name], map(operator.attrgetter(key), x))
+                        columns.append((i, key, a, ft))
+                        cargs += [a.buffer_info()[0], len(a)]
+                continue
             if t.kind == 'list':
                 a = array.array(_LIST_CODES[t.elem.name], x)
                 copies.append((i, a))
@@ -1147,6 +1391,9 @@ class Function:
             cargs.append(entry.counts)
         io = bytearray(entry.io_size)
         status = entry.kernel(*cargs, io)
+        for i, key, a, ft in columns:
+            if (i, key) in entry.columns:
+                _copy_back_attr(args[i], key, a, ft)
         for i, a in copies:                       # what was written, even before an exception, as Python would have
             if i in entry.lists:
                 t = entry.types[i]

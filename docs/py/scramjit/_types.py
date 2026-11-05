@@ -9,7 +9,7 @@ import struct
 
 
 class Type:
-    __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable', 'ndim', 'strided', 'py', 'methods')
+    __slots__ = ('name', 'ctype', 'kind', 'np', 'elem', 'writable', 'ndim', 'strided', 'py', 'methods', 'cls', 'writes')
 
     def __init__(self, name, ctype, kind, np=False, elem=None, writable=True):
         self.name = name          # how signatures print it
@@ -22,6 +22,8 @@ class Type:
         self.strided = False      # arrays: a view whose elements aren't next to each other
         self.py = None            # a narrow-or-literal variable: the kind of its Python number, when it isn't the narrow one's
         self.methods = None       # instances: method name -> (the attributes a call of it uses, those it assigns), through what it calls too
+        self.cls = None           # instances: the class
+        self.writes = frozenset() # instances: every attribute anything given it may assign
 
     def __repr__(self):
         return self.name
@@ -234,17 +236,29 @@ def dict_of(fields):
     return _DICTS[key]
 
 
-def object_of(name, fields, methods=None):
+def object_of(name, fields, methods=None, cls=None, writes=()):
     """An instance, by the attributes a function uses [(attribute, type)]: in C, one variable per attribute. A method it
     calls is an attribute of a function's type, which is that function's own, and methods says what each call uses and assigns."""
-    key = (name, tuple((k, t.name if t.kind != 'function' else id(t)) for k, t in fields),
-           tuple(sorted((m, tuple(sorted(u)), tuple(sorted(w))) for m, (u, w) in (methods or {}).items())))
+    key = (name, id(cls), tuple((k, t.name if t.kind != 'function' else id(t)) for k, t in fields),
+           tuple(sorted((m, tuple(sorted(u)), tuple(sorted(w))) for m, (u, w) in (methods or {}).items())), tuple(sorted(writes)))
     if key not in _OBJECTS:
         shown = ', '.join(f'{k}()' if t.kind == 'function' else f'{k}: {t.name}' for k, t in fields)
         t = _OBJECTS[key] = Type(f'{name}({shown})', None, 'object', elem=list(fields))
         t.methods = {m: (frozenset(u), frozenset(w)) for m, (u, w) in (methods or {}).items()}
         t.py = name                         # the class's name
+        t.cls, t.writes = cls, frozenset(writes)
     return _OBJECTS[key]
+
+
+_OBJLISTS = {}
+
+
+def objlist_of(elem):
+    """A list of instances, all one class, by the attributes a function uses (elem, an object type): in C, a list of
+    numbers per attribute."""
+    if elem not in _OBJLISTS:
+        _OBJLISTS[elem] = Type(f'list[{elem.name}]', None, 'objlist', elem=elem)
+    return _OBJLISTS[elem]
 
 
 def leaves(t):

@@ -26,6 +26,7 @@ Python and through scramjit, and asserts the results are identical. They need nu
 | [`lists.py`](lists.py) | A rolling maximum over a plain Python list, returning a list; all shortest paths in a list of lists, in place | Each window is scanned; every pair through every vertex | 0.31 s | 23 ms | 13x |
 | [`constants.py`](constants.py) | A filter with its settings at module level: a number, a tuple, an array, a dict | Clips each sample; each pass repeats over its own output | 0.52 s | 1.5 ms | 338x |
 | [`classes.py`](classes.py) | A temperature controller as a dataclass, with `@scram` on its method, which calls another, its state left on the object | Each step depends on the one before | 1.88 s | 39 ms | 48x |
+| [`particles.py`](particles.py) | Gravity between 200 particles in a plain list of dataclass instances, with methods, a helper taking two particles and a constant at module level | Every particle pulls on every other, each step on the last | 0.27 s | 13 ms | 21x |
 | [`config_dict.py`](config_dict.py) | An epidemic model with its settings and results in dicts | Each day depends on the one before | 0.081 s | 4.4 ms | 18x |
 
 One run of each on arm64 Linux, on a busy machine, so expect faster and somewhat different numbers. The

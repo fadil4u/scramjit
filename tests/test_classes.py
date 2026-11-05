@@ -420,15 +420,14 @@ def test_order_of_a_new_attribute_kept():
 
 def test_one_object_under_two_names():
     p = Plain(a=1.0)
-    same(two, lambda: (lambda o: [o, o])(Plain(a=1.0)), False)
-    g = scram(cache=False)(two)
+    same(two, lambda: (lambda o: [o, o])(Plain(a=1.0)), True)     # the alias pattern is in the signature
+    g = scram(cache=False, fallback=False)(two)
     r = Plain(a=1.0)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', FallbackWarning)
-        assert g(r, r) == 3.0
-    assert r.a == 3.0
+    assert g(r, r) == 3.0 and r.a == 3.0
     other = Plain(a=10.0)
-    assert g(p, other) == 2.0 and other.a == 11.0 and g.signatures
+    assert g(p, other) == 2.0 and other.a == 11.0 and len(g.signatures) == 2
+    assert g(r, r) == 3.0 and g(p, other) == 2.0 and other.a == 12.0      # each call plan checks its pattern
+    assert g(other, r) == 2.0 and other.a == 2.0 and r.a == 4.0 and len(g.signatures) == 2
 
 
 def dict_and_object(p, d):

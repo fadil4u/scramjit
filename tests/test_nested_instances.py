@@ -107,24 +107,24 @@ def test_returns_the_inner_object():
     assert r is b.pos and b.pos.y == 3.0 and g.signatures
 
 
-def test_one_inner_object_reachable_two_ways():
+def test_one_inner_object_reachable_two_ways_is_one_set_of_variables():
     shared = V(1.0, 2.0)
     b = Body(shared, shared)
     g = scram(cache=False)(writes_inner)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', FallbackWarning)
         want = writes_inner(Body(*(lambda s: (s, s))(V(1.0, 2.0))))
-        assert g(b) == want and not g.signatures
+        assert g(b) == want and b.pos is b.vel and g.signatures      # one set of variables for both names
+    assert g(bodies()) == writes_inner(bodies()) and len(g.signatures) == 2
     a, c = bodies(), bodies()
     c.pos = a.pos
 
     def two(p, q):
         p.pos.x = 5.0
         return q.pos.x
-    h = scram(cache=False)(two)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', FallbackWarning)
-        assert h(a, c) == 5.0 and not h.signatures
+    h = scram(cache=False, fallback=False)(two)
+    assert h(a, c) == 5.0 and a.pos.x == 5.0 and c.pos is a.pos
+    assert h(bodies(), bodies()) == 1.0 and len(h.signatures) == 2
 
 
 @dataclasses.dataclass

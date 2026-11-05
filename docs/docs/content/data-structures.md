@@ -948,7 +948,11 @@ Returning one gives a real instance of the class, its attributes in the order `_
 
 ### Objects in attributes
 
-`b.pos.x`, `self.pos.norm()` and `d.inner.pos.x += 1.0` compile: each number on the way is a variable, read at the call and written back if assigned. `return b.pos` returns that very object. Assigning an object (`a.pos = b.pos`) runs as Python, and so does an object reachable two ways (`b.pos is b.vel`, or one shared by two arguments), since a write through one must show through the other.
+`b.pos.x`, `self.pos.norm()` and `d.inner.pos.x += 1.0` compile: each number on the way is a variable, read at the call and written back if assigned. `return b.pos` returns that very object. Assigning an object (`a.pos = b.pos`) runs as Python.
+
+### One object under several names
+
+An object can be reached two ways: `f(p, p)`, `b.pos is b.vel`, `c.pos is a.pos` for two arguments, a node whose `next` is itself, or `p.absorb(p)` and `chase(p, p)` inside a compiled function. Which names share an object is part of the signature, like a type: each object is one set of variables however many names reach it, so a write through one name is seen through the others, as in Python, and nothing in the C can alias. Calling `f(p, p)` and then `f(p, q)` compiles twice, and each call checks which pattern it has. Two elements of one list (`ps[i]` and `ps[j]`) are chosen by data, so a call given both compiles only if what it assigns through one it doesn't use through the other.
 
 ### Other ways to use an instance
 
@@ -964,7 +968,7 @@ Stays Python, for now:
 - a method that assigns attributes, called inside a comprehension or a lambda
 - an object in an attribute of a list's elements, or of an instance made in the function, and passing one on (`f(b.pos)`)
 - a function that makes an instance, called from another compiled function
-- one object passed under two names, including an object and its own `__dict__`
+- an object and its own `__dict__` passed as two arguments
 - `self.__x` in a class, as Python renames it
 
 ## Enums

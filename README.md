@@ -215,7 +215,8 @@ Pre-release: the API may still change.
 - A function that doesn't compile whole has its loops compiled on their own, where they fit.
 - Data structures: dicts passed in with keys that don't change, tuples to any depth, enums, local lists, and module-level
   numbers, tuples, arrays and dicts compile. On `main`, from 0.0.4: lists passed in, lists of lists, and attributes of
-  classes: instances and dataclasses passed in or made in the function, their methods, objects in attributes, lists of them.
+  classes: instances and dataclasses passed in or made in the function, their methods, objects in attributes, lists of them,
+  and one object reached under several names (`f(p, p)`, `b.pos is b.vel`), which name shares is part of the signature.
 - Next: see [`TODO.md`](https://github.com/farizrahman4u/scramjit/blob/main/TODO.md).
 
 ## Development

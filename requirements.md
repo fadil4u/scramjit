@@ -207,8 +207,8 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   dataclass's own `__init__` (recognized by its code having no file), an `__init__` of `self.a = expression of its parameters`, or none; and
   `type.__call__`, `object.__new__`, default lookups. The class is a hidden argument (`madeclass`), checked like an instance's class by a plan. `v`'s
   attributes are variables assigned in `__init__`'s order; a returned `v` is `cls.__new__(cls)` given them in that order with `object.__setattr__`,
-  which is what the dict order and a frozen dataclass need. Inner objects are owners of their own (`'p.pos'`), flattened breadth first; one object
-  reachable two ways runs as Python. `isinstance` folds from the class in the signature. Keyword-only parameters are compiled as parameters
+  which is what the dict order and a frozen dataclass need. Inner objects are owners of their own (`'p.pos'`), flattened breadth first.
+  `isinstance` folds from the class in the signature. Keyword-only parameters are compiled as parameters
   after the others, the Python fallback getting them back by keyword.
 - **Object model (decided 2026-11-05, to build; `TODO.md`, "Object model").** The case-by-case flattening above can't compose: each
   shape is its own AST rewrite, so combinations fall back. Instead: every statically named access path is mapped, at the call, to the
@@ -217,6 +217,14 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   walking a structure, keeping objects made in a loop) do objects live in per-class struct-of-arrays pools referenced by integer index.
   Rejected: struct pointers everywhere, since cimo doesn't keep fields in registers through them even with `restrict` (1.2x to 1.8x
   slower, measured), and CPython-style objects, whose cost is boxing, dispatch and hashing, not the indirection.
+  **Alias pattern built (2026-11-05):** `_object_graph` walks the instance arguments along the paths the function names with one identity
+  memo; an object met again is `T.same_as(i, path)` (i None: within its own argument) and its type is made for the union of what every name
+  uses, re-walked until the use trees stop growing. `flatten_dicts` rewrites a `same_as` parameter to its target's path and maps a `same_as`
+  attribute to the target's owner, so both names are one set of variables. A plan checks `a_i is a_j` (a pattern through attributes takes
+  the general path). Inside compiled code, `share_passed` does the same for arguments naming one owner at one index: the callee gets one
+  parameter set. An object handed to a callee becomes the callee's root (`handed`): a `same_as` inside it is rebased, one pointing outside
+  is expanded into the target's fields, wired to the caller's variables for it. Not yet in the pattern: dicts and lists (an instance's own
+  `__dict__` passed as a dict, or one list under two names, still refuse).
 - **numpy on single numbers (built 2026-11-02).** 25 of 26 functions matched libm bit for bit on 160,024 inputs on arm64 and in Pyodide, so they
   call it; `np.tanh` doesn't, natively. Types are the trap: `np.abs(4)` is int64 natively and int32 in Pyodide, `np.floor(4)` changed in numpy 2.1,
   `np.sqrt(True)` is float16, so those stay Python. `np.minimum(0.0, -0.0)` differs by platform, so the compiler asks the numpy present.

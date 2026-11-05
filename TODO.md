@@ -26,6 +26,11 @@ Replace it with one model in which composition is free.
    pattern** (which static paths share an object) is part of the signature, like a dtype: inside the kernel there is nothing to
    alias, every field is a register candidate, and today's flattening is the special case "every path a different object".
    Checking the pattern costs O(paths in the code), never O(data).
+   **Built (2026-11-05)** for instances reached by static paths: `_object_graph` (dispatcher), `T.same_as`, `flatten_dicts` renaming a
+   `same_as` parameter to its target's path, and `share_passed` for `f(a, a)`/`p.absorb(p)` in compiled code; an object handed to a callee
+   gets its `same_as` rebased (inside it) or expanded into the target's fields (outside it), `handed` in `flatten_dicts`. `tests/test_alias_pattern.py`,
+   `examples/shared_target.py`. Left of point 1: dicts and lists in the pattern (an instance's `__dict__` passed as a dict still refuses; one list
+   under two names too), and plans for a pattern through attributes (they take the general path).
 2. **Data-chosen objects use pools with integer indices.** Only where *which* object an access reaches depends on run-time data:
    - indexing a collection that may share (`ps[i].x` with `ps` holding duplicates or objects reachable elsewhere): a struct-of-arrays
      pool per class (one array per attribute, today's columns) and `ps` as an array of pool indices, so `ps[i].x` is
@@ -372,8 +377,8 @@ Spills per line, once cimo can report them.
    - **Instances: attributes and method calls built, from 0.0.4** (see "Instances" in `data-structures.md`), passed in, as `self` and at module level. A method is a callee with the
      attributes it uses as self, its writes copied back before its status is checked; `p__a = p__a` after the statement shows the write to every analysis. Lists of instances (a list of
      numbers per attribute), passing an instance or an element on, methods reading globals, parameters never used, objects in attributes (`p.pos.x`), instances made in the
-     function (`v = Vec(x, y)`, `_init_recipe`), `q = p`, returning an instance, an element or an inner object, `isinstance`, keyword-only parameters, a writing call in a test, and
-     `enumerate()` in a comprehension, built too. Not yet: an object in an attribute of a list's elements or of an instance made here, passing an inner object on (`f(b.pos)`), a
+     function (`v = Vec(x, y)`, `_init_recipe`), `q = p`, returning an instance, an element or an inner object, `isinstance`, keyword-only parameters, a writing call in a test,
+     `enumerate()` in a comprehension, and one object under several names (the alias pattern, "Object model" above), built too. Not yet: an object in an attribute of a list's elements or of an instance made here, passing an inner object on (`f(b.pos)`), a
      function making instances called from compiled code (its class's type is made for its own tree only), a writing method in a comprehension, `hasattr`/`getattr`/`vars`. A method
      writing into an inner object marks all of that object's numbers written (they go back unchanged). A list's copy is about 0.15 µs per instance and attribute, checked and
      built in Python twice (`_key`, `_run`): once would halve it. Static preflight finds a parameter's class by its methods, when one class in the module has them all, and

@@ -635,11 +635,12 @@ def _in_slots(cls, name):
     return False
 
 
-def _object_fields(x, names, written, calls=(), methods=None, nested=None, ids=None):
+def _object_fields(x, names, written, calls=(), methods=None, nested=None, ids=None, inner=None):
     """[(attribute, type)] if reading these attributes runs no code of the object's, and assigning those written only
     stores; if not, the reason as a string. This holds only for now, since a class can change: it's asked at every call.
     A method called is a plain function on the class, or a @scram one; what it uses joins these, and methods (a dict, if
-    given) gets what each call assigns."""
+    given) gets what each call assigns. inner(object, attribute, its uses): the type of an object in an attribute, or a
+    reason; by default it's found by these same rules."""
     cls = type(x)
     if calls:
         found = _methods_called(x, calls)
@@ -685,14 +686,20 @@ def _object_fields(x, names, written, calls=(), methods=None, nested=None, ids=N
             if name in written:
                 return f'{name}, an object, is assigned'
             sub = nested[name]
-            inner = {}
-            got = _object_fields(v, sorted(sub[0]), sub[1], sub[2], inner, sub[3], ids)
+            if inner is not None:
+                got = inner(v, name, sub)
+                if type(got) is str:
+                    return f'{name}: {got}'
+                fields.append((name, got))
+                continue
+            held = {}
+            got = _object_fields(v, sorted(sub[0]), sub[1], sub[2], held, sub[3], ids)
             if type(got) is str:
                 return f'{name}: {got}'
             if ids is not None:
                 ids.append(id(v))
-            w = set(sub[1]).union(*(w for _, w in inner.values()))
-            fields.append((name, T.object_of(type(v).__qualname__, got, inner, type(v), w)))
+            w = set(sub[1]).union(*(w for _, w in held.values()))
+            fields.append((name, T.object_of(type(v).__qualname__, got, held, type(v), w)))
             continue
         t = _arg_type(v)
         if t is None or t is T.U64 or t.kind in ('list', 'function', 'enumclass', 'classref') or T.is_pylist(t):
@@ -735,6 +742,65 @@ def _methods_called(x, calls, cls=None):
     return found
 
 
+def _node_merge(into, node):
+    """Add a use tree [attributes used, assigned, methods called, {attribute: tree}] into another. True if it grew."""
+    grew = False
+    for k in range(3):
+        if not set(node[k]) <= into[k]:
+            into[k] |= set(node[k])
+            grew = True
+    for a, sub in node[3].items():
+        if a not in into[3]:
+            into[3][a] = [set(), set(), set(), {}]
+        grew = _node_merge(into[3][a], sub) or grew
+    return grew
+
+
+def _object_graph(roots):
+    """The types of instance arguments, roots [(index, object, use tree)], with their alias pattern: every path the function
+    names is walked from the arguments, and an object met a second time is same_as where it was first met, its type made
+    for what all its names use. ({index: type, or None if it can't compile}, the ids of the objects and their __dict__s.)
+    Objects in attributes are walked only through attributes the function names: the cost is the code's, not the data's."""
+    merged = {}
+    for _ in range(16):                  # each round, an object's tree only grows: it settles
+        first, grew, held, why = {}, [False], set(), {}
+
+        def walk(x, node, at):
+            k = id(x)
+            m = merged.get(k)
+            if m is None:
+                merged[k] = m = [set(), set(), set(), {}]
+            if _node_merge(m, node) and k in first:
+                grew[0] = True          # what this name uses wasn't in the type made at the first
+            if k in first:
+                i0, p0 = first[k]
+                return T.same_as(None, p0) if i0 == at[0] else T.same_as(i0, p0)
+            first[k] = at
+            if not any(m[:3]) and not m[3] and not at[1]:     # nothing of it reaches the C
+                return T.object_of(type(x).__qualname__, [], None, type(x))
+            methods = {}
+            fields = _object_fields(x, sorted(m[0]), set(m[1]), set(m[2]), methods, m[3],
+                                    inner=lambda v, a, sub: walk(v, sub, (at[0], at[1] + (a,))))
+            if type(fields) is not list:
+                return fields
+            d = getattr(x, '__dict__', None)
+            if d is not None:
+                held.add(id(d))
+            written = set(m[1]).union(*(w for _, w in methods.values()))
+            return T.object_of(type(x).__qualname__, fields, methods, type(x), written)
+        out = {}
+        for i, x, node in roots:
+            t = walk(x, node, (i, ()))
+            out[i] = t if isinstance(t, T.Type) else None
+            if type(t) is str:
+                why[i] = t
+        if not grew[0]:
+            break
+    if set(first) & held:                # an instance and its own __dict__ are two names for one thing as well
+        return {i: None for i, _, _ in roots}, set(first) | held
+    return out, set(first) | held
+
+
 def _member(x, key):
     """What a dict holds under a key, or an instance under an attribute, or a path of them (p.pos.x is 'pos.x')."""
     if type(x) is dict:
@@ -756,7 +822,7 @@ def _set_member(x, key, value):
 
 def _push(cargs, x, t):
     """The C arguments for one Python argument."""
-    if t.kind in ('function', 'enumclass', 'classref', 'madeclass'):
+    if t.kind in ('function', 'enumclass', 'classref', 'madeclass', 'same'):
         return
     if t.kind == 'enum':
         cargs.append(x._value_)
@@ -1017,6 +1083,11 @@ def _make_plan(f, entry, args):
             cargs.append(f'{n}._value_')
             continue
         if t.kind in ('function', 'enumclass', 'classref'):
+            continue
+        if t.kind == 'same':                # one object under two names: the plan checks it still is
+            if t.elem[1] or t.elem[0] is None:
+                return f._slow_call
+            hidden.append(f'    if {n} is not a{t.elem[0]}:\n        return slow({again})')
             continue
         if t.kind == 'madeclass':           # what its instances need of it: as for an instance's class
             hidden.extend(_class_guards(env, i, t.cls, [a for a, _ in t.recipe['assigns']] + [m for m, _ in t.recipe['methods']]
@@ -1624,6 +1695,24 @@ class Function:
         seen, out = set(), list(key)
         owners = _owner_classes(self, args) if self._passes else None
         empty = ((), set(), set())
+        roots = []                               # instances: their types together, as one graph with its alias pattern
+        for i, x in enumerate(args):
+            if out[i] is not None or type(x) in (dict, list) or not (i in self._attrs or i in self._passes or i in self._unused
+                                                                      or i in self._returned):
+                continue
+            uses, nested = self._attrs.get(i, empty), self._nested.get(i)
+            if i in self._passes:
+                more = {}
+                uses = _param_uses(self, i, type(x), uses, owners, (), more)
+                nested = _merge_nested(nested, more)
+            node = [set(uses[0]), set(uses[1]), set(uses[2]), {}]
+            _node_merge(node, [(), (), (), nested or {}])
+            roots.append((i, x, node))
+        if roots:
+            found, ids = _object_graph(roots)
+            for i, t in found.items():
+                out[i] = t
+            seen |= ids
         for i, x in enumerate(args):
             if type(x) is dict:
                 out[i] = None if id(x) in seen else self._dict_type(x, self._dict_keys.get(i))
@@ -1633,36 +1722,7 @@ class Function:
                 if i in self._passes:
                     uses = _param_uses(self, i, type(x[0]), uses, owners)
                 out[i] = _objlist_type(x, (sorted(uses[0]),) + tuple(uses[1:]), seen, dict in map(type, args))
-            elif out[i] is None and (i in self._unused or i in self._returned) and i not in self._attrs and i not in self._passes \
-                    and type(x) is not list:
-                if id(x) in seen and i in self._returned:
-                    continue                     # one object under two names, one returned: which is a question for Python
-                seen.add(id(x))
-                out[i] = T.object_of(type(x).__qualname__, [], None, type(x))     # nothing of it reaches the C
-            elif out[i] is None and (i in self._attrs or i in self._passes):
-                uses = self._attrs.get(i, empty)
-                nested = self._nested.get(i)
-                if i in self._passes:
-                    more = {}
-                    uses = _param_uses(self, i, type(x), uses, owners, (), more)
-                    nested = _merge_nested(nested, more)
-                out[i] = self._object_type(x, (sorted(uses[0]),) + tuple(uses[1:]), seen, nested)
         return tuple(out)
-
-    @staticmethod
-    def _object_type(x, attrs, seen, nested=None):
-        methods, inner = {}, []
-        fields = _object_fields(x, *attrs, methods=methods, nested=nested, ids=inner)
-        if type(fields) is not list:             # first: asking anything else of x could run its code
-            return None
-        held = getattr(x, '__dict__', None)      # an instance and its own __dict__ are two names for one thing as well
-        ids = ([id(x)] if held is None else [id(x), id(held)]) + inner
-        if len(set(ids)) != len(ids):
-            return None                          # an object in two of its attributes: a write must show through both
-        fresh = not seen.intersection(ids)
-        seen.update(ids)
-        written = set(attrs[1]).union(*(w for _, w in methods.values()))
-        return T.object_of(type(x).__qualname__, fields, methods, type(x), written) if fresh else None
 
     @staticmethod
     def _dict_type(d, keys):

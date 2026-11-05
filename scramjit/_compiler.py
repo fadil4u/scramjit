@@ -532,10 +532,38 @@ def flatten_dicts(fdef, arg_types):
             name += '_'
         taken.add(name)
         return name
-    slots, flat, methods, nested = {}, {}, {}, {}
+    slots, flat, methods, nested, same = {}, {}, {}, {}, {}
     new_params, new_types = [], []
+    names = [p.arg for p in params]
+
+    def target(i, path, root):
+        """Where an object was first met: parameter i's path, or root's, as an owner's name ('p.pos')."""
+        return '.'.join([root if i is None else names[i]] + list(path))
+    plain = {}                                   # a parameter kept as it is -> the argument it is
+    renamed = {}                                 # a parameter that is another's object: the other's path, wherever it's named
+    for p, t in zip(params, arg_types):
+        if t.kind == 'same':
+            if any(isinstance(n, ast.Name) and n.id == p.arg and not isinstance(n.ctx, ast.Load) for n in ast.walk(tree)):
+                raise Unsupported(tree, f'{p.arg} is assigned, and is another argument\'s object')
+            renamed[p.arg] = target(*t.elem, None)
+    if renamed:
+        def path_expr(owner, at):
+            base, *path = owner.split('.')
+            e = ast.Name(base, ast.Load())
+            for a in path:
+                e = ast.Attribute(e, a, ast.Load())
+            return ast.copy_location(e, at)
+
+        class Rename(ast.NodeTransformer):
+            def visit_Name(self, n):
+                return path_expr(renamed[n.id], n) if n.id in renamed else n
+        tree.body = [Rename().visit(s) for s in tree.body]
+        ast.fix_missing_locations(tree)
     for i, (p, t) in enumerate(zip(tree.args.posonlyargs + tree.args.args, arg_types)):
+        if t.kind == 'same':
+            continue
         if t.kind not in ('dict', 'object', 'objlist'):
+            plain[p.arg] = i
             new_params.append(p)
             new_types.append(t)
             continue
@@ -544,6 +572,9 @@ def flatten_dicts(fdef, arg_types):
         while todo:                              # an object in an attribute is an owner of its own: 'p.pos'
             owner, prefix, fields = todo.pop(0)
             for k, (key, ft) in enumerate(fields):
+                if ft.kind == 'same' and t.kind == 'object':     # another name for an object met before: its variables
+                    same[f'{owner}.{key}'] = target(*ft.elem, p.arg)
+                    continue
                 if ft.kind == 'object' and t.kind == 'object':
                     nested[f'{owner}.{key}'] = ft
                     todo.append((f'{owner}.{key}', f'{prefix}{key}.', ft.elem))
@@ -662,9 +693,36 @@ def flatten_dicts(fdef, arg_types):
         return ast.copy_location(ast.Subscript(ast.Name(flat[ps, key], ast.Load()), idx, ctx), node)
 
     def path_owner(owner, path):
-        """('p.pos', 'x') for owner p and path 'pos.x': the key flat has it under."""
+        """('p.pos', 'x') for owner p and path 'pos.x': the key flat has it under, through other names for an object."""
         *inner, last = path.split('.')
-        return ('.'.join([owner] + inner), last)
+        for a in inner:
+            owner = same.get(f'{owner}.{a}', f'{owner}.{a}')
+        return (owner, last)
+
+    def handed(owner, t, root=None, done=None, stack=()):
+        """The type an object goes to a callee as, the callee seeing it as its own root: another name for an object inside it
+        becomes same_as within it; one for an object outside is that object's own fields, which are the caller's variables
+        for it, met once and same_as after."""
+        root = owner if root is None else root
+        done = {} if done is None else done
+        fields = []
+        for k, ft in t.elem:
+            at = f'{owner}.{k}'
+            if ft.kind == 'same':
+                to = same[at]
+                if to == root or to.startswith(root + '.'):
+                    ft = T.same_as(None, tuple(to.split('.')[len(root.split('.')):]))
+                elif to in done:
+                    ft = T.same_as(None, done[to])
+                elif to in stack:
+                    raise Unsupported(tree, f'{to} holds itself through what is passed')
+                else:
+                    done[to] = tuple(at.split('.')[len(root.split('.')):])
+                    ft = handed(to, types_of[to], root, done, stack + (to,))
+            elif ft.kind == 'object':
+                ft = handed(at, ft, root, done, stack)
+            fields.append((k, ft))
+        return T.object_of(t.py, fields, t.methods, t.cls, t.writes)
 
     def owner_of(e):
         """The owner e names: an instance parameter, one made here, or an object in an attribute of one ('p.pos')."""
@@ -672,8 +730,9 @@ def flatten_dicts(fdef, arg_types):
             return e.id
         if isinstance(e, ast.Attribute):
             o = owner_of(e.value)
-            if o is not None and f'{o}.{e.attr}' in nested:
-                return f'{o}.{e.attr}'
+            name = same.get(f'{o}.{e.attr}', f'{o}.{e.attr}')
+            if o is not None and (name in nested or name in objects):
+                return name
         return None
 
     def element_of(e):
@@ -767,7 +826,7 @@ def flatten_dicts(fdef, arg_types):
                 if owner is not None and (owner, f.attr) in methods:
                     if el and not isinstance(el[1], (ast.Name, ast.Constant)):
                         raise Unsupported(n, f'a method of {owner}[...] with an index that is an expression: name the element first')
-                    t = types_of[owner]
+                    t = types_of[owner] if el or owner in made_local else handed(owner, types_of[owner])
                     uses, writes = t.methods[f.attr]
                     fields = [(k, ft) for k, ft in t.elem if ft.kind == 'function' or k in uses]   # only what it uses: the rest may have changed type
                     if el:
@@ -867,7 +926,7 @@ def flatten_dicts(fdef, arg_types):
             if found is None:
                 return self.visit(a), []
             owner, idx = found
-            t = types_of[owner]
+            t = types_of[owner] if idx is not None or owner in made_local else handed(owner, types_of[owner])
             data = [k for k, ft in t.elem if ft.kind != 'function']
             if owner in made_local:
                 data = list(dict.fromkeys(a for a, _ in made[made_local[owner]].recipe['assigns']))
@@ -949,6 +1008,7 @@ def flatten_dicts(fdef, arg_types):
             raise Unsupported(tree, 'returns an instance at one return and something else, or another kind of instance, at another')
         tree.sj_instance_ret = returned[0]
     tree.sj_names = {i: name for name, i in index.items()}      # for messages: the element's name, not its index's
+    tree.sj_plain = plain
     if methods or objects or lists:
         tree.body = shown_writes(tree.body)
     tree.args.posonlyargs, tree.args.args = [], new_params
@@ -969,8 +1029,19 @@ def leaf_types(t):
         for key, ft in fields:
             if ft.kind == 'object':
                 todo.append((f'{prefix}{key}.', ft.elem))
-            elif ft.kind != 'function':
+            elif ft.kind not in ('function', 'same'):      # another name for an object: its numbers are where it was first met
                 out.append((prefix + key, ft))
+    return out
+
+
+def same_targets(t):
+    """The (argument, path) of each same_as in an instance type, through the objects in its attributes."""
+    out = []
+    for _, ft in t.elem:
+        if ft.kind == 'same':
+            out.append(ft.elem)
+        elif ft.kind == 'object':
+            out += same_targets(ft)
     return out
 
 
@@ -986,7 +1057,7 @@ class SelfArg(ast.Tuple):
         new = SelfArg(copy.deepcopy(self.elts, memo), ast.Load())
         new.object_type, new.slots = self.object_type, self.slots
         new.passed, new.full, new.owner = getattr(self, 'passed', False), getattr(self, 'full', None), getattr(self, 'owner', None)
-        new.local = getattr(self, 'local', None)
+        new.local, new.same = getattr(self, 'local', None), getattr(self, 'same', None)
         return ast.copy_location(new, self)
 
 
@@ -1107,6 +1178,7 @@ class Compiler:
     def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, parity=True, counts=False, unit=None, hidden_map=None):
         fdef, arg_types, self.dict_slots = flatten_dicts(fdef, arg_types)
         self.instance_ret = getattr(fdef, 'sj_instance_ret', None)
+        self.plain = getattr(fdef, 'sj_plain', None)      # a parameter flattening kept -> the argument it is
         self.element_names = getattr(fdef, 'sj_names', {})   # ('arg', None): the int returned is an argument's index; ('elem', i): an index into argument i
         self.again = (arg_types, globals_, filename, line_offset, boundscheck, parity, counts, unit, hidden_map)
         self.unit = unit if unit is not None else Unit()
@@ -1930,6 +2002,8 @@ class Compiler:
         return T.object_of(t.py, sorted(fields, key=lambda kv: kv[0]), t.methods, t.cls, t.writes)
 
     def typeof(self, e):
+        if isinstance(e, SelfArg) and getattr(e, 'same', None) is not None:
+            return T.same_as(e.same)
         if isinstance(e, SelfArg) and getattr(e, 'local', None) is not None:
             for x in e.elts:
                 if self.typeof(x).np == 'dyn':
@@ -2373,7 +2447,9 @@ class Compiler:
         for x, t in zip(nodes, ts):
             if T.is_pylist(t):
                 self.fail(e, f'passes a list of lists to {e.func.id}()')
-            if not (t.is_number or t.kind in ('array', 'enum') or (t.kind == 'object' and isinstance(x, SelfArg))
+            if t.kind == 'object' and any(i is not None for i, _ in same_targets(t)):
+                self.fail(e, f'passes {e.func.id}() an object holding another argument\'s object')
+            if not (t.is_number or t.kind in ('array', 'enum') or (t.kind in ('object', 'same') and isinstance(x, SelfArg))
                     or (t.kind == 'tuple' and T.is_number_tree(t) and all(et.np != 'dyn' for et in T.leaves(t)))):
                 self.fail(e, f'passes {t.name} to {e.func.id}()')
         types = [ts[k] for k in picked]
@@ -2425,7 +2501,7 @@ class Compiler:
         nodes, picked = self.call_args(e, spec, self.callee_of(e))
         self.narrow_passed(nodes, picked, self.callee_of(e))
         done = []
-        mes = {j: nodes[k] for j, k in enumerate(picked) if isinstance(nodes[k], SelfArg)}
+        mes = {j: nodes[k] for j, k in enumerate(picked) if isinstance(nodes[k], SelfArg) and nodes[k].same is None}
         self.check_shared(e, mes, c)
 
         def value(x):
@@ -2437,7 +2513,9 @@ class Compiler:
             v = self.expr(x)
             return t, (self.hold(v[0], t), self.hold_flag(v[1]))
         for x in nodes:
-            if isinstance(x, SelfArg):            # an instance: each of its attributes, as the callee's parameters
+            if isinstance(x, SelfArg) and x.same is not None:      # the object of another argument: nothing more to pass
+                done.append(('self', []))
+            elif isinstance(x, SelfArg):            # an instance: each of its attributes, as the callee's parameters
                 self.typeof(x)
                 done.append(('self', [value(y) for y in x.elts]))
             else:
@@ -2509,6 +2587,43 @@ class Compiler:
             x.slots = {key: place[key] for key, _ in leaf_types(x.object_type)}
             if getattr(x, 'local', None) is not None:
                 x.local = T.object_of(full.py, [kt for kt in fields if kt[1].kind == 'function'], full.methods, full.cls, full.writes)
+        self.share_passed(nodes, picked)
+
+    def share_passed(self, nodes, picked):
+        """Arguments naming one object (one owner, at one index if it's an element): the first goes as everything any of them
+        uses, the others as same_as it, so the callee has one set of variables for all its names and nothing can alias."""
+        groups = {}
+        for j, k in enumerate(picked):
+            x = nodes[k]
+            if not isinstance(x, SelfArg):
+                continue
+            x.same = None
+            sub = [v for v in x.slots.values() if isinstance(v, ast.Subscript)]
+            groups.setdefault((x.owner, ast.dump(sub[0].slice) if sub else None), []).append((j, x))
+        for members in groups.values():
+            if len(members) < 2 or members[0][1].owner is None:
+                continue
+            j0, lead = members[0]
+            for _, x in members[1:]:
+                x.same = j0
+                lead.slots = {**x.slots, **lead.slots}
+            if getattr(lead, 'local', None) is not None:      # made here: typed from its variables, which now are all of them
+                continue
+            types = [x.object_type for _, x in members]
+            fields = {}
+            for t in types:
+                for k, ft in t.elem:
+                    if fields.setdefault(k, ft) is not ft:
+                        self.fail(lead, f'passes {self.shown(lead.owner)} twice, and {k} is {fields[k].name} for one and {ft.name} for the other')
+            full = next((x.full[0] for _, x in members if getattr(x, 'full', None) and x.full[0] is not None), None)
+            order = [k for k, _ in full.elem if k in fields] if full is not None else []
+            order += [k for k in fields if k not in order]
+            t0 = types[0]
+            methods = {}
+            for t in types:
+                methods.update(t.methods or {})
+            lead.object_type = T.object_of(t0.py, [(k, fields[k]) for k in order], methods, t0.cls, frozenset().union(*(t.writes for t in types)))
+            lead.elts = [lead.slots[k] for k, _ in leaf_types(lead.object_type)]
 
     def take_writes(self, e, me, c, io, j=0):
         """What a method assigned to self, into the caller's variables, before anything else: an exception it raised
@@ -3645,6 +3760,8 @@ class Compiler:
 
     def plain_arg(self, param):
         """The caller's argument a parameter that isn't a dict's key stands for."""
+        if self.plain is not None:
+            return self.plain[param]
         before = 0
         taken = set()
         for p in self.params[:self.params.index(param)]:

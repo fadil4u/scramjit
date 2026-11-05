@@ -275,6 +275,19 @@ def object_of(name, fields, methods=None, cls=None, writes=()):
     return _OBJECTS[key]
 
 
+_SAME = {}
+
+
+def same_as(i, path=()):
+    """A parameter, or an object in an attribute, that is the very object parameter i's path reaches (i None: the root of
+    the parameter it's in). Part of the signature, like a type: both names are one set of variables in the C."""
+    key = (i, tuple(path))
+    if key not in _SAME:
+        where = ('' if i is None else f'#{i}') + ''.join('.' + a for a in path)
+        _SAME[key] = Type(f'same as {where or "itself"}', None, 'same', elem=key)
+    return _SAME[key]
+
+
 _OBJLISTS = {}
 
 

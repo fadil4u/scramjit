@@ -328,7 +328,11 @@ layout), generates C specialized to them, compiles it with cimo, and caches the 
 signature, in memory and on disk.
 
 Compiled code releases the GIL while it runs (as cimo kernels do), so Python threads calling a
-compiled function run in parallel.
+compiled function run in parallel. One loop split by hand into ranges over a `ThreadPoolExecutor` scaled
+4.0x on 4 threads (2026-11-06), so a parallel loop of scramjit's own is worth building only for what
+the hand split lacks: a proof of independence (`TODO.md`, Adoption, `# scram: parallel`). Arguments
+copied in (lists, lists of instances, lists of lists) write back only what the call changed, against a
+snapshot taken at the call, so concurrent calls on disjoint parts of one list keep each other's writes.
 
 ## Architecture
 

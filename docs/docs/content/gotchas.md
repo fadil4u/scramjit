@@ -160,7 +160,7 @@ A compiled function reads the module-level values it uses when it's called. If a
 
 ### Threads really do run at the same time
 
-Compiled code releases the GIL, which is the point, but it also removes what was slowing down data races. Four threads each running `a[0] += 1` five million times on one array ended at about 6.5 million instead of 20 million. Give each thread its own array or its own part of one, and combine the results after they finish.
+Compiled code releases the GIL, which is the point, but it also removes what was slowing down data races. Four threads each running `a[0] += 1` five million times on one array ended at about 6.5 million instead of 20 million. Give each thread its own array or its own part of one, and combine the results after they finish ([splitting a loop across threads](caching.md#splitting-one-loop-across-threads)).
 
 ## Options that change this on purpose
 

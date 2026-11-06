@@ -100,7 +100,7 @@ Built 2026-11-05 and 2026-11-06 (see "Object model" in `requirements.md`); tests
    failure; a Gymnasium-shaped environment API; a benchmark against a subprocess/container sandbox
    on throughput and startup. The measurement decides whether this is a product: do it before the API.
 6. **Inference kernels: quantized formats, written once in Python.** Assumes the pieces elsewhere
-   (narrow types below, `parallel=True`, cimo's reductions and #3). The draw: the undecorated
+   (narrow types below, `# scram: parallel` (Adoption #6), cimo's reductions and #3). The draw: the undecorated
    function is the reference and the kernel at once, so a new format needs no second implementation
    in C intrinsics, CUDA or WGSL to check against.
    - **Types:** `float16` and `bfloat16` arrays (bfloat16 has no numpy dtype: accept a `uint16`
@@ -128,46 +128,7 @@ extras); every step lands with its tests in `tests/` and its page in `docs/docs/
 README's feature table changes only when PyPI has the feature (Release #0); measure before and
 after with `bench/`, and write the numbers into the item when done.
 
-1. **`@scram(parallel=True)`: a loop over a thread pool, like Numba's `prange` without Numba.**
-   What exists: compiled code releases the GIL, cimo gives each thread its own heap part
-   (`caching.md`, cimo's `threads.md`). What's missing is the split of the work.
-   - **API.** `@scram(parallel=True)` makes the function's *outermost* `for i in range(a, b)` loop
-     (or `range(n)`) run in `scramjit.threads()` threads (default `os.cpu_count()`, settable with
-     `scramjit.set_threads(n)` and `SCRAMJIT_THREADS`). Also `prange` as an explicit marker:
-     `from scramjit import prange`, usable as `range` when undecorated, so code runs unchanged as Python.
-   - **Lowering** (`_compiler`, then `_dispatch`): generate the C with two extra leading parameters
-     `(long block, long nblocks)`; the chosen loop's bounds become `lo = a + block * chunk`,
-     `hi = min(b, lo + chunk)` with `chunk = ceil((b - a) / nblocks)`. The dispatcher calls the
-     compiled function `nblocks` times from a `ThreadPoolExecutor` kept per process (not per call:
-     thread start costs more than a small loop). One call when `nblocks == 1` or the range is
-     shorter than `nblocks * 1024` elements, measured: find the break-even on `bench/kernels.py`'s
-     EMA-sized loops and put the number in the docs.
-   - **What must refuse, with a clear `CompileError`** (and fall back to the serial compile, not to
-     Python, with a `FallbackWarning` saying why): a loop-carried dependency in the chosen loop
-     (`y[i]` read with `y[i-1]`, a scalar accumulated across iterations that isn't a reduction),
-     writes to a scalar read after the loop, `break`/`return` inside the loop, calls to
-     non-`@scram` functions. Detection: reuse the dependence analysis the bounds-check versioning
-     uses (`checks`); anything it can't prove independent is refused. Start strict; widen with tests.
-   - **Reductions.** `s += x[i]` and `s = max(s, ...)` across the parallel loop: each thread keeps
-     its own `s` in a per-block output array; the dispatcher combines in Python in block order.
-     For floats this changes the summation order against serial, so: allowed only with
-     `parity=False`, documented, and the combine is left-to-right so the result is deterministic
-     for a fixed thread count. With `parity=True` a float reduction refuses as above.
-   - **Tests** (`tests/test_parallel.py`): results equal to the serial compile on every kernel in
-     `tests/test_kernels.py` for 1, 2, 3, 8 threads and for ranges shorter than the thread count
-     (including empty); each refused shape raises/falls back with the expected message; a
-     stress loop of 1,000 calls on 8 threads with `malloc` inside (per-thread heaps); exceptions
-     raised inside one block (an `IndexError` with `boundscheck=True`) propagate and the other
-     blocks finish. Run the suite once under free-threaded Python 3.13t (`python3.13t`) in CI
-     (`ubuntu-24.04-arm`, `deadsnakes` or `uv python install 3.13t`): no crash, same results.
-   - **Browser.** Out of scope for this item; note in `browser.md` that `parallel=True` runs serial
-     in Pyodide (no threads without COOP/COEP), with the Web Worker + `SharedArrayBuffer` version as
-     a later item.
-   - **Done when:** Gray-Scott and the flood-fill-by-rows kernel scale to at least 3x on 4 threads
-     natively (`bench/parallel.py`, numbers in `threads.md`), Numba's `prange` on the same loop is
-     within 1.3x, and `preflight` reports "parallel" or the reason it isn't.
-
-2. **Shipping a package built on scramjit: pure-Python wheel, native speed, no compile for the user.**
+1. **Shipping a package built on scramjit: pure-Python wheel, native speed, no compile for the user.**
    cimo's `distribution.md` covers the dependency and the vendored one-file cimo; what's missing is
    the scramjit side and shipping compiled code so a user never waits for a compile.
    - **Precompiled cache in the wheel.** When cimo's public cache export/import lands (cimo
@@ -192,7 +153,7 @@ after with `bench/`, and write the numbers into the item when done.
    - **Done when:** `pip install` of the example wheel followed by the first call takes under 50 ms
      on a machine the cache was built for, and the guide fits on one page.
 
-3. **Notebook integrations: marimo, JupyterLite, Jupyter Book.** The Pyodide path works; the
+2. **Notebook integrations: marimo, JupyterLite, Jupyter Book.** The Pyodide path works; the
    gap is that nobody finds it. Three small deliverables, in this order:
    - **marimo.** A `marimo` notebook in `examples/notebooks/` that runs in marimo's WASM mode
      (`marimo export html-wasm`) with one `@scram` kernel behind a slider; a PR or issue to marimo
@@ -210,7 +171,7 @@ after with `bench/`, and write the numbers into the item when done.
      and `tools/run_pyodide.mjs` runs the kernels' code in Pyodide. **Done when:** both notebook
      environments show scramjit in their own docs or examples, or the PRs are open.
 
-4. **Native UDFs over Arrow, DuckDB and Polars buffers.** Their columns expose the buffer protocol
+3. **Native UDFs over Arrow, DuckDB and Polars buffers.** Their columns expose the buffer protocol
    or `__array__` zero-copy, so a `@scram` function can be a vectorized UDF with no C++ extension.
    - **Arrow first** (`pyarrow` dev extra): accept a `pyarrow.Array`/`ChunkedArray` of a primitive
      type as an argument, mapped to numpy via `to_numpy(zero_copy_only=True)` in `_dispatch`
@@ -226,12 +187,12 @@ after with `bench/`, and write the numbers into the item when done.
      the DuckDB example runs the UDF within 2x of the equivalent SQL expression, numbers in a new
      `udfs.md`.
 
-5. **`deterministic=True`: the same bits on every platform.** cimo bundles its own libm and controls
+4. **`deterministic=True`: the same bits on every platform.** cimo bundles its own libm and controls
    instruction selection; `parity=False` already uses that libm. What's missing is the promise and
    the proof.
    - **Define it:** `@scram(deterministic=True)` implies `parity=False`, `fma=False` in the cimo
      compile (no contraction, which differs between arm64 and x86-64), no reassociated reductions,
-     and `parallel=True` with a fixed thread count only. Document what it does *not* promise:
+     and `# scram: parallel` with a fixed thread count only. Document what it does *not* promise:
      numpy calls that stay Python (their results follow numpy's SIMD paths), and `uint64`/narrow
      dtypes until their rules are platform-independent (item 1 under "Next").
    - **Prove it:** `tests/test_deterministic.py` runs a fixed set of kernels (the lab demos,
@@ -242,16 +203,33 @@ after with `bench/`, and write the numbers into the item when done.
      versions, x86 `sqrt` vs arm64); each becomes a cimo issue, fixed or excluded with a reason.
    - **Done when:** the hash file is identical from every CI job and the doc page `determinism.md`
      lists exactly what is covered.
-   - **Parallel float reductions:** with `parallel=True` the combine order is fixed per thread count;
+   - **Parallel float reductions:** with `# scram: parallel` the combine order is fixed per thread count;
      a fixed reduction tree independent of thread count (and, under #3, of the GPU's workgroup size)
      would give batch- and thread-invariant results, the property reproducible LLM inference needs.
      Measure what the fixed tree costs against a free one.
 
-6. **Torch, JAX and CuPy tensors through `__dlpack__`.** Accept any object with `__dlpack__` (CPU device)
+5. **Torch, JAX and CuPy tensors through `__dlpack__`.** Accept any object with `__dlpack__` (CPU device)
    as an array argument, zero-copy, in `_dispatch` (`_arg_type`, `_push`), so a `@scram` function can be
    called from a PyTorch model without `.numpy()`. Tests skipped without `torch` (dev extra): writes
    through the tensor are seen by torch; strides and dtypes match numpy's path; a GPU tensor is refused
    with a clear message until the GPU direction lands.
+6. **`# scram: parallel` on a loop, checked.** Measured first (2026-11-06): splitting a loop by hand already
+   scales, since compiled code releases the GIL. A `ThreadPoolExecutor.map` over four ranges of one array ran
+   4.0x on 4 threads and 5.0x on 8 (Linux, 8 logical cores), bit-identical, and it's now documented ("Splitting one
+   loop across threads" in `caching.md`, `examples/threads.py`). Lists, lists of instances and lists of lists split
+   this way lost writes until the write-back compared against a snapshot taken at the call instead of the list's
+   current values (`_snapshot`, `tests/test_threads.py`). So what the hint would add is what the hand-written split lacks:
+   - **A proof the iterations are independent,** reusing the dependence analysis bounds-check versioning does; a
+     hand split with a dependence across parts gives wrong results silently. The comment is a request, not a promise:
+     anything not proven runs serially with a `FallbackWarning` naming the line and the reason. No `prange`, no
+     decorator flag: a comment keeps the code standard Python, and preflight can suggest it on loops that qualify.
+   - **Exceptions:** writes before one must match CPython, so only a loop that can't raise goes parallel; the copy
+     bounds-check versioning makes after its checks pass is that loop.
+   - **Reductions:** ints, `min` and `max` exact; float sums only with `parity=False`, combined in block order.
+   - **Arguments copied in once,** not once per part.
+   - **The cost of starting the parts:** four tiny calls through a pool took 390 µs against 3.8 µs for one direct call
+     (Linux, WSL). The hint is worth little more than the hand split while parts start from Python: threads started from
+     the C would need cimo to offer them (not checked).
 
 ## From cimo
 

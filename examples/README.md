@@ -44,7 +44,8 @@ Four more show behaviour rather than speed:
 
 - [`threads.py`](threads.py): compiled code releases the GIL. Four threads ran 2.3x to 3.8x faster than the same
   calls one after another, depending on what else the machine was doing; plain Python threads gained
-  nothing.
+  nothing. Then one loop split into four parts over a `ThreadPoolExecutor`, each a call on its own range of
+  the same array: 3.9x, with the same bits.
 - [`fallback.py`](fallback.py): a function that doesn't compile runs as Python with a `FallbackWarning`.
   Shows the warning, `f.preflight()`, `fallback=False`, and a rewrite that compiles.
 - [`hot_lines.py`](hot_lines.py): insertion sort, to run under `scramjit preflight --counts`: 100 million moves on one line, and exactly how often each line and branch ran.

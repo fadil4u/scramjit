@@ -18,7 +18,7 @@ It runs as Python, so your program still works and gives the same results; you j
 
 ## Does it help with the GIL?
 
-Yes: compiled code releases the GIL while it runs, so threads calling it run in parallel.
+Yes: compiled code releases the GIL while it runs, so threads calling it run in parallel, including parts of one loop ([splitting a loop across threads](caching.md#splitting-one-loop-across-threads)).
 
 ## Is it a new language?
 

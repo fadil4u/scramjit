@@ -8,6 +8,37 @@ On each call the decorator reads the argument types: Python type, dtype, number 
 
 Compiled code releases the GIL while it runs, so several Python threads calling compiled functions run in parallel. Compiling itself is Python code and holds the GIL like any other.
 
+## Splitting one loop across threads
+
+A loop whose iterations don't depend on each other can run on every core: give the function the range to work on, and call it once per part from a thread pool.
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+@scram
+def settle(xs, ys, lo, hi):
+    for i in range(lo, hi):
+        s = xs[i]
+        for _ in range(50):
+            s = math.sin(s) + 0.5
+        ys[i] = s
+
+def split(fn, n, workers, pool, *data):
+    bounds = [(k * n // workers, (k + 1) * n // workers) for k in range(workers)]
+    list(pool.map(lambda b: fn(*data, *b), bounds))
+
+with ThreadPoolExecutor(4) as pool:
+    split(settle, len(xs), 4, pool, xs, ys)
+```
+
+On a million elements, four threads ran 3.9x faster than one call, eight 5x, with the same bits in `ys` ([`examples/threads.py`](https://github.com/farizrahman4u/scramjit/blob/main/examples/threads.py)). What to watch:
+
+- **The parts must not depend on each other.** Nothing checks this. If one part reads what another writes (`ys[i - 1]`), the result depends on timing. Two parts writing the same element is a data race ([gotchas](gotchas.md#threads-really-do-run-at-the-same-time)).
+- **Sums across parts:** give each part its own result (return it) and add them up after. For floats that changes the order of the additions, so the last bits can differ from one call over the whole range.
+- **Make the parts big.** Four tiny parts through a pool took about 0.4 ms against 4 µs for one direct call (Linux, 8 cores), so a part should run for at least a millisecond. Keep one pool for the program rather than one per call.
+- **What can be shared:** numpy arrays are passed without copying, so every part works on the same memory. Lists, lists of instances and lists of lists (from 0.0.4) are copied in and written back at the end of each call, only the elements the call changed (rows, for a list of lists), so parts writing different elements of one list keep each other's writes. One instance or dict shared by threads is written back attribute by attribute, every attribute the function may write, so give each thread its own if more than one writes to it.
+- **In the browser,** Pyodide has no threads, so this runs one part after another.
+
 ## Two caches
 
 - **In memory,** for the life of the process.

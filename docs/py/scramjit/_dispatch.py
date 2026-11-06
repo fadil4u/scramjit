@@ -877,19 +877,38 @@ def _pool_levels(pool, t):
     return out
 
 
-def _copy_back_attr(xs, key, a, et):
-    """Into the instances, the attribute's values the kernel changed: the others stay the very objects they were. key may
-    be a path (pos.x)."""
+def _changed(a, before):
+    """The places where the kernel's list a holds other bits than were copied in: what this call wrote. -0.0 differs from
+    0.0; a NaN it didn't write doesn't differ from itself."""
+    raw = a.tobytes()
+    if raw == before.tobytes():
+        return ()
+    if a.typecode == 'd':                       # compared as their bits
+        a, b = array.array('q'), array.array('q')
+        a.frombytes(raw)
+        b.frombytes(before.tobytes())
+        before = b
+    return list(itertools.compress(range(len(a)), map(operator.ne, a, before)))
+
+
+def _write_changed(lst, a, et, before):
+    """lst[k] = a[k] where this call changed it, as Python's values; all of them in one go when it changed every one."""
+    ks = _changed(a, before)
+    if len(ks) == len(lst) and len(a) == len(lst):
+        lst[:] = [bool(v) for v in a] if et is T.BOOL else a.tolist()
+    else:
+        for k in ks:
+            lst[k] = bool(a[k]) if et is T.BOOL else a[k]
+
+
+def _copy_back_attr(xs, key, a, et, before):
+    """Into the instances, the attribute's values this call changed: the others stay the very objects they were, even if
+    another thread set them meanwhile. key may be a path (pos.x)."""
     if '.' in key:
         *path, key = key.split('.')
         xs = [_member(x, '.'.join(path)) for x in xs]
-    for k, v in enumerate(a):
-        old = getattr(xs[k], key)
-        if et is T.FLOAT:
-            if old == v and math.copysign(1.0, old) == math.copysign(1.0, v) or (old != old and v != v):
-                continue
-        elif old == v and type(old) is type(bool(v) if et is T.BOOL else v):
-            continue
+    for k in _changed(a, before):
+        v = a[k]
         setattr(xs[k], key, bool(v) if et is T.BOOL else v)
 
 
@@ -1751,29 +1770,25 @@ def _lists_from(address, shape, et):
     return nest(flat, list(shape))
 
 
-def _copy_back_nested(x, a, et, depth):
-    """Into a list of lists passed in, the elements the kernel changed."""
+def _copy_back_nested(x, a, et, depth, before):
+    """Into a list of lists passed in, the rows this call changed, each replaced in one go, in C: rows it didn't change
+    stay as they are, even if another thread changed them meanwhile."""
+    if a.tobytes() == before.tobytes():
+        return
     rows = [x]
     for _ in range(depth - 1):
         rows = [r for row in rows for r in row]
     n = len(rows[0])
-    code = a.typecode
-    for k, row in enumerate(rows):            # a row that changed is replaced in one go, in C
+    for k, row in enumerate(rows):
         new = a[k * n:(k + 1) * n]
-        if array.array(code, row).tobytes() != new.tobytes():
+        if new.tobytes() != before[k * n:(k + 1) * n].tobytes():
             row[:] = [bool(v) for v in new] if et is T.BOOL else new.tolist()
 
 
-def _copy_back(lst, a, et):
-    """Into a list passed in, the elements the kernel changed: the others stay the very objects they were."""
-    for k, v in enumerate(a):
-        old = lst[k]
-        if et is T.FLOAT:
-            if old == v and math.copysign(1.0, old) == math.copysign(1.0, v) or (old != old and v != v):
-                continue
-        elif old == v:
-            continue
-        lst[k] = bool(v) if et is T.BOOL else v
+def _copy_back(lst, a, et, before):
+    """Into a list passed in, the elements this call changed: the others stay the very objects they were, even if another
+    thread set them meanwhile."""
+    _write_changed(lst, a, et, before)
 
 
 class Compiled:
@@ -2137,11 +2152,13 @@ def _make_plan(f, entry, args):
 
 class _Marshalled:
     """The C arguments of a call, and what the kernel may have written that goes back into the Python objects after it."""
-    __slots__ = ('cargs', 'columns', 'refcols', 'copies', 'by_cls', 'where', 'made_k', 'room', 'pool_t', '_pool_cargs', '_pool_columns')
+    __slots__ = ('cargs', 'columns', 'refcols', 'copies', 'by_cls', 'where', 'made_k', 'room', 'pool_t', '_pool_cargs', '_pool_columns',
+                 'before')
 
     def __init__(self):
         self.cargs, self.columns, self.refcols, self.copies = [], [], [], []
         self.by_cls, self.where, self.made_k, self.room, self.pool_t = {}, None, {}, None, None
+        self.before = {}          # id of a list the kernel may write -> its values as copied in (_snapshot)
 
 
 def _pack_pool(m, i, x, t, args):
@@ -2227,37 +2244,51 @@ def _marshal(entry, args, room=None, prebuilt=None):
         m.cargs.append(_interrupt.address())
     if entry.counts is not None:
         m.cargs.append(entry.counts)
+    _snapshot(entry, m)
     return m
+
+
+def _snapshot(entry, m):
+    """The values of each list the kernel may write, as copied in: what goes back is only what this call changed, so a call
+    on another thread that changed other elements of the same list or objects meanwhile keeps its writes."""
+    written = [c[2] for c in m.columns if c[:2] in entry.columns] + [c[2] for c in m.refcols if c[:2] in entry.columns]
+    for i, a in m.copies:
+        if i is not None and (i[1] if type(i) is tuple else i) in entry.lists:
+            written.append(a)
+    for a in written:
+        m.before[id(a)] = a[:]
 
 
 def _write_back(entry, m, args):
     """What the kernel wrote that Python would have, even before an exception: attributes' lists into their objects (the
     values that didn't change keep their identity), references as the objects at their indexes, lists copied back."""
+    before = m.before
     for i, key, a, ft, held, last in m.columns:
         if (i, key) in entry.columns:
-            _copy_back_attr(held, last, a[:len(held)] if len(a) > len(held) else a, ft)
+            b = before[id(a)]
+            if len(a) > len(held):
+                a, b = a[:len(held)], b[:len(held)]
+            _copy_back_attr(held, last, a, ft, b)
     for i, slot, a, objs, key, targets in m.refcols:
         if (i, slot) in entry.columns:
-            for o, k in zip(objs, a):
-                target = None if k < 0 else targets[k]
-                if getattr(o, key) is not target:
-                    setattr(o, key, target)
+            for o, k, k0 in zip(objs, a, before[id(a)]):
+                if k != k0:
+                    setattr(o, key, None if k < 0 else targets[k])
     for i, a in m.copies:
         if type(i) is tuple:                     # a list of references: the objects at those indexes
             _, i, cls = i
             if i in entry.lists:
                 objs = m.by_cls.get(cls, [])
-                for k, j in enumerate(a):
-                    target = None if j < 0 else objs[j]
-                    if args[i][k] is not target:
-                        args[i][k] = target
+                for k, (j, j0) in enumerate(zip(a, before[id(a)])):
+                    if j != j0:
+                        args[i][k] = None if j < 0 else objs[j]
             continue
         if i is not None and i in entry.lists:
             t = entry.types[i]
             if T.is_pylist(t):
-                _copy_back_nested(args[i], a, t.elem, t.ndim)
+                _copy_back_nested(args[i], a, t.elem, t.ndim, before[id(a)])
             else:
-                _copy_back(args[i], a, t.elem)
+                _copy_back(args[i], a, t.elem, before[id(a)])
 
 
 class Function:

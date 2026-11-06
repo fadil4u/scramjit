@@ -356,8 +356,13 @@ def test_room_runs_out_and_it_runs_again():
     assert g(a, 200) == grow(b, 200) and a == b             # past the first room: made again with more
 
 
-def test_made_from_nothing_stays_python():
-    same(prepend, lambda: [None, [1.0, 2.0]], False)
+def test_made_from_nothing():
+    same(prepend, lambda: [None, [1.0, 2.0, 3.0]], True)       # the types are what Node(...) is given
+    same(prepend, lambda: [None, [1, 2]], True)
+    g = scram(cache=False, fallback=False)(prepend)
+    r = g(None, [1.0, 2.0])
+    assert r == Node(2.0, Node(1.0)) and type(r.next) is Node
+    same(prepend, lambda: [None, []], False)                    # nothing says what x holds
 
 
 def walk_all(heads):
@@ -383,3 +388,24 @@ def advance_all(heads):
 ])
 def test_lists_of_references(f, make):
     same(f, make, True)
+
+
+@scram(cache=False)
+def skip_small(n, limit):
+    while n is not None and n.x < limit:
+        n = n.next
+    return n
+
+
+def big_ones(head, limit):
+    s = 0.0
+    n = skip_small(head, limit)
+    while n is not None:
+        s += n.x
+        n = skip_small(n.next, limit)
+    return s
+
+
+def test_a_callee_returning_a_reference():
+    same(big_ones, lambda: [chain(1.0, 5.0, 2.0, 7.0, 3.0), 2.5], True)
+    same(big_ones, lambda: [None, 2.5], True)

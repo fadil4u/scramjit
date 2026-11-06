@@ -1349,9 +1349,9 @@ def flatten_dicts(fdef, arg_types):
             o = instance_owner(f.value)
             if o is not None and (o, f.attr) in methods:
                 w = methods[o, f.attr].elem
-        if getattr(w, '_tree', None) is None or not hasattr(w, '_fn'):
+        if getattr(w, '_tree', None) is None or not (hasattr(w, '_fn') or hasattr(w, 'class_globals')):
             return None
-        cls = returns_made(w._tree, w._fn.__globals__)
+        cls = returns_made(w._tree, w.class_globals if hasattr(w, 'class_globals') else w._fn.__globals__)
         if cls is None:
             return None
         if cls not in by_cls:
@@ -1376,7 +1376,7 @@ def flatten_dicts(fdef, arg_types):
             if o is None or (o, name) not in methods:
                 return n
             other = instance_owner(rest[0]) if rest else None
-            if other is not None and types_of[other].cls is not types_of[o].cls:
+            if other is not None and None not in (types_of[other].cls, types_of[o].cls) and types_of[other].cls is not types_of[o].cls:
                 raise Unsupported(n, f'{name} between instances of two classes (Python may ask the other\'s reflected method first)')
             return ast.copy_location(ast.Call(ast.copy_location(ast.Attribute(x, name, ast.Load()), n), rest, []), n)
 
@@ -1555,6 +1555,12 @@ def flatten_dicts(fdef, arg_types):
         a reference attribute in a fixed place or reached from one, or a if c else b of them and None."""
         if pool_made(e):                         # a new instance, kept in the pool
             return made[e.func.id].cls
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id in funcs and getattr(funcs[e.func.id], '_tree', None) is not None \
+                and pool_type is not None and any(refexpr(a) for a in e.args):
+            w = funcs[e.func.id]                 # a function given references, returning one of them or one reached from them
+            ps = [q.arg for q in w._tree.args.posonlyargs + w._tree.args.args]
+            given = {q: refclass(a) for q, a in zip(ps, e.args) if refexpr(a)}
+            return ref_return_class(w._tree, given, pools_by, NOT)
         if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in reflists and not isinstance(e.slice, ast.Slice):
             return reflists[e.value.id]
         if isinstance(e, ast.Name):
@@ -1692,6 +1698,38 @@ def returns_made(fdef, globals_):
             return None
         found.add(c)
     return found.pop() if len(found) == 1 else None
+
+
+def ref_return_class(fdef, given, pools_by, missing):
+    """The class of the reference a function returns, when given references of these classes ({parameter: class}) into
+    pools laid out as pools_by: followed through its names, attributes, a if c else b and None. missing if it can't tell."""
+    names = dict(given)
+
+    def cls_of(e):
+        if isinstance(e, ast.Constant) and e.value is None:
+            return None
+        if isinstance(e, ast.Name):
+            return names.get(e.id, missing)
+        if isinstance(e, ast.IfExp):
+            cs = [cls_of(e.body), cls_of(e.orelse)]
+            known = {c for c in cs if c is not None}
+            return missing if missing in cs or len(known) > 1 else (known.pop() if known else None)
+        if isinstance(e, ast.Attribute):
+            c = cls_of(e.value)
+            spec = pools_by.get(c) if c is not missing else None
+            return spec[2][e.attr] if spec is not None and e.attr in spec[2] else missing
+        return missing
+    for _ in range(8):
+        for n in own_nodes(fdef):
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+                c = cls_of(n.value)
+                if c is not missing and (names.get(n.targets[0].id) is None):
+                    names[n.targets[0].id] = c
+    found = {cls_of(n.value) for n in own_nodes(fdef) if isinstance(n, ast.Return) and n.value is not None}
+    if missing in found or not found:
+        return missing
+    known = found - {None}
+    return missing if len(known) > 1 else (known.pop() if known else None)
 
 
 CALLEES = {}     # id -> a method a call to an instance made in the function names (Call.sj_callee): no parameter holds it
@@ -1867,7 +1905,9 @@ class Unit:
                     raise Unsupported(None, 'a variable in it is an int at some times and a float at others')
                 if any(t.kind == 'dict' for t in c.env.values()):
                     raise Unsupported(None, 'it reads a dict')
-                if c.instance_ret and (c.instance_ret[0] != 'made' or any(type(a) is tuple for a in c.instance_ret[2])):
+                if c.instance_ret and c.instance_ret[0] == 'pool':
+                    pass                         # a reference into the caller's pool: its index
+                elif c.instance_ret and (c.instance_ret[0] != 'made' or any(type(a) is tuple for a in c.instance_ret[2])):
                     raise Unsupported(None, 'it returns an instance' + (' holding objects' if c.instance_ret[0] == 'made' else ''))
             finally:
                 self.stack.pop()

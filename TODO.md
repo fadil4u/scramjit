@@ -10,25 +10,18 @@ Biggest first. `requirements.md` is the spec; this is the work queue.
 
 ## Object model: what's left
 
-Decided 2026-11-05 (see "Object model" in `requirements.md`), built 2026-11-05 except what's below: the alias pattern in the
-signature (`T.same_as`), elements by reference (`T.elemref_of`), pools for repeats in lists and for objects shared by elements,
-new instances from calls and operators (`returns_made`, `_made_uses`), instances made here holding objects (`made_place`), a
-parameter rebound to new instances, writing methods in comprehensions, `__x` mangling, and references chosen by data (`T.ref_of`,
-`T.pool_of`, `_pool_plan`). Tests: `test_alias_pattern.py`, `test_new_instances.py`, `test_element_objects.py`, `test_references.py`.
-The class examples' C is unchanged except `vectors.render`, which passes `self.dot(self)` one set of numbers.
+Built 2026-11-05 and 2026-11-06 (see "Object model" in `requirements.md`); tests in `test_alias_pattern.py`, `test_new_instances.py`,
+`test_element_objects.py`, `test_references.py`. Left, smaller than what's done:
 
-1. **One path table, one marshaller.** The model was built onto the case-by-case code, not in place of it: `_attrs_used`,
-   `_element_attrs`, `_element_nested`, `_nested_uses`, `_passes`, `_construction_uses`, `_made_uses` and `_ref_candidates` each walk
-   the tree for one shape, and `_run` marshals instances, lists, pools and dicts separately. Replace them with one path analysis
-   and one marshaller (the plan as decided: "How to build it" in git history, d232dc5), now that the tests pin every behaviour.
-2. **Static preflight** follows none of the 2026-11-05 work beyond the alias pattern: `examples/vector_math.py` (`gyrate`, new
-   instances inside expressions) and `search_tree.py` (`lookups`, references) show as Python statically and compile when called.
-   Build the same tables from class statements (`_static_self`, `_static_inner`, `_static_made`).
-3. **References, what's left:** making instances to keep in a structure that has none of their class yet (the pool's types
-   come from existing objects; the constructor's argument types would do), a compiled callee returning a reference, and a call plan
-   for pooled calls (each takes the general path, walking the pool, about 1 µs per object reached).
-4. **Not yet in the alias pattern:** plans for a pattern through attributes (the general path). An instance's own `__dict__`
-   passed as a dict alongside it is the `vars()` surface, which stays Python.
+1. **The rest of the unification.** Uses by path and what each parameter is given to come from one walk (`_path_uses`), and a
+   call is marshalled by one function with a packer per argument kind (`_marshal`, `_PACKERS`, `_write_back`). Still separate,
+   each asking about classes or data rather than paths: `_construction_uses`, `_made_uses`, `_ref_candidates`; and the compiler's
+   `flatten_dicts` still rewrites each shape in its own branch, which a path table could drive.
+2. **References:** a compiled callee making instances to keep in the caller's pool (it gets no count, so it stays Python), a pool
+   when no object and no argument says what a made class's attributes hold. A pooled call costs about 10 µs plus 0.45 µs per
+   object reached (`_pool_build`), so a single walk over a list is faster as Python: worth a pool kept between calls, checked by
+   identity, if a workload calls repeatedly on the same structure.
+3. **Static preflight** assumes a pool's class from its annotations and that references reach that same class.
 
 ## Demos
 

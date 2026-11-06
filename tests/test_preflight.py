@@ -768,3 +768,51 @@ def test_static_understands_module_level_constants(tmp_path):
     d = json.loads(_cli('preflight', f, '--json', '--no-suggest').stdout)
     states = {x['name']: x['state'] for x in d['files'][0]['functions']}
     assert states == {'with_number': 'compiled', 'with_tuple': 'compiled', 'with_array': 'compiled', 'with_dict': 'compiled', 'with_text': 'python'}
+
+
+NEW_OBJECTS = textwrap.dedent('''
+    import dataclasses
+    import math
+    from scramjit import scram
+
+    @dataclasses.dataclass
+    class Vec:
+        x: float
+        y: float
+
+        def __add__(self, o):
+            return Vec(self.x + o.x, self.y + o.y)
+
+        def __mul__(self, k):
+            return Vec(self.x * k, self.y * k)
+
+        def norm(self):
+            return math.sqrt(self.x * self.x + self.y * self.y)
+
+    @dataclasses.dataclass
+    class Node:
+        key: int
+        left: object = None
+        right: object = None
+
+    @scram
+    def drift(p, v, n, dt):
+        for i in range(n):
+            p = p + v * dt
+        return (p + v).norm()
+
+    @scram
+    def depth(root, key):
+        node = root
+        d = 0
+        while node is not None and node.key != key:
+            node = node.left if key < node.key else node.right
+            d += 1
+        return d
+''')
+
+
+def test_static_report_follows_operators_and_references(tmp_path):
+    (tmp_path / 'objs.py').write_text(NEW_OBJECTS)
+    r = run(['-m', 'scramjit', 'preflight', 'objs.py'], tmp_path)
+    assert '✓ drift' in r.stdout and '✓ depth' in r.stdout and '2 compiled' in r.stdout, r.stdout

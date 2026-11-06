@@ -10,10 +10,11 @@ import copy
 import math
 import os
 import re
+import types
 
 from . import _lift
 from . import _types as T
-from ._compiler import Callee, Compiler, StaticNumpy, const_int
+from ._compiler import OPERATORS, Callee, Compiler, StaticNumpy, const_int, returns_made
 from ._errors import Unsupported
 
 _OTHER = object()     # a module-level name whose value static analysis can't know
@@ -82,6 +83,14 @@ class StaticCallee:
 
     def __init__(self, fdef, globals_):
         self.fdef, self.globals = fdef, globals_
+        self._tree = fdef
+
+    @property
+    def class_globals(self):
+        """What returns_made reads: the module's classes, as the stand-in types their class statements are here."""
+        out = dict(self.globals or {})
+        out.update({c.name: _stand_in(c) for c in (self.globals or {}).get(CLASSES, [])})
+        return out
 
     def _uses_of(self, idx, cls, stack=()):
         """(attributes used, assigned, methods called) of parameter idx, through the functions of this module it's passed to."""
@@ -332,6 +341,9 @@ def assumed_signature(fdef, globals_=None, seen=()):
         names = {p.arg} | {k for k, v in alias.items() if v == p.arg}
         calls = {n.func.attr for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                  and isinstance(n.func.value, ast.Name) and n.func.value.id in names}
+        calls |= {OPERATORS[type(n.op)] for n in ast.walk(fdef) if isinstance(n, (ast.BinOp, ast.UnaryOp)) and type(n.op) in OPERATORS
+                  and isinstance(n.left if isinstance(n, ast.BinOp) else n.operand, ast.Name)
+                  and (n.left if isinstance(n, ast.BinOp) else n.operand).id in names}      # a + b calls a.__add__
         if not calls:
             continue
         own = getattr(fdef, 'sj_class', None)
@@ -351,6 +363,8 @@ def assumed_signature(fdef, globals_=None, seen=()):
             and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and n.value.func.id in classes}
     index = {p.arg: k for k, p in enumerate(params)}
     for n in ast.walk(fdef):             # a parameter passed to a method of an instance made here or of a known class
+        if isinstance(n, ast.BinOp) and type(n.op) in OPERATORS and isinstance(n.left, ast.Name):    # a + b: b given to a.__add__
+            n = ast.Call(ast.Attribute(n.left, OPERATORS[type(n.op)], ast.Load()), [n.right], [])
         if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)):
             continue
         owner = n.func.value.id
@@ -446,7 +460,7 @@ def _static_self(fdef, cls, own, calls, globals_, seen):
         methods.update(nested)
         methods[m] = ({k for k, ft in inner if ft.kind != 'function'}, stores.union(*(w for _, w in nested.values())))
         fields[m] = T.function_of(StaticCallee(d, globals_))
-    return T.object_of(cls.name, sorted(fields.items(), key=lambda kv: kv[0]), methods)
+    return T.object_of(cls.name, sorted(fields.items(), key=lambda kv: kv[0]), methods, _stand_in(cls))
 
 
 def _assumed_ints(fdef):
@@ -670,13 +684,27 @@ def with_globals(fdef, globals_):
         elif type(v) is dict or (v is _OTHER and name in indexed):
             added.append(ast.arg(name))
     classes = {c.name: c for c in (globals_ or {}).get(CLASSES, [])}
-    makes = {n.value.func.id for n in ast.walk(fdef) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
-             and isinstance(n.value.func, ast.Name) and n.value.func.id in classes and n.value.func.id not in local}
+    makes = {n.func.id for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id in classes and n.func.id not in local}
+    named = {n.func.attr for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    named |= {OPERATORS[type(n.op)] for n in ast.walk(fdef) if isinstance(n, (ast.BinOp, ast.UnaryOp)) and type(n.op) in OPERATORS}
+    stand = {c.name: _stand_in(c) for c in classes.values()}
+    for c in classes.values():                   # a method it calls returning a new instance makes one here too
+        for d in c.body:
+            if isinstance(d, ast.FunctionDef) and d.name in named and d is not fdef:
+                made_cls = returns_made(d, stand)
+                if made_cls is not None:
+                    makes.add(made_cls.__name__)
     for name in sorted(makes):                  # a class it makes instances of: built from the class statement
         t = _static_made(classes[name], fdef, globals_)
         if t is not None:
             added.append(ast.arg(name))
             tuples[name] = t
+    pool = _static_pool(fdef, globals_)
+    if pool is not None:                         # references chosen by data: the pool a call would make
+        added.append(ast.arg('sjpool'))
+        tuples['sjpool'] = pool[1]
+        tuples.update(pool[0])
     if not added:
         return fdef, tuples
     tree = copy.deepcopy(fdef)
@@ -685,6 +713,50 @@ def with_globals(fdef, globals_):
 
 
 _STATIC_CLASSES = {}
+
+
+def _stand_in(cdef):
+    """The type a class statement stands for here: one per statement, so its instances are one class throughout."""
+    return _STATIC_CLASSES.setdefault(id(cdef), type(cdef.name, (), {}))
+
+
+def _fields_of(cdef):
+    """{attribute: annotation text or None} of a class statement: a dataclass's fields, or what __init__ assigns to self."""
+    out = {}
+    for s_ in cdef.body:
+        if isinstance(s_, ast.AnnAssign) and isinstance(s_.target, ast.Name):
+            out[s_.target.id] = ast.unparse(s_.annotation)
+        if isinstance(s_, ast.FunctionDef) and s_.name == '__init__' and s_.args.args:
+            me = s_.args.args[0].arg
+            for n in ast.walk(s_):
+                if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == me and isinstance(n.ctx, ast.Store):
+                    out.setdefault(n.attr, None)
+    return out
+
+
+def _static_pool(fdef, globals_):
+    """For a function holding references chosen by data, read from source: ({parameter: ref type}, the pool's type), the
+    pool's class the one in the module with every attribute used through references, its numbers by annotation and its
+    other candidate attributes references to it. None if no class fits."""
+    from ._dispatch import _ref_candidates
+    attrs, names = _ref_candidates(fdef)
+    if not attrs and not names:
+        return None
+    params = [p.arg for p in fdef.args.posonlyargs + fdef.args.args]
+    used = {n.attr for n in ast.walk(fdef) if isinstance(n, ast.Attribute) and (isinstance(n.value, ast.Name) and n.value.id in names
+            or isinstance(n.value, ast.Attribute) and n.value.attr in attrs)}
+    found = [c for c in (globals_ or {}).get(CLASSES, []) if used and used <= set(_fields_of(c)) | {d.name for d in c.body if isinstance(d, ast.FunctionDef)}]
+    if len(found) != 1:
+        return None
+    cdef = found[0]
+    fields = _fields_of(cdef)
+    kinds = {'int': T.INT, 'float': T.FLOAT, 'bool': T.BOOL}
+    numbers = [(a, kinds[fields[a]]) for a in sorted(used) if a in fields and fields[a] in kinds and a not in attrs]
+    numbers += [(a, T.FLOAT) for a in sorted(used) if a in fields and fields[a] is None and a not in attrs]
+    cls = _stand_in(cdef)
+    refs = [(a, cls) for a in sorted(attrs) if a in fields and fields[a] not in kinds]
+    pooled = {p: T.ref_of(cls) for p in params if p in names}
+    return pooled, T.pool_of([(cls, numbers, refs)], [(params.index(p), '') for p in pooled])
 
 
 def _static_made(cdef, fdef, globals_):
@@ -721,6 +793,9 @@ def _static_made(cdef, fdef, globals_):
              and isinstance(n.value.func, ast.Name) and n.value.func.id == cdef.name and isinstance(n.targets[0], ast.Name)}
     calls = {n.func.attr for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
              and isinstance(n.func.value, ast.Name) and n.func.value.id in local}
+    named = {n.func.attr for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    named |= {OPERATORS[type(n.op)] for n in ast.walk(fdef) if isinstance(n, (ast.BinOp, ast.UnaryOp)) and type(n.op) in OPERATORS}
+    calls |= {m for m in named & set(defs) if defs[m] is not fdef}     # new instances from calls and operators: what's called on them
     if '__post_init__' in defs:
         calls.add('__post_init__')
     own = T.object_of('object', [])

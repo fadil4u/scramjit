@@ -160,6 +160,28 @@ slower, and `TODO.md`'s instance items are deleted.
    Build the harness: `scramjit.sandbox(source, inputs, limits)` returning results or a typed
    failure; a Gymnasium-shaped environment API; a benchmark against a subprocess/container sandbox
    on throughput and startup. The measurement decides whether this is a product: do it before the API.
+6. **Inference kernels: quantized formats, written once in Python.** Assumes the pieces elsewhere
+   (narrow types below, `parallel=True`, cimo's reductions and #3). The draw: the undecorated
+   function is the reference and the kernel at once, so a new format needs no second implementation
+   in C intrinsics, CUDA or WGSL to check against.
+   - **Types:** `float16` and `bfloat16` arrays (bfloat16 has no numpy dtype: accept a `uint16`
+     array with `scramjit.bf16(x)` as the view, or `ml_dtypes` as a dev extra), computed in float32
+     and stored narrow; packed `int4` read through a helper (`scramjit.nibble(x, i)`), with group
+     scales as a separate array. Needs cimo's half types (its `TODO.md`, Adoption).
+   - **Kernels:** fused dequantize-and-dot for llama.cpp's `Q8_0` and `Q4_0` layouts first (an
+     oracle: their outputs on the same blocks), then one format they lack (ternary or a codebook).
+     Measured per token in `bench/llm.py` against ggml's own kernels on arm64 and x86-64; losses
+     reported as they are.
+   - **Fusion with the branchy part:** logits processing, a grammar mask and sampling (top-p, min-p,
+     speculative acceptance) in one kernel after the last projection, measured against the same
+     steps as separate numpy calls.
+   - **Also needed:** torch tensors in and out zero-copy through `__dlpack__` (Adoption), or
+     researchers can't call it from their models.
+   - **Not the target:** datacenter GPU kernels (tensor cores, shared-memory tiling, async copies);
+     WebGPU barely exposes matrix units, and Triton and CUDA already own that work.
+   - **Decide first:** this contradicts the spec's "Not for: vectorized code" and the rule that public
+     copy doesn't advertise ML use. Settle the positioning in `requirements.md` before any public page.
+
 
 ## Adoption (priority order, below Directions; each is days, and has an oracle: the existing behavior, numpy, or Numba)
 
@@ -282,6 +304,16 @@ after with `bench/`, and write the numbers into the item when done.
      versions, x86 `sqrt` vs arm64); each becomes a cimo issue, fixed or excluded with a reason.
    - **Done when:** the hash file is identical from every CI job and the doc page `determinism.md`
      lists exactly what is covered.
+   - **Parallel float reductions:** with `parallel=True` the combine order is fixed per thread count;
+     a fixed reduction tree independent of thread count (and, under #3, of the GPU's workgroup size)
+     would give batch- and thread-invariant results, the property reproducible LLM inference needs.
+     Measure what the fixed tree costs against a free one.
+
+6. **Torch, JAX and CuPy tensors through `__dlpack__`.** Accept any object with `__dlpack__` (CPU device)
+   as an array argument, zero-copy, in `_dispatch` (`_arg_type`, `_push`), so a `@scram` function can be
+   called from a PyTorch model without `.numpy()`. Tests skipped without `torch` (dev extra): writes
+   through the tensor are seen by torch; strides and dtypes match numpy's path; a GPU tensor is refused
+   with a clear message until the GPU direction lands.
 
 ## From cimo
 

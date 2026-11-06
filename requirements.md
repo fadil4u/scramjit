@@ -237,8 +237,9 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   an array as well refuses), their types from existing objects or from what the constructor is given (a wrong guess is refused
   by the compiler's store checks, never silently converted). A pooled call plan (`_pooled_plan`, `_pool_build`) took a call
   from 200 µs + 5 µs per object to 10 µs + 0.45 µs; object plans walk into objects in attributes (3.3 µs). Static preflight
-  follows operators, new instances from methods, and pools assumed from annotations. Uses by path come from one walk
-  (`_path_uses`), and calls are marshalled by one function with a packer per kind (`_marshal`).
+  follows operators, new instances from methods, and pools assumed from annotations. Every tree analysis reads one `_Facts`
+  (one walk, cached on the tree with its parameter count, as a copy given hidden parameters must be walked again); calls are
+  marshalled by `_marshal` with a packer per kind; `flatten_dicts` resolves objects through one `locate`. Generated C unchanged.
 - **numpy on single numbers (built 2026-11-02).** 25 of 26 functions matched libm bit for bit on 160,024 inputs on arm64 and in Pyodide, so they
   call it; `np.tanh` doesn't, natively. Types are the trap: `np.abs(4)` is int64 natively and int32 in Pyodide, `np.floor(4)` changed in numpy 2.1,
   `np.sqrt(True)` is float16, so those stay Python. `np.minimum(0.0, -0.0)` differs by platform, so the compiler asks the numpy present.

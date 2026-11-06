@@ -201,8 +201,8 @@ def _dict_keys(fdef):
         return {}
     index = {p.arg: i for i, p in enumerate(fdef.args.posonlyargs + fdef.args.args)}
     found = {}
-    for n in ast.walk(fdef):
-        if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name) and n.value.id in index \
+    for n in _facts(fdef).subscripts:
+        if isinstance(n.value, ast.Name) and n.value.id in index \
                 and isinstance(n.slice, ast.Constant) and type(n.slice.value) in (str, int):
             found.setdefault(index[n.value.id], set()).add(n.slice.value)
     return {i: sorted(keys, key=repr) for i, keys in found.items()}
@@ -218,7 +218,8 @@ def _attrs_used(fdef):
 def _made_locals(fdef, classes):
     """{name: class's name} for v = C(...) statements, C one of the names given."""
     out = {}
-    for n in ast.walk(fdef):
+    facts = _facts(fdef)
+    for n in facts.assigns + facts.returns:
         if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call) \
                 and isinstance(n.value.func, ast.Name) and n.value.func.id in classes:
             out[n.targets[0].id] = n.value.func.id
@@ -301,8 +302,8 @@ def _local_classes(f, owners):
     known, out = dict(owners or {}), {}
     for _ in range(8):
         grew = False
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and n.targets[0].id not in out:
+        for n in _facts(tree).assigns:
+            if len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and n.targets[0].id not in out:
                 cls = _made_by(n.value, g, known)
                 if cls is not None:
                     out[n.targets[0].id] = known[n.targets[0].id] = cls
@@ -344,8 +345,9 @@ def _class_of(e, g, known):
 
 def _unnamed_uses(tree, g, known, cls):
     """(attribute, 'load' or 'call') used directly on a new instance of cls that has no name: (a - b).norm(), (a + b).x."""
-    called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
-    for n in ast.walk(tree):
+    facts = _facts(tree)
+    called = facts.called
+    for n in facts.attributes + facts.operators:
         if isinstance(n, ast.Attribute) and not isinstance(n.value, ast.Name) and _made_by(n.value, g, known) is cls:
             yield n.attr, 'call' if id(n) in called else 'load'
         elif isinstance(n, (ast.BinOp, ast.UnaryOp)) and type(n.op) in OPERATORS:
@@ -360,7 +362,8 @@ def _callees_of(f, known):
     tree = f._ctree or f._tree
     g = f._fn.__globals__
     out = []
-    for n in ast.walk(tree):
+    facts = _facts(tree)
+    for n in facts.calls + facts.operators:
         w, me = None, None
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and type(g.get(n.func.id)) is Function:
             out.append((g[n.func.id], {}))
@@ -392,18 +395,20 @@ def _made_uses(f, cls, owners, seen=None):
     known = dict(owners or {})
     known.update(mine)
     local = {v for v, c in mine.items() if c is cls}
-    handed = any(isinstance(n, ast.Return) and n.value is not None and _made_by(n.value, g, known) is cls
-                 or isinstance(n, (ast.Call, ast.BinOp, ast.UnaryOp)) and _made_by(n, g, known) is cls for n in ast.walk(tree))
+    facts = _facts(tree)
+    handed = any(n.value is not None and _made_by(n.value, g, known) is cls for n in facts.returns) \
+        or any(_made_by(n, g, known) is cls for n in facts.calls + facts.operators)
     uses = None
     if local or handed:
         uses = (set(), set(), set())
-        for v, attr, how in _attribute_uses(tree):
-            if v in local:
-                _add_use(uses, attr, how)
+        for v in local:
+            u = facts.first_uses(v)
+            for k in range(3):
+                uses[k].update(u[k])
         for attr, how in _unnamed_uses(tree, g, known, cls):
             _add_use(uses, attr, how)
-        for n in ast.walk(tree):                 # passed on: what the callee makes of it
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+        for n in facts.calls:                    # passed on: what the callee makes of it
+            if isinstance(n.func, ast.Name):
                 h = g.get(n.func.id)
                 for pos, a in enumerate(n.args):
                     if isinstance(a, ast.Name) and a.id in local and type(h) is Function and h._tree is not None:
@@ -492,8 +497,9 @@ def _returned(fdef):
         return set()
     index = {p.arg: i for i, p in enumerate(fdef.args.posonlyargs + fdef.args.args)}
     index.update({q: index[p] for q, p in _object_aliases(fdef).items()})
-    out = {index[n.value.id] for n in ast.walk(fdef) if isinstance(n, ast.Return) and isinstance(n.value, ast.Name) and n.value.id in index}
-    return out | {index[n.args[0].id] for n in ast.walk(fdef) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)       # isinstance(p, C)
+    facts = _facts(fdef)
+    out = {index[n.value.id] for n in facts.returns if isinstance(n.value, ast.Name) and n.value.id in index}
+    return out | {index[n.args[0].id] for n in facts.calls if isinstance(n.func, ast.Name)       # isinstance(p, C)
                   and n.func.id == 'isinstance' and n.args and isinstance(n.args[0], ast.Name) and n.args[0].id in index}
 
 
@@ -506,18 +512,7 @@ def _element_nested(fdef):
 
 def _element_alias(fdef, index):
     """{name: list parameter} for names bound to an element: for p in ps, for i, p in enumerate(ps), p = ps[i]."""
-    alias = {}
-    for n in ast.walk(fdef):
-        target, it = (n.target, n.iter) if isinstance(n, (ast.For, ast.comprehension)) else (None, None)
-        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == 'enumerate' and it.args and isinstance(target, ast.Tuple) \
-                and len(target.elts) == 2:
-            it, target = it.args[0], target.elts[1]
-        if isinstance(target, ast.Name) and isinstance(it, ast.Name) and it.id in index:
-            alias[target.id] = it.id
-        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Subscript) \
-                and isinstance(n.value.value, ast.Name) and n.value.value.id in index:
-            alias[n.targets[0].id] = n.value.value.id
-    return alias
+    return _facts(fdef).element_alias(index)
 
 
 def _element_attrs(fdef):
@@ -528,82 +523,245 @@ def _element_attrs(fdef):
 
 
 def _path_uses(fdef):
-    """Every parameter's use tree, from one walk of the function: ({index: tree} for the parameter itself, through q = p at
-    the top; {index: tree} for its elements, through for p in ps, enumerate, p = ps[i] and ps[i]). A tree is [attributes
-    used, assigned, methods called, {attribute: tree}], by path: p.pos.x is x used in pos's tree. a + b calls a.__add__.
-    Not p.__a: in a class that means another name, which the source doesn't say."""
+    """Every parameter's use tree: ({index: tree} for the parameter itself, through q = p at the top; {index: tree} for its
+    elements, through for p in ps, enumerate, p = ps[i] and ps[i]; {index: [(target, position[, path])]} for what it, an
+    element of it or an object in its attribute is given to). Read from _facts."""
     if fdef is None:
         return {}, {}, {}
-    params = fdef.args.posonlyargs + fdef.args.args
-    cached = getattr(fdef, '_sj_paths', None)
-    if cached is not None and cached[0] == len(params):
-        return cached[1]
-    plain = {p.arg: i for i, p in enumerate(params)}
-    index = dict(plain)
-    index.update({q: index[p] for q, p in _object_aliases(fdef).items()})
-    alias = _element_alias(fdef, plain)
-    called = {id(n.func) for n in ast.walk(fdef) if isinstance(n, ast.Call)}
-    direct, elems, passes = {}, {}, {}
-    given_alias = _element_alias(fdef, index)
+    return _facts(fdef).params
 
-    def private(a):
-        return a.startswith('__') and not a.endswith('__')
 
-    def passed(target, given):                   # what a parameter, an element or an object in an attribute is given to
-        for pos, a in enumerate(given):
-            if isinstance(a, ast.Subscript) and isinstance(a.value, ast.Name) and a.value.id in index:
-                a = a.value                       # ps[i]: an element
-            if isinstance(a, ast.Name) and (a.id in index or a.id in given_alias):
-                passes.setdefault(index[given_alias.get(a.id, a.id)], []).append((target, pos))
-            elif isinstance(a, ast.Attribute):
-                base, path = _chain(a)
-                if base in index or base in given_alias:
-                    passes.setdefault(index[given_alias.get(base, base)], []).append((target, pos, tuple(path)))
-    for n in ast.walk(fdef):
-        if isinstance(n, ast.BinOp) and type(n.op) in OPERATORS:      # a + b passes b to a.__add__
-            x = n.left
-            passed(('m', x.id, OPERATORS[type(n.op)]) if isinstance(x, ast.Name) else ('e', x, OPERATORS[type(n.op)]), [n.right])
+class _Facts:
+    """What one walk of a function finds, for every analysis that asks about its names: each name's use tree by path
+    (names; subs for ps[i]), the operators applied to it (ops), what it's given to (given, subs_given), and the nodes of each
+    kind those analyses look at (calls, operators, returns, assigns, compares, loops), with how often each name is stored
+    and which are stored inside a loop or an if (stores, looped)."""
+
+    def __init__(self, fdef):
+        self.fdef = fdef
+        self.names, self.subs, self.ops = {}, {}, {}
+        self.given, self.subs_given = {}, {}
+        self.calls, self.operators, self.returns, self.assigns, self.compares, self.loops, self.attributes = [], [], [], [], [], [], []
+        self.stores, self.looped = {}, set()
+        self.called, self.subscripts, self.seen = set(), [], set()
+        self._walk(fdef.body, False)
+        self.params = self._params()
+        self.ref_candidates = self._refs()
+
+    def _walk(self, nodes, inside):
+        """One pass, keeping whether each node is inside a loop's or an if's body."""
+        todo = [(n, inside) for n in reversed(nodes)]
+        while todo:
+            n, inside = todo.pop()
+            if isinstance(n, (ast.For, ast.While, ast.If)):
+                if isinstance(n, ast.For):
+                    self.loops.append(n)
+                head = [n.test] if not isinstance(n, ast.For) else [n.target, n.iter]
+                todo += [(x, True) for x in reversed(n.body + n.orelse)] + [(x, inside) for x in reversed(head)]
+                continue
+            self._see(n, inside)
+            todo += [(x, inside) for x in reversed(list(ast.iter_child_nodes(n)))]
+
+    def _see(self, n, inside):
+        if isinstance(n, ast.Name):
+            self.seen.add(n.id)
+        if isinstance(n, ast.Subscript):
+            self.subscripts.append(n)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            self.stores[n.id] = self.stores.get(n.id, 0) + 1
+            if inside:
+                self.looped.add(n.id)
         elif isinstance(n, ast.Call):
+            self.calls.append(n)
+            self.called.add(id(n.func))
             f = n.func
             target = ('f', f.id) if isinstance(f, ast.Name) else ('m', f.value.id, f.attr) \
                 if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) else ('e', f.value, f.attr) \
                 if isinstance(f, ast.Attribute) else None   # (a - b).dot(c): a method of a new instance, its class found later
             if target is not None:
-                passed(target, n.args)
-        if isinstance(n, (ast.BinOp, ast.UnaryOp)) and type(n.op) in OPERATORS:
+                self._given(target, n.args)
+        elif isinstance(n, (ast.BinOp, ast.UnaryOp)) and type(n.op) in OPERATORS:
+            self.operators.append(n)
             x = n.left if isinstance(n, ast.BinOp) else n.operand
-            if isinstance(x, ast.Name) and x.id in index:
-                _add_use(direct.setdefault(index[x.id], [set(), set(), set(), {}]), OPERATORS[type(n.op)], 'call')
-            continue
-        if not isinstance(n, ast.Attribute):
-            continue
-        path, e = [], n
-        while isinstance(e, ast.Attribute):
-            path.append(e.attr)
-            e = e.value
-        path.reverse()
-        if isinstance(e, ast.Name) and e.id in index:
-            root = direct.setdefault(index[e.id], [set(), set(), set(), {}])
-        elif isinstance(e, ast.Name) and e.id in alias:
-            root = elems.setdefault(plain[alias[e.id]], [set(), set(), set(), {}])
-        elif isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in plain:
-            root = elems.setdefault(plain[e.value.id], [set(), set(), set(), {}])
-        else:
-            continue
-        how = 'call' if id(n) in called else 'load' if isinstance(n.ctx, ast.Load) else 'store'
-        if len(path) == 1:
-            if not private(path[0]):
-                _add_use(root, path[0], how)
-            continue
-        if any(private(a) for a in path):
-            continue
-        node = root[3]
-        for a in path[:-2]:
-            node = node.setdefault(a, [set(), set(), set(), {}])[3]
-        _add_use(node.setdefault(path[-2], [set(), set(), set(), {}]), path[-1], how)
-    out = (direct, elems, passes)
-    fdef._sj_paths = (len(params), out)
-    return out
+            if isinstance(x, ast.Name):
+                self.ops.setdefault(x.id, set()).add(OPERATORS[type(n.op)])
+            if isinstance(n, ast.BinOp):     # a + b gives b to a.__add__
+                self._given(('m', x.id, OPERATORS[type(n.op)]) if isinstance(x, ast.Name) else ('e', x, OPERATORS[type(n.op)]), [n.right])
+        elif isinstance(n, ast.Return):
+            self.returns.append(n)
+        elif isinstance(n, ast.Assign):
+            self.assigns.append(n)
+        elif isinstance(n, ast.Compare):
+            self.compares.append(n)
+        elif isinstance(n, ast.comprehension):
+            self.loops.append(n)
+        elif isinstance(n, ast.Attribute):
+            self.attributes.append(n)
+
+    def _given(self, target, args):
+        for pos, a in enumerate(args):
+            if isinstance(a, ast.Subscript) and isinstance(a.value, ast.Name):
+                self.subs_given.setdefault(a.value.id, []).append((target, pos))
+            elif isinstance(a, ast.Name):
+                self.given.setdefault(a.id, []).append((target, pos))
+            elif isinstance(a, ast.Attribute):
+                base, path = _chain(a)
+                if base is not None:
+                    self.given.setdefault(base, []).append((target, pos, tuple(path)))
+
+    def uses(self):
+        """Each name's use tree (and each list's, through ps[i]), [used, assigned, called, {attribute: tree}] by path. Not
+        p.__a: in a class that means another name, which the source doesn't say."""
+        if getattr(self, '_trees', None) is not None:
+            return self._trees
+        def private(a):
+            return a.startswith('__') and not a.endswith('__')
+        names, subs = {}, {}
+        for n in self.attributes:
+            path, e = [], n
+            while isinstance(e, ast.Attribute):
+                path.append(e.attr)
+                e = e.value
+            path.reverse()
+            if isinstance(e, ast.Name):
+                root = names.setdefault(e.id, [set(), set(), set(), {}])
+            elif isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name):
+                root = subs.setdefault(e.value.id, [set(), set(), set(), {}])
+            else:
+                continue
+            how = 'call' if id(n) in self.called else 'load' if isinstance(n.ctx, ast.Load) else 'store'
+            if len(path) == 1:
+                if not private(path[0]):
+                    _add_use(root, path[0], how)
+                continue
+            if any(private(a) for a in path):
+                continue
+            node = root[3]
+            for a in path[:-2]:
+                node = node.setdefault(a, [set(), set(), set(), {}])[3]
+            _add_use(node.setdefault(path[-2], [set(), set(), set(), {}]), path[-1], how)
+        self._trees = (names, subs)
+        return self._trees
+
+    def first_uses(self, name):
+        """(attributes used, assigned, methods called) of a name, operators as the methods they call."""
+        names, _ = self.uses()
+        r = names.get(name)
+        return (set(r[0]) if r else set(), set(r[1]) if r else set(), (set(r[2]) if r else set()) | self.ops.get(name, set()))
+
+    def element_alias(self, index):
+        """{name: list parameter} for names bound to an element: for p in ps, for i, p in enumerate(ps), p = ps[i]."""
+        alias = {}
+        for n in self.loops:
+            target, it = n.target, n.iter
+            if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == 'enumerate' and it.args \
+                    and isinstance(target, ast.Tuple) and len(target.elts) == 2:
+                it, target = it.args[0], target.elts[1]
+            if isinstance(target, ast.Name) and isinstance(it, ast.Name) and it.id in index:
+                alias[target.id] = it.id
+        for n in self.assigns:
+            if len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Subscript) \
+                    and isinstance(n.value.value, ast.Name) and n.value.value.id in index:
+                alias[n.targets[0].id] = n.value.value.id
+        return alias
+
+    def _params(self):
+        fdef = self.fdef
+        plain = {p.arg: i for i, p in enumerate(fdef.args.posonlyargs + fdef.args.args)}
+        index = dict(plain)
+        index.update({q: index[p] for q, p in _object_aliases(fdef).items()})
+        alias = self.element_alias(plain)
+        given_alias = self.element_alias(index)
+        names, subs = self.uses()
+        direct, elems, passes = {}, {}, {}
+        for name, tree in names.items():
+            if name in index:
+                _node_merge(direct.setdefault(index[name], [set(), set(), set(), {}]), tree)
+            elif name in alias:
+                _node_merge(elems.setdefault(plain[alias[name]], [set(), set(), set(), {}]), tree)
+        for name, tree in subs.items():
+            if name in plain:
+                _node_merge(elems.setdefault(plain[name], [set(), set(), set(), {}]), tree)
+        for name, ops in self.ops.items():
+            if name in index:
+                direct.setdefault(index[name], [set(), set(), set(), {}])[2].update(ops)
+        for name, found in self.given.items():
+            if name in index or name in given_alias:
+                passes.setdefault(index[given_alias.get(name, name)], []).extend(found)
+        for name, found in self.subs_given.items():
+            if name in index:
+                passes.setdefault(index[name], []).extend(found)
+        return direct, elems, passes
+
+    def _refs(self):
+        """(attributes, names) that may hold references chosen by data: compared with None, given None or an object, or
+        read into a name that's rebound (n = n.next). The values at the call decide which really are."""
+        params = {p.arg for p in self.fdef.args.posonlyargs + self.fdef.args.args}
+
+        def none(e):
+            return isinstance(e, ast.Constant) and e.value is None
+
+        def parts(e):                            # what a value may be: both sides of a if c else b
+            return parts(e.body) + parts(e.orelse) if isinstance(e, ast.IfExp) else [e]
+        attrs, names = set(), set()
+        for n in self.compares:
+            sides = [n.left] + n.comparators
+            for k, op in enumerate(n.ops):
+                if isinstance(op, (ast.Is, ast.IsNot)):
+                    for x in (sides[k], sides[k + 1]):
+                        if isinstance(x, ast.Attribute):
+                            attrs.add(x.attr)
+                        elif isinstance(x, ast.Name):
+                            names.add(x.id)
+                        elif isinstance(x, ast.Subscript) and isinstance(x.value, ast.Name):
+                            names.add(x.value.id)    # heads[i] is None: a list of references
+        rebound = lambda t: self.stores.get(t, 0) > 1 or t in self.looped or t in params
+        for n in self.assigns:
+            if len(n.targets) != 1:
+                continue
+            t, v = n.targets[0], n.value
+            vs = parts(v)
+            if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and any(isinstance(x, ast.Attribute) or none(x) for x in vs) \
+                    and all(isinstance(x, (ast.Name, ast.Attribute)) or none(x) for x in vs):
+                names.add(t.value.id)                # heads[i] = heads[i].next
+                attrs.update(x.attr for x in vs if isinstance(x, ast.Attribute))
+            if isinstance(t, ast.Attribute) and all(isinstance(x, (ast.Name, ast.Attribute)) or none(x) for x in vs):
+                attrs.add(t.attr)
+            elif isinstance(t, ast.Name) and all(none(x) for x in vs):
+                names.add(t.id)
+            elif isinstance(t, ast.Name) and all(isinstance(x, ast.Attribute) or none(x) for x in vs) and rebound(t.id):
+                attrs.update(x.attr for x in vs if isinstance(x, ast.Attribute))
+                names.add(t.id)
+            elif isinstance(t, ast.Name) and isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id[:1].isupper() and \
+                    rebound(t.id) and any(isinstance(a, ast.Name) and a.id == t.id for a in v.args):
+                names.add(t.id)                      # head = Node(x, head): a new instance holding the last one
+        for _ in range(8):
+            grew = False
+            for n in self.assigns:
+                if len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+                    t, v = n.targets[0].id, n.value
+                    if isinstance(v, ast.Name) and (v.id in names) != (t in names):    # cur = head: both name one
+                        names |= {t, v.id}
+                        grew = True
+                    for x in parts(v):
+                        if t in names and isinstance(x, ast.Attribute) and x.attr not in attrs:
+                            attrs.add(x.attr)
+                            grew = True
+            if not grew:
+                break
+        return attrs, names
+
+
+def _facts(fdef):
+    """The facts of a function's tree, found once: kept on the tree with its parameter count, since a copy given more
+    parameters (the globals it reads) is walked again."""
+    count = len(fdef.args.posonlyargs + fdef.args.args)
+    cached = getattr(fdef, '_sj_facts', None)
+    if cached is not None and cached[0] == count:
+        return cached[1]
+    f = _Facts(fdef)
+    fdef._sj_facts = (count, f)
+    return f
 
 
 def _objlist_type(xs, attrs, seen, dicts=False, nested=None):
@@ -746,7 +904,7 @@ def _unused(fdef):
     """The parameters the function never names: anything can be passed there."""
     if fdef is None:
         return set()
-    named = {n.id for s in fdef.body for n in ast.walk(s) if isinstance(n, ast.Name)}
+    named = _facts(fdef).seen
     return {i for i, p in enumerate(fdef.args.posonlyargs + fdef.args.args) if p.arg not in named}
 
 
@@ -759,16 +917,8 @@ def _owner_classes(f, args):
     if made:                                     # v = C(...): v's class is the global C
         out.update({v: f._fn.__globals__[c] for v, c in _made_locals(f._ctree or f._tree, set(made)).items() if c in f._fn.__globals__})
     lists = {n: type(x[0]) for n, x in zip(names, args) if type(x) is list and x}
-    for n in ast.walk(f._tree):
-        target, it = (n.target, n.iter) if isinstance(n, (ast.For, ast.comprehension)) else (None, None)
-        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == 'enumerate' and it.args and isinstance(target, ast.Tuple) \
-                and len(target.elts) == 2:
-            it, target = it.args[0], target.elts[1]
-        if isinstance(target, ast.Name) and isinstance(it, ast.Name) and it.id in lists:
-            out[target.id] = lists[it.id]
-        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Subscript) \
-                and isinstance(n.value.value, ast.Name) and n.value.value.id in lists:
-            out[n.targets[0].id] = lists[n.value.value.id]
+    for v, ps in _facts(f._tree).element_alias(lists).items():     # for p in ps, p = ps[i]: p is of the elements' class
+        out[v] = lists[ps]
     for v, c in _local_classes(f, out).items():         # v = a + b, v = a.add(b): new instances, of the class the call returns
         out.setdefault(v, c)
     return out
@@ -833,14 +983,13 @@ def _add_use(entry, attr, how):
 
 def _attribute_uses(fdef):
     """(name, attribute, 'load', 'store' or 'call') for each name.attribute; name + x calls name.__add__, if it's an instance."""
-    called = {id(n.func) for n in ast.walk(fdef) if isinstance(n, ast.Call)}
-    for n in ast.walk(fdef):
-        if isinstance(n, ast.BinOp) and isinstance(n.left, ast.Name) and type(n.op) in OPERATORS:
-            yield n.left.id, OPERATORS[type(n.op)], 'call'
-        elif isinstance(n, ast.UnaryOp) and isinstance(n.operand, ast.Name) and type(n.op) in OPERATORS:
-            yield n.operand.id, OPERATORS[type(n.op)], 'call'
-        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and not (n.attr.startswith('__') and not n.attr.endswith('__')):
-            yield n.value.id, n.attr, 'call' if id(n) in called else 'load' if isinstance(n.ctx, ast.Load) else 'store'
+    facts = _facts(fdef)
+    for name in set(facts.uses()[0]) | set(facts.ops):
+        used, stores, calls = facts.first_uses(name)
+        for a in used:
+            yield name, a, 'store' if a in stores else 'load'
+        for a in calls:
+            yield name, a, 'call'
 
 
 _methods = weakref.WeakKeyDictionary()   # a plain function on a class -> the Function that compiles it as a callee
@@ -990,13 +1139,16 @@ def _methods_called(x, calls, cls=None):
 
 def _construction_uses(f):
     """{parameter index: use tree} for parameters given to v = C(...), C a class at module level whose __init__ only stores:
-    what f does through the attribute each becomes (v.pos.x is the parameter's x)."""
+    what f does through the attribute each becomes (v.pos.x is the parameter's x), and what v's methods and the functions v
+    is given to do with it."""
     tree = f._ctree or f._tree
+    facts = _facts(tree)
     index = {p.arg: i for i, p in enumerate(tree.args.posonlyargs + tree.args.args)}
     g = f._fn.__globals__
+    trees = facts.uses()[0]
     out = {}
-    for n in ast.walk(tree):
-        if not (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call)
+    for n in facts.assigns:
+        if not (len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call)
                 and isinstance(n.value.func, ast.Name) and isinstance(g.get(n.value.func.id), type)):
             continue
         given = {}
@@ -1008,17 +1160,18 @@ def _construction_uses(f):
             if isinstance(a, ast.Name) and a.id in index:
                 given[p] = index[a.id]
         attrs = {a: given[src[1]] for a, src in recipe['assigns'] if src[0] == 'param' and src[1] in given}
+        if not attrs:
+            continue
         v = n.targets[0].id
         cls = g[n.value.func.id]
-        for c in ast.walk(tree):                 # through v's methods, and what v is given to: what they do with those attributes
-            w, at = None, None
-            if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and isinstance(c.func.value, ast.Name) and c.func.value.id == v:
-                w, at = _in_class(cls, c.func.attr), 0
-                w = _method(w) if type(w) in (Function, types.FunctionType) else None
-            elif isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and type(g.get(c.func.id)) is Function:
-                at = next((k for k, x in enumerate(c.args) if isinstance(x, ast.Name) and x.id == v), None)
-                w = g[c.func.id] if at is not None else None
-            if w is None or w._tree is None:
+        mine = trees.get(v)
+        for a, sub in (mine[3] if mine else {}).items():      # v.pos.x: the parameter's x
+            if a in attrs:
+                _node_merge(out.setdefault(attrs[a], [set(), set(), set(), {}]), sub)
+        targets = [(_method(w), 0) for w in (_in_class(cls, m) for m in (mine[2] if mine else ())) if type(w) in (Function, types.FunctionType)]
+        targets += [(g[t[1]], pos) for t, pos, *path in facts.given.get(v, ()) if t[0] == 'f' and not path and type(g.get(t[1])) is Function]
+        for w, at in targets:                    # through v's methods, and what v is given to
+            if w._tree is None:
                 continue
             more = {}
             _param_uses(w, at, cls, w._attrs.get(at, ((), set(), set())), None, (), more)
@@ -1026,17 +1179,6 @@ def _construction_uses(f):
             for a, sub in more.items():
                 if a in attrs:
                     _node_merge(out.setdefault(attrs[a], [set(), set(), set(), {}]), [sub[0], sub[1], sub[2], sub[3]])
-        called = {id(c.func) for c in ast.walk(tree) if isinstance(c, ast.Call)}
-        for m in ast.walk(tree):
-            if not isinstance(m, ast.Attribute):
-                continue
-            base, path = _chain(m)
-            if base != v or not path or len(path) < 2 or path[0] not in attrs:
-                continue
-            node = out.setdefault(attrs[path[0]], [set(), set(), set(), {}])
-            for a in path[1:-1]:
-                node = node[3].setdefault(a, [set(), set(), set(), {}])
-            _add_use(node, path[-1], 'call' if id(m) in called else 'load' if isinstance(m.ctx, ast.Load) else 'store')
     return out
 
 
@@ -1044,70 +1186,11 @@ _POOLDICT = {'sjpool': object()}     # the pool argument's place among the globa
 
 
 def _ref_candidates(fdef):
-    """(attributes, names) that may hold references chosen by data, from the tree alone: compared with None, given None
-    or an object, or read into a name that's rebound (n = n.next). The values at the call decide which really are."""
+    """(attributes, names) that may hold references chosen by data, from the tree alone (see _Facts._refs)."""
     if fdef is None:
         return set(), set()
-    params = {p.arg for p in fdef.args.posonlyargs + fdef.args.args}
-    stores, looped = {}, set()
-    for n in ast.walk(fdef):
-        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
-            stores[n.id] = stores.get(n.id, 0) + 1
-        elif isinstance(n, (ast.For, ast.While, ast.If)):
-            looped.update(m.id for b in n.body + n.orelse for m in ast.walk(b) if isinstance(m, ast.Name) and isinstance(m.ctx, ast.Store))
-
-    def none(e):
-        return isinstance(e, ast.Constant) and e.value is None
-
-    def parts(e):                                # what a value may be: both sides of a if c else b
-        return parts(e.body) + parts(e.orelse) if isinstance(e, ast.IfExp) else [e]
-    attrs, names = set(), set()
-    for n in ast.walk(fdef):
-        if isinstance(n, ast.Compare):
-            sides = [n.left] + n.comparators
-            for k, op in enumerate(n.ops):
-                if isinstance(op, (ast.Is, ast.IsNot)):
-                    for x, y in ((sides[k], sides[k + 1]), (sides[k + 1], sides[k])):
-                        if none(y) or isinstance(op, ast.Is) or isinstance(op, ast.IsNot):
-                            if isinstance(x, ast.Attribute):
-                                attrs.add(x.attr)
-                            elif isinstance(x, ast.Name):
-                                names.add(x.id)
-                            elif isinstance(x, ast.Subscript) and isinstance(x.value, ast.Name):
-                                names.add(x.value.id)    # heads[i] is None: a list of references
-        elif isinstance(n, ast.Assign) and len(n.targets) == 1:
-            t, v = n.targets[0], n.value
-            vs = parts(v)
-            if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and any(isinstance(x, ast.Attribute) or none(x) for x in vs) \
-                    and all(isinstance(x, (ast.Name, ast.Attribute)) or none(x) for x in vs):
-                names.add(t.value.id)                # heads[i] = heads[i].next
-                attrs.update(x.attr for x in vs if isinstance(x, ast.Attribute))
-            if isinstance(t, ast.Attribute) and all(isinstance(x, (ast.Name, ast.Attribute)) or none(x) for x in vs):
-                attrs.add(t.attr)
-            elif isinstance(t, ast.Name) and all(none(x) for x in vs):
-                names.add(t.id)
-            elif isinstance(t, ast.Name) and all(isinstance(x, ast.Attribute) or none(x) for x in vs) and \
-                    (stores.get(t.id, 0) > 1 or t.id in looped or t.id in params):
-                attrs.update(x.attr for x in vs if isinstance(x, ast.Attribute))
-                names.add(t.id)
-            elif isinstance(t, ast.Name) and isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id[:1].isupper() and \
-                    (stores.get(t.id, 0) > 1 or t.id in looped or t.id in params) and any(isinstance(a, ast.Name) and a.id == t.id for a in v.args):
-                names.add(t.id)                  # head = Node(x, head): a new instance holding the last one
-    for _ in range(8):
-        grew = False
-        for n in ast.walk(fdef):
-            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
-                t, v = n.targets[0].id, n.value
-                if isinstance(v, ast.Name) and (v.id in names) != (t in names):    # cur = head: both name one
-                    names |= {t, v.id}
-                    grew = True
-                for x in parts(v):
-                    if t in names and isinstance(x, ast.Attribute) and x.attr not in attrs:
-                        attrs.add(x.attr)
-                        grew = True
-        if not grew:
-            break
-    return attrs, names
+    attrs, names = _facts(fdef).ref_candidates
+    return set(attrs), set(names)
 
 
 def _plain_get(x, a):
@@ -1134,15 +1217,16 @@ def _pool_plan(f, args):
     attrs, names = _ref_candidates(tree)
     attrs = set(attrs)
     g = f._fn.__globals__
-    for n in ast.walk(tree):                     # what the classes it makes are given may be a reference too
-        c = g.get(n.func.id) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) else None
+    facts = _facts(tree)
+    for n in facts.calls:                        # what the classes it makes are given may be a reference too
+        c = g.get(n.func.id) if isinstance(n.func, ast.Name) else None
         if isinstance(c, type) and not issubclass(c, (enum.Enum, BaseException)) and (attrs or names):
             recipe = _init_recipe(c)
             if type(recipe) is dict:
                 attrs |= {a for a, _ in recipe['assigns']}
     names = set(names)
-    for n in ast.walk(tree):                     # given where a compiled callee takes a reference: a reference here too
-        h = g.get(n.func.id) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) else None
+    for n in facts.calls:                        # given where a compiled callee takes a reference: a reference here too
+        h = g.get(n.func.id) if isinstance(n.func, ast.Name) else None
         if type(h) is Function and h._tree is not None:
             theirs = _ref_candidates(h._tree)[1]
             ps = [q.arg for q in h._tree.args.posonlyargs + h._tree.args.args]
@@ -1187,7 +1271,8 @@ def _guess_fields(f, tree, args, cls, refnames):
         return recipe
     params = [p.arg for p in tree.args.posonlyargs + tree.args.args]
     loops = {}                                   # for x in xs, xs an argument: x's type is its elements'
-    for n in ast.walk(tree):
+    facts = _facts(tree)
+    for n in facts.loops:
         if isinstance(n, ast.For) and isinstance(n.target, ast.Name) and isinstance(n.iter, ast.Name) and n.iter.id in params:
             xs = args[params.index(n.iter.id)]
             kinds = set(map(type, xs)) if type(xs) is list else set()
@@ -1208,8 +1293,8 @@ def _guess_fields(f, tree, args, cls, refnames):
             return {'float': float, 'int': int, 'bool': bool}[e.func.id]
         return None
     found = {}
-    for n in ast.walk(tree):
-        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and f._fn.__globals__.get(n.func.id) is cls):
+    for n in facts.calls:
+        if not (isinstance(n.func, ast.Name) and f._fn.__globals__.get(n.func.id) is cls):
             continue
         positional = [p for p, _, kw in recipe['params'] if not kw]
         given = dict(zip(positional, n.args))
@@ -1319,7 +1404,8 @@ def _pool_build(t, args, room=None):
 def _ref_lists(tree, names):
     """Names of lists whose elements go into reference names: for n in heads, n = heads[i], heads[i] = n."""
     out = set(names)                             # heads[i] is None, heads[i] = ...: the list itself is a candidate
-    for n in ast.walk(tree):
+    facts = _facts(tree)
+    for n in facts.loops + facts.assigns:
         if isinstance(n, (ast.For, ast.comprehension)) and isinstance(n.target, ast.Name) and n.target.id in names and isinstance(n.iter, ast.Name):
             out.add(n.iter.id)
         elif isinstance(n, ast.Assign) and len(n.targets) == 1:
@@ -1336,9 +1422,7 @@ def _callee_ref_uses(f, tree, refnames, classes):
     """(reference candidates, attributes used) of the methods called on references and the functions given them."""
     g = f._fn.__globals__
     attrs, used = set(), set()
-    for n in ast.walk(tree):
-        if not isinstance(n, ast.Call):
-            continue
+    for n in _facts(tree).calls:
         targets = []
         if isinstance(n.func, ast.Attribute) and isinstance(n.func.value, (ast.Name, ast.Attribute)):
             for cls in classes:
@@ -1354,8 +1438,8 @@ def _callee_ref_uses(f, tree, refnames, classes):
             ps = [p.arg for p in w._tree.args.posonlyargs + w._tree.args.args]
             attrs |= ca
             mine = cn | ({ps[at]} if at < len(ps) else set())
-            for m in ast.walk(w._tree):
-                if isinstance(m, ast.Attribute) and isinstance(m.value, ast.Name) and m.value.id in mine:
+            for m in _facts(w._tree).attributes:
+                if isinstance(m.value, ast.Name) and m.value.id in mine:
                     used.add(m.attr)
                 elif isinstance(m, ast.Attribute) and isinstance(m.value, ast.Attribute):
                     used.add(m.attr)
@@ -1413,8 +1497,9 @@ def _pool_types(f, tree, args, pooled, attrs, refnames, roots, fixed, objs, extr
         specs.append((cls, mine, refs))
     refattrs = {a for _, _, refs in specs for a, _ in refs} | set(fixed)
     used = set()
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Attribute) and n.attr not in refattrs:
+    facts = _facts(tree)
+    for n in facts.attributes:
+        if n.attr not in refattrs:
             v = n.value
             if isinstance(v, ast.Name) and v.id in refnames or isinstance(v, ast.Attribute) and v.attr in refattrs:
                 used.add(n.attr)
@@ -1432,10 +1517,8 @@ def _pool_types(f, tree, args, pooled, attrs, refnames, roots, fixed, objs, extr
         pools.append((cls, numbers, refs))
     made = []                                    # classes the function makes instances of, kept in the pool: every attribute
     g = f._fn.__globals__                        # __init__ assigns is a list, so a new one can be made after the call
-    built = {g[n.func.id] for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and isinstance(g.get(n.func.id), type)
+    built = {g[n.func.id] for n in facts.calls if isinstance(n.func, ast.Name) and isinstance(g.get(n.func.id), type)
              and not issubclass(g[n.func.id], (enum.Enum, BaseException))}
-    if objs or pools:
-        pass
     have_cls = {c for c, _, _ in pools}
     for cls in sorted(built - have_cls, key=lambda c: c.__qualname__):     # none of them yet: types from what it's given
         guessed = _guess_fields(f, tree, args, cls, refnames)
@@ -2404,7 +2487,7 @@ class Function:
         loads = set()
         for st in tree.body:
             loads |= _lift._split(st)[0]
-        called = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        called = {n.func.id for n in _facts(tree).calls if isinstance(n.func, ast.Name)}
         g = self._fn.__globals__
         attrs = {}
         for name, attr, how in _attribute_uses(tree):
@@ -2728,8 +2811,7 @@ class Function:
             node = [set(uses[0]), set(uses[1]), set(uses[2]), {}]
             _node_merge(node, [(), (), (), nested or {}])
             name = (self._ctree or self._tree).args.args[i].arg if i < len((self._ctree or self._tree).args.args) else None
-            if name is not None and any(isinstance(n, ast.Name) and n.id == name and not isinstance(n.ctx, ast.Load)
-                                        for n in ast.walk(self._ctree or self._tree)):
+            if name is not None and name in _facts(self._ctree or self._tree).stores:
                 recipe = _init_recipe(type(x))   # given a new instance: it starts as a copy of all __init__ assigns
                 if type(recipe) is dict:
                     node[0] |= {a for a, _ in recipe['assigns']}

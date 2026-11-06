@@ -841,6 +841,79 @@ def flatten_dicts(fdef, arg_types):
                     ast.copy_location(idx, node)
         return idx
 
+    NOT = object()
+
+    def refclass(e):
+        """The class a reference chosen by data reaches (None: only None seen), or NOT if e isn't one: a name holding one,
+        a reference attribute in a fixed place or reached from one, or a if c else b of them and None."""
+        if pool_made(e):                         # a new instance, kept in the pool
+            return made[e.func.id].cls
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id in funcs and getattr(funcs[e.func.id], '_tree', None) is not None \
+                and pool_type is not None and any(refexpr(a) for a in e.args):
+            w = funcs[e.func.id]                 # a function given references, returning one of them or one reached from them
+            ps = [q.arg for q in w._tree.args.posonlyargs + w._tree.args.args]
+            given = {q: refclass(a) for q, a in zip(ps, e.args) if refexpr(a)}
+            return ref_return_class(w._tree, given, pools_by, NOT)
+        if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in reflists and not isinstance(e.slice, ast.Slice):
+            return reflists[e.value.id]
+        if isinstance(e, ast.Name):
+            return refnames[e.id] if e.id in refnames else NOT
+        if isinstance(e, ast.IfExp):
+            cs = [None if none(x) else refclass(x) for x in (e.body, e.orelse)]
+            if NOT in cs or all(none(x) for x in (e.body, e.orelse)):
+                return NOT
+            known = {c for c in cs if c is not None}
+            if len(known) > 1:
+                raise Unsupported(e, 'a reference to objects of two classes')
+            return known.pop() if known else None
+        if isinstance(e, ast.Attribute):
+            o = owner_of(e.value)
+            if o is not None and (o, e.attr) in ref_fields:
+                return ref_fields[o, e.attr]
+            c = refclass(e.value)
+            if c is NOT:
+                return NOT
+            if c is None:                        # only ever None: reading through it raises, whatever it would reach
+                targets = {sp[2][e.attr] for sp in pools_by.values() if e.attr in sp[2]}
+                return (targets.pop() if len(targets) == 1 else None) if targets else NOT
+            spec = pools_by.get(c)
+            return spec[2][e.attr] if spec is not None and e.attr in spec[2] else NOT
+        return NOT
+
+    def refexpr(e):
+        return refclass(e) is not NOT
+
+    def none(e):
+        return isinstance(e, ast.Constant) and e.value is None
+
+    def locate(e):
+        """Where the attributes of the object e names live, the one question every attribute and method resolves through:
+        ('ref', class, e) in a pool, at e's index checked against None; ('element', owner, index, e) in a list per attribute
+        (owner a list, or an object in its elements' attributes: 'ps.pos'); ('static', owner) in variables (an argument, an
+        object in its attributes, through other names for an object, or an instance made here); None if e names none."""
+        if refexpr(e):
+            return ('ref', refclass(e), e)
+        el = element_of(e)
+        if el is not None:
+            return ('element', el[0], el[1], e)
+        o = owner_of(e)
+        return ('static', o) if o is not None else None
+
+    def field(pl, attr, ctx, node, visit):
+        """The storage of attribute attr of the object pl locates, as an expression; None if it holds no such number."""
+        if pl[0] == 'ref':
+            spec = pools_by.get(pl[1])
+            if spec is None and pl[1] is None:   # only ever None: any pool with the attribute, never read past the check
+                spec = next((sp for sp in pools_by.values() if attr in sp[1] or attr in sp[2]), None)
+            if spec is None or (attr not in spec[1] and attr not in spec[2]):
+                raise Unsupported(node, f'.{attr} of an object a reference reaches: only its numbers and references compile')
+            return ast.copy_location(ast.Subscript(ast.Name(flat[spec[0], attr], ast.Load()), deref(visit(pl[2]), attr, node), ctx), node)
+        if (pl[1], attr) not in flat:
+            return None
+        if pl[0] == 'element':
+            return column(pl[1], attr, visit(pl[2]) if not isinstance(pl[3], ast.Name) else pl[2], ctx, node)
+        return ast.copy_location(ast.Name(flat[pl[1], attr], ctx), node)
+
     def column(ps, key, idx, ctx, node):
         return ast.copy_location(ast.Subscript(ast.Name(flat[ps, key], ast.Load()), pooled(ps, idx, node), ctx), node)
 
@@ -1084,9 +1157,9 @@ def flatten_dicts(fdef, arg_types):
             if isinstance(f, ast.Name) and f.id == 'len' and len(n.args) == 1 and isinstance(n.args[0], ast.Name) and n.args[0].id in lists:
                 return ast.copy_location(ast.Call(f, [ast.Name(first[n.args[0].id], ast.Load())], []), n)
             if isinstance(f, ast.Attribute):
-                el = element_of(f.value)
-                p = owner_of(f.value)
-                owner = el[0] if el else p
+                pl = locate(f.value)              # whose method: an element's, or an object's in variables
+                el = (pl[1], pl[2]) if pl is not None and pl[0] == 'element' else None
+                owner = pl[1] if pl is not None and pl[0] != 'ref' else None
                 if owner is not None and (owner, f.attr) in methods:
                     if el and not isinstance(el[1], (ast.Name, ast.Constant)):
                         raise Unsupported(n, f'a method of {owner}[...] with an index that is an expression: name the element first')
@@ -1200,13 +1273,15 @@ def flatten_dicts(fdef, arg_types):
             return out
 
         def instance(self, a):
-            """(owner, index expression or None) if a names an instance: a parameter, or an element of a list of them."""
-            if owner_of(a) is not None:
-                return owner_of(a), None
-            el = element_of(a)
-            if el and isinstance(a, ast.Subscript) and not isinstance(el[1], (ast.Name, ast.Constant)):
+            """(owner, index expression or None) if a names an instance in variables or a list (locate), else None."""
+            pl = locate(a)
+            if pl is None or pl[0] == 'ref':
+                return None
+            if pl[0] == 'static':
+                return pl[1], None
+            if isinstance(a, ast.Subscript) and not isinstance(pl[2], (ast.Name, ast.Constant)):
                 raise Unsupported(a, f'passes {a.value.id}[...] with an index that is an expression: name the element first')
-            return el
+            return pl[1], pl[2]
 
         def argument(self, a):
             """An argument, and what a call may write through it: an instance goes as all its attributes, which the
@@ -1236,34 +1311,23 @@ def flatten_dicts(fdef, arg_types):
                 if idx is None else [(flat[owner, k], pooled(owner, idx)) for k in sorted(t.writes) if (owner, k) in flat]
 
         def visit_Attribute(self, n):
-            if refexpr(n.value):                 # through a reference: its class's pool's list, at its index
-                c = refclass(n.value)
-                spec = pools_by.get(c)
-                if spec is None and c is None:   # only ever None: any pool with the attribute, never read past the check
-                    spec = next((sp for sp in pools_by.values() if n.attr in sp[1] or n.attr in sp[2]), None)
-                if spec is None or (n.attr not in spec[1] and n.attr not in spec[2]):
-                    raise Unsupported(n, f'.{n.attr} of an object a reference reaches: only its numbers and references compile')
-                idx = deref(self.visit(n.value), n.attr, n)
-                return ast.copy_location(ast.Subscript(ast.Name(flat[spec[0], n.attr], ast.Load()), idx, n.ctx), n)
-            el = element_of(n.value)
-            owner = el[0] if el else owner_of(n.value) or (n.value.id if isinstance(n.value, ast.Name) else None)
+            pl = locate(n.value)
+            if pl is not None and pl[0] == 'ref':
+                return field(pl, n.attr, n.ctx, n, self.visit)
+            owner = pl[1] if pl is not None else n.value.id if isinstance(n.value, ast.Name) else None
             if owner is not None and (owner, n.attr) in methods:
                 raise Unsupported(n, f'{owner}.{n.attr} is a method, and only calling it compiles')
-            if owner is not None and owner_of(n.value) == owner and (owner, n.attr) in flat and not el:
+            got = field(pl, n.attr, n.ctx, n, self.visit) if pl is not None else None
+            if got is not None:
                 if isinstance(n.ctx, ast.Del):
-                    raise Unsupported(n, f'del {owner}.{n.attr}')
-                return ast.copy_location(ast.Name(flat[owner, n.attr], n.ctx), n)
+                    raise Unsupported(n, f'del of {self.shown_owner(owner)}.{n.attr}')
+                return got
             if owner_of(n) is not None and not isinstance(n.ctx, ast.Load):
                 raise Unsupported(n, f'assigns {owner_of(n)}, an object in an attribute')
-            if el and (owner, n.attr) in flat:
-                if isinstance(n.ctx, ast.Del):
-                    raise Unsupported(n, f'del of an attribute of an element of {owner}')
-                return column(owner, n.attr, self.visit(el[1]) if not isinstance(n.value, ast.Name) else el[1], n.ctx, n)
-            if isinstance(n.value, ast.Name) and n.value.id in objects and (n.value.id, n.attr) in flat:
-                if isinstance(n.ctx, ast.Del):
-                    raise Unsupported(n, f'del {n.value.id}.{n.attr}')
-                return ast.copy_location(ast.Name(flat[n.value.id, n.attr], n.ctx), n)
             return self.generic_visit(n)
+
+        def shown_owner(self, owner):
+            return f'an element of {owner}' if owner in lists or owner in inner_lists else owner
 
         def visit_Return(self, n):
             v = n.value
@@ -1333,8 +1397,9 @@ def flatten_dicts(fdef, arg_types):
     funcs = {p.arg: t.elem for p, t in zip(params, arg_types) if t.kind == 'function'}
 
     def instance_owner(e):
-        el = element_of(e)
-        return el[0] if el else owner_of(e)
+        """The owner of the instance e names, in variables or a list (locate), else None."""
+        pl = locate(e)
+        return pl[1] if pl is not None and pl[0] != 'ref' else None
     for q, p in copied.items():                  # starts as the argument's numbers, then is each new instance
         if types_of[p].cls not in by_cls:
             raise Unsupported(tree, f'{p} is given a new instance of a class it can\'t make here')
@@ -1548,50 +1613,7 @@ def flatten_dicts(fdef, arg_types):
     def holds_object(v, keys):
         """Of an instance made here, an attribute among keys that is another name for an object."""
         return next((k for k in keys if f'{v}.{k}' in same), None)
-    NOT = object()
 
-    def refclass(e):
-        """The class a reference chosen by data reaches (None: only None seen), or NOT if e isn't one: a name holding one,
-        a reference attribute in a fixed place or reached from one, or a if c else b of them and None."""
-        if pool_made(e):                         # a new instance, kept in the pool
-            return made[e.func.id].cls
-        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id in funcs and getattr(funcs[e.func.id], '_tree', None) is not None \
-                and pool_type is not None and any(refexpr(a) for a in e.args):
-            w = funcs[e.func.id]                 # a function given references, returning one of them or one reached from them
-            ps = [q.arg for q in w._tree.args.posonlyargs + w._tree.args.args]
-            given = {q: refclass(a) for q, a in zip(ps, e.args) if refexpr(a)}
-            return ref_return_class(w._tree, given, pools_by, NOT)
-        if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in reflists and not isinstance(e.slice, ast.Slice):
-            return reflists[e.value.id]
-        if isinstance(e, ast.Name):
-            return refnames[e.id] if e.id in refnames else NOT
-        if isinstance(e, ast.IfExp):
-            cs = [None if none(x) else refclass(x) for x in (e.body, e.orelse)]
-            if NOT in cs or all(none(x) for x in (e.body, e.orelse)):
-                return NOT
-            known = {c for c in cs if c is not None}
-            if len(known) > 1:
-                raise Unsupported(e, 'a reference to objects of two classes')
-            return known.pop() if known else None
-        if isinstance(e, ast.Attribute):
-            o = owner_of(e.value)
-            if o is not None and (o, e.attr) in ref_fields:
-                return ref_fields[o, e.attr]
-            c = refclass(e.value)
-            if c is NOT:
-                return NOT
-            if c is None:                        # only ever None: reading through it raises, whatever it would reach
-                targets = {sp[2][e.attr] for sp in pools_by.values() if e.attr in sp[2]}
-                return (targets.pop() if len(targets) == 1 else None) if targets else NOT
-            spec = pools_by.get(c)
-            return spec[2][e.attr] if spec is not None and e.attr in spec[2] else NOT
-        return NOT
-
-    def refexpr(e):
-        return refclass(e) is not NOT
-
-    def none(e):
-        return isinstance(e, ast.Constant) and e.value is None
     if pool is not None or refnames:
         for n in ast.walk(tree):                 # for n in heads: n is each reference
             if isinstance(n, (ast.For, ast.comprehension)) and isinstance(n.target, ast.Name) and isinstance(n.iter, ast.Name) \

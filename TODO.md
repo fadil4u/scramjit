@@ -13,10 +13,12 @@ Biggest first. `requirements.md` is the spec; this is the work queue.
 Built 2026-11-05 and 2026-11-06 (see "Object model" in `requirements.md`); tests in `test_alias_pattern.py`, `test_new_instances.py`,
 `test_element_objects.py`, `test_references.py`. Left, smaller than what's done:
 
-1. **The rest of the unification.** Uses by path and what each parameter is given to come from one walk (`_path_uses`), and a
-   call is marshalled by one function with a packer per argument kind (`_marshal`, `_PACKERS`, `_write_back`). Still separate,
-   each asking about classes or data rather than paths: `_construction_uses`, `_made_uses`, `_ref_candidates`; and the compiler's
-   `flatten_dicts` still rewrites each shape in its own branch, which a path table could drive.
+1. **Unification, done (2026-11-06):** every analysis of a function's tree reads one `_Facts`, found in one walk and kept on the
+   tree (use trees by path for every name, what each is given to, the nodes of each kind, stores inside loops); calls are
+   marshalled by `_marshal` with a packer per argument kind; and `flatten_dicts` resolves every attribute and method through one
+   `locate` (variables, a list per attribute at an index, or a pool list at a checked index). What stays per kind is how each
+   argument's storage is laid out, which differs on purpose (a list of distinct objects keeps the layout that vectorizes). The
+   only other walks: `_mangle` (renames) and `_init_recipe` (reads one `__init__`).
 2. **References:** a compiled callee making instances to keep in the caller's pool (it gets no count, so it stays Python), a pool
    when no object and no argument says what a made class's attributes hold. A pooled call costs about 10 µs plus 0.45 µs per
    object reached (`_pool_build`), so a single walk over a list is faster as Python: worth a pool kept between calls, checked by

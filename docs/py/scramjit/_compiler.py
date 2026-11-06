@@ -17,6 +17,7 @@ where Python raises) and the type a value is returned as.
 
 import ast
 import copy
+import types
 import math
 import re
 
@@ -27,7 +28,7 @@ import sys
 
 from ._mathlib import snippets
 from . import _mathlib
-from ._runtime import (ATTRIBUTE_NONE, attribute_number, ARANGE_ERROR, BROADCAST_ERROR, INDEX_ERROR, INTERRUPTED, LINSPACE_ERROR, MAKE_DTYPES, MAKE_ERROR, NO_AXIS, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
+from ._runtime import (ATTRIBUTE_NONE, POOL_FULL, attribute_number, ARANGE_ERROR, BROADCAST_ERROR, INDEX_ERROR, INTERRUPTED, LINSPACE_ERROR, MAKE_DTYPES, MAKE_ERROR, NO_AXIS, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
                        OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION)
 
 BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'round', 'sum', 'any', 'all')
@@ -522,7 +523,7 @@ def flatten_dicts(fdef, arg_types):
     parameter types, and {variable: (argument index, key, how the user wrote it)}."""
     a = fdef.args
     params = a.posonlyargs + a.args
-    if not any(t is not None and t.kind in ('dict', 'object', 'objlist', 'madeclass', 'elemref', 'pool', 'ref', 'nopool') for t in arg_types) \
+    if not any(t is not None and t.kind in ('dict', 'object', 'objlist', 'madeclass', 'elemref', 'pool', 'ref', 'nopool', 'same', 'inlist', 'poolref', 'reflist') for t in arg_types) \
             or len(params) != len(arg_types):
         return fdef, arg_types, {}
     tree = copy.deepcopy(fdef)
@@ -561,24 +562,64 @@ def flatten_dicts(fdef, arg_types):
         tree.body = [Rename().visit(s) for s in tree.body]
         ast.fix_missing_locations(tree)
     pools = {}                                   # a list with repeats -> its index list
+    inlists = {}                                 # an argument that's an element of another -> (that list, its place's name)
     inner_lists = {}                             # 'ps.pos' -> the type of the objects in that attribute of ps's elements
     refs = {}                                    # an element given by reference -> (its own list's name, its index's, its type)
-    pool, pool_numbers, pool_refs, refnames, ref_fields = None, set(), set(), set(), set()
+    pool, pools_by, refnames, ref_fields = None, {}, {}, {}      # class -> (its pool's name, numbers, {reference: class})
+    pool_type = None
+    reflists = {}                                # a list of references -> the class they reach
     for i, (p, t) in enumerate(zip(tree.args.posonlyargs + tree.args.args, arg_types)):
         if t.kind in ('same', 'nopool'):
             continue
-        if t.kind == 'pool':                     # objects references reach: a list per number, an index list per reference
-            pool = p.arg
-            numbers, prefs, _ = t.elem
-            for key, ft in list(numbers) + [(a, T.INT) for a in prefs]:
-                flat[pool, key] = fresh(f'sjpool__{key}')
-                slots[flat[pool, key]] = (i, key, f'[a referenced object].{key}')
-                new_params.append(ast.copy_location(ast.arg(flat[pool, key]), p))
-                new_types.append(T.list_of(ft))
-            pool_numbers, pool_refs = {k for k, _ in numbers}, set(prefs)
+        if t.kind == 'pool':                     # per class: a list per number, an index list per reference
+            pool, pool_type = p.arg, t
+            made_k = dict(t.elem[2])
+            for k, (cls, numbers, prefs) in enumerate(t.elem[0]):
+                name = f'{pool}{k}'
+                for key, ft in list(numbers) + [(a, T.INT) for a, _ in prefs]:
+                    flat[name, key] = fresh(f'sjpool{k}__{key}')
+                    slots[flat[name, key]] = (i, f'{k}.{key}', f'[a {cls.__name__ if cls else "referenced"} object].{key}')
+                    new_params.append(ast.copy_location(ast.arg(flat[name, key]), p))
+                    new_types.append(T.list_of(ft))
+                grows = None
+                if k in made_k:                  # it makes instances of this class: how many are in use, then room
+                    count = fresh(f'sjpool{k}__count')
+                    slots[count] = (i, f'{k}.#count', f'[how many {cls.__name__}]')
+                    new_params.append(ast.copy_location(ast.arg(count), p))
+                    new_types.append(T.INT)
+                    grows = (count, made_k[k], flat[name, (list(numbers) + [(a, T.INT) for a, _ in prefs])[0][0]])
+                pools_by[cls] = (name, {a for a, _ in numbers}, dict(prefs), grows)
+            continue
+        if t.kind == 'inlist':                   # an element of another argument: its place there
+            inlists[p.arg] = (names[t.elem], fresh(f'sji__{p.arg}'))
+            new_params.append(ast.copy_location(ast.arg(inlists[p.arg][1]), p))
+            new_types.append(T.INT)
+            continue
+        if t.kind == 'reflist':                  # a list of references: of indexes
+            reflists[p.arg] = t.cls
+            plain[p.arg] = i
+            new_params.append(p)
+            new_types.append(T.list_of(T.INT))
+            continue
+        if t.kind == 'poolref':                  # a reference given by the caller: its pool's lists (once), then its index
+            ptype, cls, lists = t.elem
+            if lists:
+                pool, pool_type = 'sjpool', ptype
+                for k, (pc, numbers, prefs) in enumerate(ptype.elem[0]):
+                    name = f'{pool}{k}'
+                    for key, ft in list(numbers) + [(a, T.INT) for a, _ in prefs]:
+                        flat[name, key] = fresh(f'sjpool{k}__{key}')
+                        new_params.append(ast.copy_location(ast.arg(flat[name, key]), p))
+                        new_types.append(T.list_of(ft))
+                    pools_by[pc] = (name, {a for a, _ in numbers}, dict(prefs), None)
+            elif pool_type is not ptype:
+                raise Unsupported(tree, 'references into two pools')
+            refnames[p.arg] = cls
+            new_params.append(p)
+            new_types.append(T.INT)
             continue
         if t.kind == 'ref':                      # a reference chosen by data: its index in the pool, -1 for None
-            refnames.add(p.arg)
+            refnames[p.arg] = t.cls
             plain[p.arg] = i
             new_params.append(p)
             new_types.append(T.INT)
@@ -622,7 +663,7 @@ def flatten_dicts(fdef, arg_types):
                 name = fresh(f'{base}__{key}' if isinstance(key, str) and key.isidentifier() and key.isascii() else f'{base}__k{k}')
                 flat[owner, key] = name
                 if ft.kind == 'ref':                # a reference in a fixed place: its index, a variable
-                    ref_fields.add((owner, key))
+                    ref_fields[owner, key] = ft.cls
                     ft = T.INT
                 if ft.kind == 'function':           # a method: called as a function, with p's attributes as self
                     methods[owner, key] = ft
@@ -666,11 +707,18 @@ def flatten_dicts(fdef, arg_types):
         copied[q] = p
         makers[id(start)] = 'copy'
 
+    def pool_made(e):
+        """For C(...) where C's instances are kept in the pool: its pool's entry, else None."""
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id in made:
+            spec = pools_by.get(made[e.func.id].cls)
+            if spec is not None and spec[3] is not None:
+                return spec
+        return None
     # v = C(...), C a class it makes instances of: v's attributes become variables, assigned as C.__init__ assigns them
     made_local = {}
     for n in ast.walk(tree):
         if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call) \
-                and isinstance(n.value.func, ast.Name) and n.value.func.id in made:
+                and isinstance(n.value.func, ast.Name) and n.value.func.id in made and not pool_made(n.value):
             v = n.targets[0].id
             if made_local.get(v, n.value.func.id) != n.value.func.id or v in types_of:
                 raise Unsupported(n, f'{v} is an instance of two classes, or a parameter too')
@@ -691,7 +739,7 @@ def flatten_dicts(fdef, arg_types):
         register(v, c)
     for n in ast.walk(tree):
         if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) \
-                and n.value.func.id in made and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+                and n.value.func.id in made and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and not pool_made(n.value):
             makers[id(n)] = 'make'
     first = {}                                   # a list's first attribute, for len() and an index's check
     for p, t in lists.items():
@@ -770,8 +818,13 @@ def flatten_dicts(fdef, arg_types):
         raise Unsupported(tree, 'a parameter is also an element of a list')
     for p, (pl, _, _) in refs.items():
         alias[p] = pl
+    for p, (pl, _) in inlists.items():
+        if any(isinstance(n, ast.Name) and n.id == p and not isinstance(n.ctx, ast.Load) for n in ast.walk(tree)):
+            raise Unsupported(tree, f'{p}, an element of {pl}, is assigned')
+        alias[p] = pl
     index = {name: fresh(f'sji__{name}') for name in alias}
     index.update({p: ix for p, (_, ix, _) in refs.items()})
+    index.update({p: ix for p, (_, ix) in inlists.items()})
 
     def pooled(ps, idx, node=None):
         """Where the attributes of an element (of ps, or of an object in its elements: 'ps.vel') are in their lists: at its
@@ -935,9 +988,48 @@ def flatten_dicts(fdef, arg_types):
                 return ast.copy_location(ast.Compare(side[0], [ast.Eq() if isinstance(n.ops[0], ast.Is) else ast.NotEq()], [side[1]]), n)
             return self.generic_visit(n)
 
+        def build(self, call, node):
+            """C(args) kept in the pool: its arguments in order, then a new place, each attribute's list given what __init__
+            assigns it, and the count one more. (statements, the new place's name)"""
+            name, numbers, prefs, (count, order, first_list) = pool_made(call)
+            t = made[call.func.id]
+            params = t.recipe['params']
+            if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
+                raise Unsupported(call, f'{call.func.id}() with * or **')
+            positional = [q for q in params if not q[2]]
+            out, given = [], {}
+            for q, a in list(zip(positional, call.args)) + [((k.arg,), k.value) for k in call.keywords]:
+                temp = fresh(f'sjc__{q[0]}')
+                out.append(ast.copy_location(ast.Assign([ast.Name(temp, ast.Store())], ast.Constant(-1) if none(a) else self.visit(a)), node))
+                given[q[0]] = ast.Name(temp, ast.Load())
+            for pname, default, _ in params:
+                if pname not in given:
+                    if default is None or (type(default[1]) not in (int, float, bool) and default[1] is not None):
+                        raise Unsupported(call, f'{call.func.id}() leaving out {pname}, whose default isn\'t a number or None')
+                    given[pname] = ast.Constant(-1 if default[1] is None else default[1])
+            idx = fresh('sjnew')
+            out.append(ast.copy_location(ast.Assign([ast.Name(idx, ast.Store())], ast.Call(ast.Name('__sj_room__', ast.Load()),
+                                         [ast.Name(count, ast.Load()), ast.Name(first_list, ast.Load())], [])), node))
+            for a, src in t.recipe['assigns']:
+                if src[0] == 'param':
+                    v = copy.deepcopy(given[src[1]])
+                elif src[0] == 'const' and (type(src[1]) in (int, float, bool) or src[1] is None):
+                    v = ast.Constant(-1 if src[1] is None else src[1])
+                else:
+                    raise Unsupported(call, f'{call.func.id}.__init__ computes {a}: only a parameter or a constant, for an instance kept here')
+                out.append(ast.copy_location(ast.Assign([ast.Subscript(ast.Name(flat[name, a], ast.Load()), ast.Name(idx, ast.Load()), ast.Store())], v), node))
+            out.append(ast.copy_location(ast.Assign([ast.Name(count, ast.Store())], ast.BinOp(ast.Name(count, ast.Load()), ast.Add(), ast.Constant(1))), node))
+            for s_ in out:
+                ast.fix_missing_locations(ast.copy_location(s_, node))
+            return out, ast.copy_location(ast.Name(idx, ast.Load()), node)
+
         def visit_Assign(self, n):
+            if len(n.targets) == 1 and pool_made(n.value):     # a new instance kept in the pool: its place
+                out, idx = self.build(n.value, n)
+                n.value = idx
+                return out + [self.visit_Assign(n)]
             if len(n.targets) == 1 and none(n.value) and (isinstance(n.targets[0], ast.Name) and n.targets[0].id in refnames or
-                                                         isinstance(n.targets[0], ast.Attribute) and refexpr(n.targets[0])):
+                                                         isinstance(n.targets[0], (ast.Attribute, ast.Subscript)) and refexpr(n.targets[0])):
                 n.value = ast.copy_location(ast.Constant(-1), n.value)     # None, as a reference
             if makers.get(id(n)) == 'make':
                 return self.construct(n)
@@ -968,8 +1060,22 @@ def flatten_dicts(fdef, arg_types):
 
         def visit_Call(self, n):
             f = n.func
-            if (refnames or pool) and (any(refexpr(a) for a in n.args) or isinstance(f, ast.Attribute) and refexpr(f.value)):
-                raise Unsupported(n, 'passes a reference chosen by data to a function or method, or calls its method: not yet')
+            if (refnames or pool) and isinstance(f, ast.Attribute) and refexpr(f.value):      # a method of a referenced object
+                from ._dispatch import _in_class, _method
+                cls = refclass(f.value)
+                m = _in_class(cls, f.attr) if cls is not None else None
+                if not (type(m).__name__ == 'Function' or isinstance(m, types.FunctionType)):
+                    raise Unsupported(n, f'{f.attr} of an object a reference reaches is not a plain method')
+                fn = _method(m)
+                CALLEES[id(fn)] = fn
+                me = ast.copy_location(RefArg(deref(self.visit(f.value), f.attr, n)), f.value)
+                me.cls, me.pool, me.cols = cls, pool_type, pool_lists()
+                call = ast.copy_location(ast.Call(ast.copy_location(ast.Name(f'sjm__ref__{f.attr}', ast.Load()), f),
+                                                  [me] + [self.ref_arg(a) for a in n.args], [self.visit(k) for k in n.keywords]), n)
+                call.sj_callee = id(fn)
+                return call
+            if (refnames or pool) and any(refexpr(a) or (pool_type is not None and none(a)) for a in n.args):
+                return ast.copy_location(ast.Call(self.visit(f), [self.ref_arg(a) for a in n.args], [self.visit(k) for k in n.keywords]), n)
             if isinstance(f, ast.Name) and f.id == 'isinstance' and len(n.args) == 2 and self.instance(n.args[0]):
                 owner = self.instance(n.args[0])[0]
                 mark = ast.copy_location(ClassOf(0), n.args[0])
@@ -1020,6 +1126,14 @@ def flatten_dicts(fdef, arg_types):
                 call.sj_writes = [w for _, ws in passed for w in ws]
                 return call
             return self.generic_visit(n)
+
+        def ref_arg(self, a):
+            """An argument that is a reference: its index, marked with its class and the pool it indexes."""
+            if not refexpr(a) and not (none(a) and pool_type is not None):
+                return self.visit(a)
+            r = ast.copy_location(RefArg(ast.copy_location(ast.Constant(-1), a) if none(a) else self.visit(a)), a)
+            r.cls, r.pool, r.cols = None if none(a) else refclass(a), pool_type, pool_lists()
+            return r
 
         def construct(self, n):
             """v = C(args): the arguments in order, then each attribute as C.__init__ assigns it."""
@@ -1122,11 +1236,15 @@ def flatten_dicts(fdef, arg_types):
                 if idx is None else [(flat[owner, k], pooled(owner, idx)) for k in sorted(t.writes) if (owner, k) in flat]
 
         def visit_Attribute(self, n):
-            if refexpr(n.value):                 # through a reference: the pool's list, at its index
-                if n.attr not in pool_numbers and n.attr not in pool_refs:
+            if refexpr(n.value):                 # through a reference: its class's pool's list, at its index
+                c = refclass(n.value)
+                spec = pools_by.get(c)
+                if spec is None and c is None:   # only ever None: any pool with the attribute, never read past the check
+                    spec = next((sp for sp in pools_by.values() if n.attr in sp[1] or n.attr in sp[2]), None)
+                if spec is None or (n.attr not in spec[1] and n.attr not in spec[2]):
                     raise Unsupported(n, f'.{n.attr} of an object a reference reaches: only its numbers and references compile')
                 idx = deref(self.visit(n.value), n.attr, n)
-                return ast.copy_location(ast.Subscript(ast.Name(flat[pool, n.attr], ast.Load()), idx, n.ctx), n)
+                return ast.copy_location(ast.Subscript(ast.Name(flat[spec[0], n.attr], ast.Load()), idx, n.ctx), n)
             el = element_of(n.value)
             owner = el[0] if el else owner_of(n.value) or (n.value.id if isinstance(n.value, ast.Name) else None)
             if owner is not None and (owner, n.attr) in methods:
@@ -1152,7 +1270,10 @@ def flatten_dicts(fdef, arg_types):
             if ref_returns:                      # a reference, or None: the object is found by its index after the call
                 if v is not None and not refexpr(v) and not none(v):
                     raise Unsupported(n, 'returns a reference at one return and something else at another')
-                returned.append(('pool',))
+                returned.append(('pool', ref_returns_cls))
+                if pool_made(v):
+                    out, idx = self.build(v, n)
+                    return out + [ast.copy_location(ast.Return(idx), n)]
                 return ast.copy_location(ast.Return(ast.Constant(-1) if v is None or none(v) else self.visit(v)), n)
             if isinstance(v, ast.Name) and v.id in made_local:       # a new instance: its attributes, made into one by the call
                 leaves = []
@@ -1235,6 +1356,8 @@ def flatten_dicts(fdef, arg_types):
             return None
         if cls not in by_cls:
             raise Unsupported(call, f'calls something returning a new {cls.__name__}, which can\'t be made here')
+        if pools_by.get(cls) is not None and pools_by[cls][3] is not None:
+            raise Unsupported(call, f'calls something returning a new {cls.__name__}, kept in a linked structure here: not yet')
         return by_cls[cls]
 
     class Operators(ast.NodeTransformer):
@@ -1267,7 +1390,7 @@ def flatten_dicts(fdef, arg_types):
                     setattr(s, field, split_returns(inner))
             for h in getattr(s, 'handlers', None) or ():
                 h.body = split_returns(h.body)
-            if isinstance(s, ast.Return) and isinstance(s.value, ast.Call):
+            if isinstance(s, ast.Return) and isinstance(s.value, ast.Call) and not pool_made(s.value):
                 c = s.value.func.id if isinstance(s.value.func, ast.Name) and s.value.func.id in made else call_class(s.value)
                 if c is not None:
                     v = fresh('sjret')
@@ -1280,7 +1403,7 @@ def flatten_dicts(fdef, arg_types):
         return out
     def makes_new(e):
         """The made class's parameter, if e is C(...) or a call returning a new instance."""
-        if not isinstance(e, ast.Call):
+        if not isinstance(e, ast.Call) or pool_made(e):
             return None
         if isinstance(e.func, ast.Name) and e.func.id in made:
             return e.func.id
@@ -1425,38 +1548,84 @@ def flatten_dicts(fdef, arg_types):
     def holds_object(v, keys):
         """Of an instance made here, an attribute among keys that is another name for an object."""
         return next((k for k in keys if f'{v}.{k}' in same), None)
-    def refexpr(e):
-        """Is e a reference chosen by data: a name holding one, or a reference attribute reached from one or from a
-        fixed place?"""
+    NOT = object()
+
+    def refclass(e):
+        """The class a reference chosen by data reaches (None: only None seen), or NOT if e isn't one: a name holding one,
+        a reference attribute in a fixed place or reached from one, or a if c else b of them and None."""
+        if pool_made(e):                         # a new instance, kept in the pool
+            return made[e.func.id].cls
+        if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in reflists and not isinstance(e.slice, ast.Slice):
+            return reflists[e.value.id]
         if isinstance(e, ast.Name):
-            return e.id in refnames
-        if isinstance(e, ast.IfExp):             # a if c else b: a reference if either is, and the other is one or None
-            return (refexpr(e.body) or refexpr(e.orelse)) and all(refexpr(x) or none(x) for x in (e.body, e.orelse))
+            return refnames[e.id] if e.id in refnames else NOT
+        if isinstance(e, ast.IfExp):
+            cs = [None if none(x) else refclass(x) for x in (e.body, e.orelse)]
+            if NOT in cs or all(none(x) for x in (e.body, e.orelse)):
+                return NOT
+            known = {c for c in cs if c is not None}
+            if len(known) > 1:
+                raise Unsupported(e, 'a reference to objects of two classes')
+            return known.pop() if known else None
         if isinstance(e, ast.Attribute):
             o = owner_of(e.value)
-            return o is not None and (o, e.attr) in ref_fields or e.attr in pool_refs and refexpr(e.value)
-        return False
+            if o is not None and (o, e.attr) in ref_fields:
+                return ref_fields[o, e.attr]
+            c = refclass(e.value)
+            if c is NOT:
+                return NOT
+            if c is None:                        # only ever None: reading through it raises, whatever it would reach
+                targets = {sp[2][e.attr] for sp in pools_by.values() if e.attr in sp[2]}
+                return (targets.pop() if len(targets) == 1 else None) if targets else NOT
+            spec = pools_by.get(c)
+            return spec[2][e.attr] if spec is not None and e.attr in spec[2] else NOT
+        return NOT
+
+    def refexpr(e):
+        return refclass(e) is not NOT
 
     def none(e):
         return isinstance(e, ast.Constant) and e.value is None
     if pool is not None or refnames:
+        for n in ast.walk(tree):                 # for n in heads: n is each reference
+            if isinstance(n, (ast.For, ast.comprehension)) and isinstance(n.target, ast.Name) and isinstance(n.iter, ast.Name) \
+                    and n.iter.id in reflists:
+                refnames[n.target.id] = reflists[n.iter.id]
         for _ in range(16):
             grew = False
             for n in ast.walk(tree):
-                if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and n.targets[0].id not in refnames \
-                        and refexpr(n.value):
-                    refnames.add(n.targets[0].id)
-                    grew = True
+                if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and refexpr(n.value):
+                    t, c = n.targets[0].id, refclass(n.value)
+                    if t in refnames and refnames[t] is not None and c is not None and refnames[t] is not c:
+                        raise Unsupported(n, f'{t} holds references to objects of two classes')
+                    if t not in refnames or (refnames[t] is None and c is not None):
+                        refnames[t] = c
+                        grew = True
             if not grew:
                 break
         for n in ast.walk(tree):
-            if isinstance(n, (ast.AugAssign, ast.For, ast.comprehension, ast.NamedExpr, ast.AnnAssign)) and any(
+            if isinstance(n, (ast.AugAssign, ast.For, ast.comprehension, ast.NamedExpr, ast.AnnAssign)) and not (
+                    isinstance(n, (ast.For, ast.comprehension)) and isinstance(n.iter, ast.Name) and n.iter.id in reflists) and any(
                     isinstance(x, ast.Name) and x.id in refnames for x in [n.target] + list(getattr(n.target, 'elts', []))):
                 raise Unsupported(n, 'a reference is assigned in a way other than name = reference or None')
             if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in refnames for t in n.targets) and \
                     not (len(n.targets) == 1 and (refexpr(n.value) or none(n.value))):
                 raise Unsupported(n, f'{n.targets[0].id if isinstance(n.targets[0], ast.Name) else "a reference"} holds a reference, and is assigned something else')
+    if any(spec[3] is not None for spec in pools_by.values()):     # it may run again with more room: only if it wrote nothing
+        arrays = {q.arg for q, t in zip(new_params, new_types) if t.kind == 'array'}
+        if any(isinstance(n, ast.Subscript) and not isinstance(n.ctx, ast.Load) and isinstance(n.value, ast.Name) and n.value.id in arrays
+               for n in ast.walk(tree)):
+            raise Unsupported(tree, 'makes instances kept in a linked structure and writes an array: not yet')
     ref_returns = any(isinstance(n, ast.Return) and n.value is not None and refexpr(n.value) for n in ast.walk(tree))
+    returned_cls = {refclass(n.value) for n in ast.walk(tree) if isinstance(n, ast.Return) and n.value is not None and refexpr(n.value)} - {None}
+    if len(returned_cls) > 1:
+        raise Unsupported(tree, 'returns references to objects of two classes')
+    ref_returns_cls = returned_cls.pop() if returned_cls else None
+
+    def pool_lists():
+        """The pool's lists, in the order a callee given a reference takes them."""
+        return [flat[f'{pool}{k}', key] for k, (_, numbers, prefs) in enumerate(pool_type.elem[0])
+                for key in [a for a, _ in numbers] + [a for a, _ in prefs]]
 
     def deref(idx, attr, node):
         """A reference read through: its index, after checking it isn't None, as Python's AttributeError would."""
@@ -1553,6 +1722,19 @@ def same_targets(t):
         elif ft.kind == 'object':
             out += same_targets(ft)
     return out
+
+
+class RefArg(ast.UnaryOp):
+    """A reference given to a compiled callee: its index (operand), its class (cls) and the pool it indexes (pool, a type).
+    A unary + of the index, so whatever looks for reads sees them."""
+
+    def __init__(self, index):
+        super().__init__(ast.UAdd(), index)
+
+    def __deepcopy__(self, memo):
+        new = RefArg(copy.deepcopy(self.operand, memo))
+        new.cls, new.pool, new.lists, new.cols = self.cls, self.pool, getattr(self, 'lists', True), self.cols
+        return ast.copy_location(new, self)
 
 
 class ClassOf(ast.Constant):
@@ -2539,6 +2721,8 @@ class Compiler:
         return build('', e.local)
 
     def typeof(self, e):
+        if isinstance(e, RefArg):
+            return T.poolref_of(e.pool, e.cls, getattr(e, 'lists', True))
         if isinstance(e, SelfArg) and getattr(e, 'same', None) is not None:
             return T.same_as(e.same)
         if isinstance(e, SelfArg) and getattr(e, 'ref', False):
@@ -2989,6 +3173,7 @@ class Compiler:
             if t.kind == 'object' and any(i is not None for i, _ in same_targets(t)):
                 self.fail(e, f'passes {e.func.id}() an object holding another argument\'s object')
             if not (t.is_number or t.kind in ('array', 'enum') or (t.kind in ('object', 'same', 'elemref') and isinstance(x, SelfArg))
+                    or (t.kind == 'poolref' and isinstance(x, RefArg))
                     or (t.kind == 'tuple' and T.is_number_tree(t) and all(et.np != 'dyn' for et in T.leaves(t)))):
                 self.fail(e, f'passes {t.name} to {e.func.id}()')
         types = [ts[k] for k in picked]
@@ -3055,7 +3240,11 @@ class Compiler:
             v = self.expr(x)
             return t, (self.hold(v[0], t), self.hold_flag(v[1]))
         for x in nodes:
-            if isinstance(x, SelfArg) and x.same is not None:      # the object of another argument: nothing more to pass
+            if isinstance(x, RefArg):              # a reference: the pool's lists if it's the first, then its index
+                cols = x.cols if x.lists else []
+                self.ref_written |= set(cols)      # the callee writes the caller's objects
+                done.append(('self', [(self.env[c], ('list', c)) for c in cols] + [value(x.operand)]))
+            elif isinstance(x, SelfArg) and x.same is not None:      # the object of another argument: nothing more to pass
                 done.append(('self', []))
             elif isinstance(x, SelfArg) and x.ref:   # an element by reference: its attributes' lists, then its index
                 cols = [x.slots[k] for k, _ in leaf_types(x.object_type)]
@@ -3117,6 +3306,10 @@ class Compiler:
 
     def narrow_passed(self, nodes, picked, fn):
         """An instance passed as an argument goes as only the attributes the callee uses: the rest may have changed type."""
+        given = False
+        for k in picked:                         # the first reference given carries the pool's lists, the others only their index
+            if isinstance(nodes[k], RefArg):
+                nodes[k].lists, given = not given, True
         for j, k in enumerate(picked):
             x = nodes[k]
             if not (isinstance(x, SelfArg) and x.passed):
@@ -4167,7 +4360,7 @@ class Compiler:
         self.fail(e, f'isinstance() of a {t.name}')
 
     def call_type(self, e):
-        if isinstance(e.func, ast.Name) and e.func.id == '__sj_deref__':
+        if isinstance(e.func, ast.Name) and e.func.id in ('__sj_deref__', '__sj_room__'):
             return T.INT
         if self.isinstance_of(e) is not None:
             return T.BOOL
@@ -6498,6 +6691,10 @@ class Compiler:
         return r, rf
 
     def call(self, e):
+        if isinstance(e.func, ast.Name) and e.func.id == '__sj_room__':      # a new place in a pool, if there's room left
+            v = self.hold(self.expr(e.args[0])[0], T.INT)
+            self.emit(f'if ({v} >= v_{e.args[1].id}__n) SJ_FAIL({POOL_FULL}, {self.line(e)}, 0, 0);')
+            return v, flag_of(T.INT)
         if isinstance(e.func, ast.Name) and e.func.id == '__sj_deref__':     # a reference read through: None raises
             v = self.hold(self.expr(e.args[0])[0], T.INT)
             self.emit(f'if ({v} < 0) SJ_FAIL({ATTRIBUTE_NONE}, {self.line(e)}, {e.args[1].value}, 0);')

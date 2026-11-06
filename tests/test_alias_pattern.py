@@ -215,3 +215,39 @@ def bump_all(ps):
 ])
 def test_elements_that_may_be_one_instance(f, make):
     same(f, make, True)
+
+
+def two_lists(xs, ys):
+    for i in range(len(xs)):
+        xs[i] += 1.0
+        ys[i] *= 2.0
+    return xs[0] + ys[-1]
+
+
+def element_and_argument(ps, q):
+    for p in ps:
+        p.x += 1.0
+    q.m += q.x
+    return ps[0].x + q.m
+
+
+def returns_the_argument_element(ps, q):
+    q.bump()
+    return q
+
+
+@pytest.mark.parametrize('f,make', [
+    (two_lists, lambda: (lambda xs: [xs, xs])([1.0, 2.0, 3.0])),                  # one list under two names
+    (two_lists, lambda: [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+    (element_and_argument, lambda: (lambda ps: [ps, ps[1]])([P(1.0), P(2.0), P(3.0)])),
+    (element_and_argument, lambda: (lambda ps: [ps, ps[0]])((lambda o: [o, P(5.0), o])(P(1.0)))),
+    (element_and_argument, lambda: [[P(1.0), P(2.0)], P(9.0)]),
+])
+def test_lists_in_the_pattern(f, make):
+    same(f, make, True)
+
+
+def test_an_element_returned_through_its_other_name():
+    g = scram(cache=False, fallback=False)(returns_the_argument_element)
+    ps = [P(1.0), P(2.0)]
+    assert g(ps, ps[1]) is ps[1] and ps[1].x == 3.0

@@ -251,3 +251,23 @@ def passes_holder(a):
 ])
 def test_instances_holding_objects(f, make_args):
     same(f, make_args, True)
+
+
+@dataclasses.dataclass
+class D:
+    x: float
+    y: float
+
+    def __sub__(self, o):
+        return D(self.x - o.x, self.y - o.y)
+
+    def dot(self, o):
+        return self.x * o.x + self.y * o.y
+
+
+def unnamed_receiver(a, b, c):
+    return (a - b).dot(c)          # c is given to the new instance's method: what dot reads of it is c's
+
+
+def test_an_argument_to_a_method_of_an_unnamed_instance():
+    same(unnamed_receiver, lambda: [D(1.0, 2.0), D(0.5, 0.5), D(3.0, 4.0)], True)

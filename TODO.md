@@ -24,14 +24,11 @@ The class examples' C is unchanged except `vectors.render`, which passes `self.d
 2. **Static preflight** follows none of the 2026-11-05 work beyond the alias pattern: `examples/vector_math.py` (`gyrate`, new
    instances inside expressions) and `search_tree.py` (`lookups`, references) show as Python statically and compile when called.
    Build the same tables from class statements (`_static_self`, `_static_inner`, `_static_made`).
-3. **References, what's left:** a pool of more than one class (a `Node` whose `data` is another class), passing a reference to a
-   compiled function or calling its method (the callee needs the pool's lists and the index, as `elemref` does for elements),
-   keeping an instance made here in a linked structure (`n.next = Node(...)`: the pool must grow, so its lists must be `malloc`ed
-   and copied out after), lists of pooled objects, and a call plan for pooled calls (each takes the general path, walking the pool).
-4. **Not yet in the alias pattern:** an element that is also another argument (`f(ps, ps[0])` when called with one), one list
-   under two names, an instance's own `__dict__` passed as a dict, and plans for a pattern through attributes (general path).
-5. **Uses through unnamed instances:** an argument passed to a method of a new instance without a name, `(a - b).dot(c)`, isn't
-   followed for `c`'s uses, so `c` may be typed without what the method reads and the call stays Python.
+3. **References, what's left:** making instances to keep in a structure that has none of their class yet (the pool's types
+   come from existing objects; the constructor's argument types would do), a compiled callee returning a reference, and a call plan
+   for pooled calls (each takes the general path, walking the pool, about 1 µs per object reached).
+4. **Not yet in the alias pattern:** plans for a pattern through attributes (the general path). An instance's own `__dict__`
+   passed as a dict alongside it is the `vars()` surface, which stays Python.
 
 ## Demos
 

@@ -169,7 +169,7 @@ def two_classes(n):
 
 @pytest.mark.parametrize('f,make,why', [
     (compares_equal, lambda: [chain(1.0, 2.0), None], ''),
-    (two_classes, lambda: [Node(1.0, Tree(3))], 'one pool, of one class'),
+    (two_classes, lambda: [Node(1.0, Tree(3))], 'two classes'),     # one name, objects of two classes
 ])
 def test_stays_python(f, make, why):
     same(f, make, False)
@@ -182,3 +182,204 @@ def test_a_cycle_is_each_object_once():
     r = ring()
     assert g(r, 7) == too_far(ring(), 7) and r.next.next is r
     assert g.signatures[0][-1].name.startswith('pool Node')
+
+
+@dataclasses.dataclass
+class Item:
+    weight: float
+    count: int = 0
+
+
+@dataclasses.dataclass
+class Link:
+    item: object
+    next: object = None
+
+
+def heaviest(head):
+    best = None
+    n = head
+    while n is not None:
+        n.item.count += 1
+        if best is None or n.item.weight > best.weight:
+            best = n.item
+        n = n.next
+    return best
+
+
+def items():
+    shared = Item(2.5)
+    return [Link(Item(1.0), Link(shared, Link(Item(0.5), Link(shared))))]
+
+
+def test_pools_of_two_classes():
+    same(heaviest, items, True)
+    g = scram(cache=False, fallback=False)(heaviest)
+    head = items()[0]
+    assert g(head) is head.next.item and head.next.item.count == 2
+
+
+@dataclasses.dataclass
+class Cell:
+    v: float
+    next: object = None
+
+    def bump(self, k):
+        self.v += k
+        return self.v
+
+    def ahead(self):
+        return 0.0 if self.next is None else self.next.v
+
+
+@scram(cache=False)
+def weight(c):
+    return c.v * 2.0
+
+
+@scram(cache=False)
+def length(c):
+    k = 0
+    while c is not None:
+        k += 1
+        c = c.next
+    return k
+
+
+def methods_on_references(head):
+    s = 0.0
+    n = head
+    while n is not None:
+        s += n.bump(1.0) + n.ahead()
+        n = n.next
+    return s
+
+
+def references_given_on(head):
+    s = 0.0
+    n = head
+    while n is not None:
+        s += weight(n) + length(n)
+        n = n.next
+    return s + length(None)
+
+
+def cells():
+    return [Cell(1.0, Cell(2.0, Cell(3.0)))]
+
+
+@pytest.mark.parametrize('f', [methods_on_references, references_given_on])
+def test_references_given_to_compiled_functions(f):
+    same(f, cells, True)
+
+
+def insert(root, key):
+    node = root
+    while True:
+        node.hits += 1
+        if key < node.key:
+            if node.left is None:
+                node.left = Tree(key)
+                return root
+            node = node.left
+        else:
+            if node.right is None:
+                node.right = Tree(key)
+                return root
+            node = node.right
+
+
+def insert_many(root, keys):
+    for k in keys:
+        insert_into(root, k)
+    return root
+
+
+@scram(cache=False)
+def insert_into(root, key):
+    return 0
+
+
+def prepend(head, xs):
+    for x in xs:
+        head = Node(x, head)
+    return head
+
+
+def grow_many(head, n):
+    tail = head
+    while tail.next is not None:
+        tail = tail.next
+    for i in range(n):
+        tail.next = Node(float(i))
+        tail = tail.next
+    return total_of_nodes(head)
+
+
+def total_of_nodes(n):
+    return 0.0
+
+
+def shape(t):
+    return None if t is None else (t.key, t.hits, shape(t.left), shape(t.right))
+
+
+@pytest.mark.parametrize('key', [0, 2, 6, 10])
+def test_new_instances_kept_in_a_tree(key):
+    g = scram(cache=False, fallback=False)(insert)
+    a, b = bst(), bst()
+    assert g(a, key) is a and insert(b, key) is b and shape(a) == shape(b)
+    assert type(a.right.right if key == 10 else a) is Tree
+
+
+def test_new_instances_kept_in_a_list():
+    g = scram(cache=False, fallback=False)(prepend)
+    head = chain(1.0, 2.0)
+    r = g(head, [3.0, 4.0, 5.0])
+    assert r == prepend(chain(1.0, 2.0), [3.0, 4.0, 5.0]) and r.next.next.next is head
+    assert list(vars(r)) == ['x', 'next']                  # as __init__ assigned them
+
+
+def grow(head, n):
+    tail = head
+    while tail.next is not None:
+        tail = tail.next
+    for i in range(n):
+        tail.next = Node(i * 0.5)
+        tail = tail.next
+    return tail.x
+
+
+def test_room_runs_out_and_it_runs_again():
+    g = scram(cache=False, fallback=False)(grow)
+    a, b = chain(1.0, 2.0), chain(1.0, 2.0)
+    assert g(a, 200) == grow(b, 200) and a == b             # past the first room: made again with more
+
+
+def test_made_from_nothing_stays_python():
+    same(prepend, lambda: [None, [1.0, 2.0]], False)
+
+
+def walk_all(heads):
+    s = 0.0
+    for n in heads:
+        while n is not None:
+            s += n.x
+            n = n.next
+    return s
+
+
+def advance_all(heads):
+    for i in range(len(heads)):
+        if heads[i] is not None:
+            heads[i] = heads[i].next
+    return len(heads)
+
+
+@pytest.mark.parametrize('f,make', [
+    (walk_all, lambda: [[chain(1.0, 2.0), None, chain(3.0)]]),
+    (advance_all, lambda: [[chain(1.0, 2.0), None, chain(3.0)]]),
+    (walk_all, lambda: (lambda c: [[c, c.next, c]])(chain(1.0, 2.0, 3.0))),
+])
+def test_lists_of_references(f, make):
+    same(f, make, True)

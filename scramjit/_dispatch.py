@@ -26,7 +26,7 @@ from ._compiler import OPERATORS, Callee, Compiler, Unit, array_record_slots, ci
 from ._errors import CompileError, FallbackWarning, Unsupported
 from . import _interrupt
 from . import _lift
-from ._runtime import LIBM, PRELUDE, RERUN, RETURNS_INT, exception
+from ._runtime import LIBM, POOL_FULL, PRELUDE, RERUN, RETURNS_INT, exception
 
 _cimo = None
 _cimo_lock = threading.Lock()
@@ -739,12 +739,15 @@ def _passes(fdef):
             alias[n.targets[0].id] = n.value.value.id
     found = {}
     for n in ast.walk(fdef):
-        if isinstance(n, ast.BinOp) and isinstance(n.left, ast.Name) and type(n.op) in OPERATORS:
-            target, given = ('m', n.left.id, OPERATORS[type(n.op)]), [n.right]       # a + b passes b to a.__add__
+        if isinstance(n, ast.BinOp) and type(n.op) in OPERATORS:
+            x = n.left                           # a + b passes b to a.__add__
+            target = ('m', x.id, OPERATORS[type(n.op)]) if isinstance(x, ast.Name) else ('e', x, OPERATORS[type(n.op)])
+            given = [n.right]
         elif isinstance(n, ast.Call):
             f = n.func
             target = ('f', f.id) if isinstance(f, ast.Name) else ('m', f.value.id, f.attr) \
-                if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) else None
+                if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) else ('e', f.value, f.attr) \
+                if isinstance(f, ast.Attribute) else None   # (a - b).dot(c): a method of a new instance, its class found later
             given = n.args
         else:
             continue
@@ -808,7 +811,12 @@ def _param_uses(f, idx, cls, base, owners=None, stack=(), nested_out=None):
         g, at = None, pos
         if target[0] == 'f':
             g = f._fn.__globals__.get(target[1])
-        elif owners is not None and target[1] in owners:
+        elif target[0] == 'e' and owners is not None:
+            cls_of = _class_of(target[1], f._fn.__globals__, owners)
+            c = _in_class(cls_of, target[2]) if cls_of is not None else None
+            g, at = (c if type(c) is Function or type(c) is types.FunctionType else None), pos + 1
+            g = None if g is None else _method(g)
+        elif target[0] == 'm' and owners is not None and target[1] in owners:
             c = _in_class(owners[target[1]], target[2])
             g, at = (c if type(c) is Function or type(c) is types.FunctionType else None), pos + 1
             g = None if g is None else _method(g)
@@ -940,8 +948,8 @@ def _object_fields(x, names, written, calls=(), methods=None, nested=None, ids=N
         v = getattr(x, name, _MISSING)
         if v is _MISSING:
             return f'{cls.__name__} has no attribute {name}'
-        if refs is not None and name in refs[0]:  # a reference chosen by data: its index in the pool
-            fields.append((name, T.ref_of(refs[1])))
+        if refs is not None and name in refs:     # a reference chosen by data: its index in its class's pool
+            fields.append((name, T.ref_of(refs[name])))
             continue
         if nested and name in nested and _arg_type(v) is None:     # an object in an attribute: its own attributes, by the same rules
             if name in written:
@@ -1088,9 +1096,15 @@ def _ref_candidates(fdef):
                                 attrs.add(x.attr)
                             elif isinstance(x, ast.Name):
                                 names.add(x.id)
+                            elif isinstance(x, ast.Subscript) and isinstance(x.value, ast.Name):
+                                names.add(x.value.id)    # heads[i] is None: a list of references
         elif isinstance(n, ast.Assign) and len(n.targets) == 1:
             t, v = n.targets[0], n.value
             vs = parts(v)
+            if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and any(isinstance(x, ast.Attribute) or none(x) for x in vs) \
+                    and all(isinstance(x, (ast.Name, ast.Attribute)) or none(x) for x in vs):
+                names.add(t.value.id)                # heads[i] = heads[i].next
+                attrs.update(x.attr for x in vs if isinstance(x, ast.Attribute))
             if isinstance(t, ast.Attribute) and all(isinstance(x, (ast.Name, ast.Attribute)) or none(x) for x in vs):
                 attrs.add(t.attr)
             elif isinstance(t, ast.Name) and all(none(x) for x in vs):
@@ -1099,6 +1113,9 @@ def _ref_candidates(fdef):
                     (stores.get(t.id, 0) > 1 or t.id in looped or t.id in params):
                 attrs.update(x.attr for x in vs if isinstance(x, ast.Attribute))
                 names.add(t.id)
+            elif isinstance(t, ast.Name) and isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id[:1].isupper() and \
+                    (stores.get(t.id, 0) > 1 or t.id in looped or t.id in params) and any(isinstance(a, ast.Name) and a.id == t.id for a in v.args):
+                names.add(t.id)                  # head = Node(x, head): a new instance holding the last one
     for _ in range(8):
         grew = False
         for n in ast.walk(fdef):
@@ -1133,16 +1150,100 @@ def _is_instance(x):
 
 
 def _pool_plan(f, args):
-    """For a function whose references are chosen by data: ({parameter index: ref type}, the pool's type, the reference
-    attributes, its class), the pool being every object reached from the arguments through those attributes, each once;
-    or (None, a reason) if they can't be held so, or ({}, NOPOOL) if nothing is a reference."""
+    """For a function whose references are chosen by data: ({parameter index: ref type}, the pools' type, {attribute in a
+    fixed place: its class}), the pools being every object reached from the arguments through references, each once, a
+    pool per class; or (None, a reason) if they can't be held so, or ({}, NOPOOL, {}) if nothing is a reference."""
     tree = f._ctree or f._tree
     attrs, names = _ref_candidates(tree)
+    attrs = set(attrs)
+    g = f._fn.__globals__
+    for n in ast.walk(tree):                     # what the classes it makes are given may be a reference too
+        c = g.get(n.func.id) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) else None
+        if isinstance(c, type) and not issubclass(c, (enum.Enum, BaseException)) and (attrs or names):
+            recipe = _init_recipe(c)
+            if type(recipe) is dict:
+                attrs |= {a for a, _ in recipe['assigns']}
     params = [p.arg for p in tree.args.posonlyargs + tree.args.args]
     pooled = [i for i, n in enumerate(params) if n in names and (args[i] is None or _is_instance(args[i]))]
-    roots, todo, fixed, refs = [], [], set(), set()      # fixed: references in a fixed place (a.pos); refs: in pooled objects
+    held = _ref_lists(tree, names)               # lists whose elements are references: for n in heads, n = heads[i]
+    lists = [i for i, n in enumerate(params) if n in held and type(args[i]) is list and args[i]
+             and all(v is None or _is_instance(v) for v in args[i])]
+    refnames = names | {params[i] for i in pooled}
+    extra_used = set()
+    for _ in range(4):                           # what callees given references follow and read is the pool's too
+        plan = _pool_walk(args, pooled, attrs, lists)
+        more_attrs, more_used = _callee_ref_uses(f, tree, refnames, set(map(type, plan[2])))
+        extra_used |= more_used
+        if more_attrs <= attrs:
+            break
+        attrs |= more_attrs
+    roots, fixed, objs = plan
+    if not roots:
+        return {}, T.NOPOOL, {}
+    found = _pool_types(f, tree, args, pooled, attrs, refnames, roots, fixed, objs, extra_used)
+    if found[0] is not None:
+        for i in lists:
+            cs = {type(v) for v in args[i] if v is not None}
+            if len(cs) > 1:
+                return None, f'{params[i]} holds objects of {len(cs)} classes'
+            found[0][i] = T.reflist_of(cs.pop() if cs else None)
+    return found
+
+
+def _ref_lists(tree, names):
+    """Names of lists whose elements go into reference names: for n in heads, n = heads[i], heads[i] = n."""
+    out = set(names)                             # heads[i] is None, heads[i] = ...: the list itself is a candidate
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.For, ast.comprehension)) and isinstance(n.target, ast.Name) and n.target.id in names and isinstance(n.iter, ast.Name):
+            out.add(n.iter.id)
+        elif isinstance(n, ast.Assign) and len(n.targets) == 1:
+            t, v = n.targets[0], n.value
+            if isinstance(t, ast.Name) and t.id in names and isinstance(v, ast.Subscript) and isinstance(v.value, ast.Name):
+                out.add(v.value.id)
+            elif isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and isinstance(v, (ast.Name, ast.Attribute)) and \
+                    (isinstance(v, ast.Attribute) or v.id in names):
+                out.add(t.value.id)
+    return out
+
+
+def _callee_ref_uses(f, tree, refnames, classes):
+    """(reference candidates, attributes used) of the methods called on references and the functions given them."""
+    g = f._fn.__globals__
+    attrs, used = set(), set()
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        targets = []
+        if isinstance(n.func, ast.Attribute) and isinstance(n.func.value, (ast.Name, ast.Attribute)):
+            for cls in classes:
+                w = _in_class(cls, n.func.attr)
+                if type(w) in (Function, types.FunctionType):
+                    targets.append((_method(w), 0))
+        elif isinstance(n.func, ast.Name) and type(g.get(n.func.id)) is Function:
+            targets += [(g[n.func.id], k) for k, a in enumerate(n.args) if isinstance(a, ast.Name) and a.id in refnames]
+        for w, at in targets:
+            if w._tree is None:
+                continue
+            ca, cn = _ref_candidates(w._tree)
+            ps = [p.arg for p in w._tree.args.posonlyargs + w._tree.args.args]
+            attrs |= ca
+            mine = cn | ({ps[at]} if at < len(ps) else set())
+            for m in ast.walk(w._tree):
+                if isinstance(m, ast.Attribute) and isinstance(m.value, ast.Name) and m.value.id in mine:
+                    used.add(m.attr)
+                elif isinstance(m, ast.Attribute) and isinstance(m.value, ast.Attribute):
+                    used.add(m.attr)
+    return attrs, used
+
+
+def _pool_walk(args, pooled, attrs, lists=()):
+    """(roots, {fixed reference attribute: classes}, the objects reached, each once)."""
+    roots, todo, fixed = [], [], {}             # fixed: references in a fixed place (a.pos) -> the classes they reach
     for i, x in enumerate(args):
-        if i in pooled:
+        if i in lists:                           # each element
+            roots.append((i, '[]'))
+            todo += [v for v in x if v is not None]
+        elif i in pooled:
             roots.append((i, ''))
             if x is not None:
                 todo.append(x)
@@ -1150,7 +1251,7 @@ def _pool_plan(f, args):
             for a in sorted(attrs):
                 v = _plain_get(x, a)
                 if v is None or _is_instance(v):
-                    fixed.add(a)
+                    fixed.setdefault(a, set()).add(type(v) if v is not None else None)
                     roots.append((i, a))
                     if v is not None:
                         todo.append(v)
@@ -1163,46 +1264,76 @@ def _pool_plan(f, args):
         objs.append(o)
         for a in sorted(attrs):
             v = _plain_get(o, a)
-            if v is None or _is_instance(v):
-                refs.add(a)
-                if v is not None:
-                    todo.append(v)
-    if not roots:
-        return {}, T.NOPOOL, set(), None
-    classes = set(map(type, objs))
-    if len(classes) > 1:
-        return None, f'references reach objects of {len(classes)} classes ({", ".join(sorted(c.__name__ for c in classes))}): one pool, of one class, for now'
-    cls = classes.pop() if classes else None
-    for o in objs:
-        for a in refs:
-            v = _plain_get(o, a)
-            if not (v is None or type(v) is cls):
-                return None, f'{type(o).__name__}.{a} holds {type(v).__name__}, not a reference to one class or None'
-    refnames = names | {params[i] for i in pooled}
+            if v is not None and _is_instance(v):
+                todo.append(v)
+    return roots, fixed, objs
+
+
+def _pool_types(f, tree, args, pooled, attrs, refnames, roots, fixed, objs, extra_used):
+    classes = list(dict.fromkeys(map(type, objs)))
+    specs = []
+    for cls in classes:                          # per class: its reference attributes, each reaching one class or None
+        mine = [o for o in objs if type(o) is cls]
+        refs = []
+        for a in sorted(attrs):
+            vals = [_plain_get(o, a) for o in mine]
+            if all(v is None or _is_instance(v) for v in vals):
+                targets = {type(v) for v in vals if v is not None}
+                if len(targets) > 1:
+                    return None, f'{cls.__name__}.{a} reaches objects of {len(targets)} classes'
+                refs.append((a, targets.pop() if targets else None))
+        if _in_class(cls, '__bool__') is not _MISSING or _in_class(cls, '__len__') is not _MISSING:
+            return None, f'{cls.__name__} defines __bool__ or __len__, so a reference\'s truth is its code\'s'
+        specs.append((cls, mine, refs))
+    refattrs = {a for _, _, refs in specs for a, _ in refs} | set(fixed)
     used = set()
     for n in ast.walk(tree):
-        if isinstance(n, ast.Attribute) and n.attr not in refs:
+        if isinstance(n, ast.Attribute) and n.attr not in refattrs:
             v = n.value
-            if isinstance(v, ast.Name) and v.id in refnames or isinstance(v, ast.Attribute) and v.attr in refs | fixed:
+            if isinstance(v, ast.Name) and v.id in refnames or isinstance(v, ast.Attribute) and v.attr in refattrs:
                 used.add(n.attr)
-    numbers = []
-    if not objs:                                 # only None reached: nothing says otherwise, and nothing is read
-        refs = {a for a in attrs if a in used} - fixed
-        return {i: T.ref_of(None) for i in pooled}, T.pool_of(None, [(a, T.FLOAT) for a in sorted(used - refs - fixed)], sorted(refs), roots), \
-            refs | fixed, None
-    for a in sorted(used):
-        vals = [_plain_get(o, a) for o in objs]
-        kinds = set(map(type, vals))
-        if not vals:
+    used |= extra_used - refattrs
+    pools = []
+    for cls, mine, refs in specs:
+        numbers = []
+        for a in sorted(used):
+            vals = [_plain_get(o, a) for o in mine]
+            kinds = set(map(type, vals))
+            if len(kinds) == 1 and kinds.pop() in (int, float, bool) and not (type(vals[0]) is int and not all(-(1 << 63) <= v < 1 << 63 for v in vals)):
+                numbers.append((a, {int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(vals[0])]))
+            elif any(v is not _MISSING and type(v) not in (int, float, bool) for v in vals) and _in_class(cls, a) is _MISSING:
+                return None, f'{cls.__name__}.{a} isn\'t a number of one type in every {cls.__name__} references reach'
+        pools.append((cls, numbers, refs))
+    made = []                                    # classes the function makes instances of, kept in the pool: every attribute
+    g = f._fn.__globals__                        # __init__ assigns is a list, so a new one can be made after the call
+    built = {g[n.func.id] for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and isinstance(g.get(n.func.id), type)}
+    for k, (cls, numbers, refs) in enumerate(pools):
+        if cls not in built:
             continue
-        if len(kinds) != 1 or kinds.pop() not in (int, float, bool) or (type(vals[0]) is int and not all(-(1 << 63) <= v < 1 << 63 for v in vals)):
-            if all(v is _MISSING for v in vals) and _in_class(cls, a) is not _MISSING:
-                continue                         # a method: not a number of the pool's
-            return None, f'{cls.__name__}.{a} isn\'t a number of one type in every object references reach'
-        numbers.append((a, {int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(vals[0])]))
-    if cls is not None and (_in_class(cls, '__bool__') is not _MISSING or _in_class(cls, '__len__') is not _MISSING):
-        return None, f'{cls.__name__} defines __bool__ or __len__, so a reference\'s truth is its code\'s'
-    return {i: T.ref_of(cls) for i in pooled}, T.pool_of(cls, numbers, sorted(refs), roots), refs | fixed, cls
+        recipe = _init_recipe(cls)
+        if type(recipe) is str or recipe['post_init'] or recipe['frozen']:
+            return None, f'{cls.__name__} is made and kept in a linked structure, and ' + (recipe if type(recipe) is str else 'has __post_init__ or is frozen')
+        order = list(dict.fromkeys(a for a, _ in recipe['assigns']))
+        have = {a for a, _ in numbers} | {a for a, _ in refs}
+        mine = [o for o in objs if type(o) is cls]
+        for a in order:
+            if a in have:
+                continue
+            vals = [_plain_get(o, a) for o in mine]
+            kinds = set(map(type, vals))
+            if len(kinds) != 1 or next(iter(kinds)) not in (int, float, bool):
+                return None, f'{cls.__name__}.{a} isn\'t a number or a reference in every {cls.__name__}, so a new one can\'t be kept'
+            numbers.append((a, {int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(vals[0])]))
+        made.append((k, tuple(order)))
+    if not objs:                                 # only None reached: nothing says otherwise, and nothing is read
+        pools = [(None, [(a, T.FLOAT) for a in sorted(used)], [(a, None) for a in sorted(attrs & used) if a not in fixed])]
+    fixed_cls = {}
+    for a, cs in fixed.items():
+        known = cs - {None}
+        if len(known) > 1:
+            return None, f'.{a} reaches objects of {len(known)} classes'
+        fixed_cls[a] = known.pop() if known else None
+    return {i: T.ref_of(type(args[i]) if args[i] is not None else None) for i in pooled}, T.pool_of(pools, roots, made), fixed_cls
 
 
 def _node_merge(into, node):
@@ -1296,6 +1427,8 @@ def _push(cargs, x, t, where=None):
     """The C arguments for one Python argument. where: id -> index in the pool, for references."""
     if t.kind in ('function', 'enumclass', 'classref', 'madeclass', 'same', 'nopool'):
         return
+    if t.kind == 'inlist':
+        raise AssertionError('an element of another argument is passed by _run, which knows where it is')
     if t.kind == 'ref':
         cargs.append(-1 if x is None else where[id(x)])
         return
@@ -2167,8 +2300,19 @@ class Function:
         """The signature of a call. A dict's type is the keys this function uses: nothing else in it matters."""
         key = tuple(map(_arg_type, args))
         lists = [id(y) for x in args if type(x) is list for y in [x] + [r for r in x if type(r) is list]]
-        if len(set(lists)) != len(lists):        # one list under two names: a copy each would hide the writes
-            key = tuple(None if type(x) is list else t for x, t in zip(args, key))
+        if len(set(lists)) != len(lists):        # one list under two names: one copy, the second name the first's
+            first, rows = {}, [id(r) for x in args if type(x) is list for r in x if type(r) is list]
+            out = list(key)
+            for i, x in enumerate(args):
+                if type(x) is not list:
+                    continue
+                if len(set(rows)) != len(rows) or id(x) in rows or (out[i] is not None and T.is_pylist(out[i])):
+                    out[i] = None                # a row in two places, or a list that's a row too: not yet
+                elif id(x) in first:
+                    out[i] = T.same_as(first[id(x)]) if out[first[id(x)]] is not None and out[i] is not None else None
+                else:
+                    first[id(x)] = i
+            key = tuple(out)
         if self._hidden and any(t is not None and t.kind == 'classref' for t in key):
             out = list(key)
             real = len(args) - len(self._hidden)
@@ -2193,7 +2337,7 @@ class Function:
                 out[at] = plan[1]
                 for i, t in plan[0].items():
                     out[i] = t
-                refs = (plan[2], plan[3]) if plan[1].kind == 'pool' else None
+                refs = plan[2] if plan[1].kind == 'pool' else None
             key = tuple(out)
         if not ((self._attrs or self._elems or self._passes or self._unused or self._returned) and None in key) \
                 and (not self._dict_keys or dict not in map(type, args)):
@@ -2202,9 +2346,20 @@ class Function:
         owners = _owner_classes(self, args) if self._passes else None
         empty = ((), set(), set())
         roots = []                               # instances: their types together, as one graph with its alias pattern
+        places = {}                              # id of an element of a list of instances argument -> (that argument, its place)
+        for k, x in enumerate(args):
+            if type(x) in (list, dict) and out[k] is None and k in self._unused:
+                out[k] = T.object_of(type(x).__qualname__, [], None, type(x))     # never named: nothing of it reaches the C
+            elif type(x) is list and x and out[k] is None and _is_instance(x[0]):
+                for at, y in enumerate(x):
+                    places.setdefault(id(y), (k, at))
+        joined = {}                              # an argument that is an element of another: its uses join that list's
         for i, x in enumerate(args):
             if out[i] is not None or type(x) in (dict, list) or not (i in self._attrs or i in self._passes or i in self._unused
                                                                       or i in self._returned):
+                continue
+            if id(x) in places and (i in self._attrs or i in self._passes):
+                joined[i] = places[id(x)]
                 continue
             uses, nested = self._attrs.get(i, empty), self._nested.get(i)
             if i in self._passes:
@@ -2242,7 +2397,19 @@ class Function:
                     more = {}
                     uses = _param_uses(self, i, type(x[0]), uses, owners, (), more)
                     nested = _merge_nested(nested, more)
+                for q, (k, _) in joined.items():     # an argument that is one of its elements: what's done through it
+                    if k != i:
+                        continue
+                    qu, qn = self._attrs.get(q, empty), self._nested.get(q)
+                    if q in self._passes:
+                        more = {}
+                        qu = _param_uses(self, q, type(x[0]), qu, owners, (), more)
+                        qn = _merge_nested(qn, more)
+                    uses = (set(uses[0]) | set(qu[0]), set(uses[1]) | set(qu[1]), set(uses[2]) | set(qu[2]))
+                    nested = _merge_nested(nested, qn)
                 out[i] = _objlist_type(x, (sorted(uses[0]),) + tuple(uses[1:]), seen, dict in map(type, args), nested)
+        for q, (k, _) in joined.items():
+            out[q] = T.inlist_of(k) if out[k] is not None and out[k].kind == 'objlist' else None
         return tuple(out)
 
     @staticmethod
@@ -2259,37 +2426,57 @@ class Function:
             fields.append((k, t))
         return T.dict_of(fields)
 
-    def _run(self, entry, args):
+    def _run(self, entry, args, room=None):
         cargs = []
         copies = []
         columns = []
+        made_k = {}
         pool_t = next((t for t in entry.types if t.kind == 'pool'), None)
-        objs, where, refcols = [], None, []
-        if pool_t is not None:                   # every object references reach, each once, walked as _pool_plan walked it
-            _, refs, roots = pool_t.elem
+        by_cls, where, refcols = {}, None, []
+        if pool_t is not None:                   # every object references reach, each once, a pool per class
+            pools, roots = pool_t.elem[:2]
+            follow = {cls: [a for a, _ in refs] for cls, _, refs in pools}
             where, todo = {}, []
+            by_cls = {cls: [] for cls, _, _ in pools}
             for i, path in roots:
-                v = args[i] if not path else _member(args[i], path)
-                if v is not None:
-                    todo.append(v)
+                v = args[i] if not path or path == '[]' else _member(args[i], path)
+                todo += [y for y in v if y is not None] if path == '[]' else [v] if v is not None else []
             while todo:
                 o = todo.pop(0)
                 if id(o) in where:
                     continue
-                where[id(o)] = len(objs)
-                objs.append(o)
-                todo += [v for v in (getattr(o, a) for a in refs) if v is not None]
+                mine = by_cls[type(o)]
+                where[id(o)] = len(mine)
+                mine.append(o)
+                todo += [v for v in (getattr(o, a) for a in follow[type(o)]) if v is not None]
         for i, (x, t) in enumerate(zip(args, entry.types)):
-            if t.kind == 'pool':                    # a list per number, then an index list per reference
-                numbers, refs, _ = t.elem
-                for key, ft in numbers:
-                    a = array.array(_LIST_CODES[ft.name], (getattr(o, key) for o in objs))
-                    columns.append((i, key, a, ft, objs, key))
-                    cargs += [a.buffer_info()[0], len(a)]
-                for key in refs:
-                    a = array.array('q', (-1 if getattr(o, key) is None else where[id(getattr(o, key))] for o in objs))
-                    refcols.append((i, key, a))
-                    cargs += [a.buffer_info()[0], len(a)]
+            if t.kind == 'pool':                    # per class: a list per number, then an index list per reference
+                made_k = dict(t.elem[2])
+                for k, (cls, numbers, refs) in enumerate(t.elem[0]):
+                    objs = by_cls.get(cls, [])
+                    spare = (room if room is not None else max(16, len(objs))) if k in made_k else 0     # room for what it makes
+                    if k in made_k:
+                        room = spare
+                    for key, ft in numbers:
+                        a = array.array(_LIST_CODES[ft.name], (getattr(o, key) for o in objs))
+                        a.extend(array.array(_LIST_CODES[ft.name], bytes(a.itemsize * spare)))
+                        columns.append((i, f'{k}.{key}', a, ft, objs, key))
+                        cargs += [a.buffer_info()[0], len(a)]
+                    for key, target in refs:
+                        a = array.array('q', (-1 if getattr(o, key) is None else where[id(getattr(o, key))] for o in objs))
+                        a.extend([-1] * spare)
+                        refcols.append((i, f'{k}.{key}', a, objs, key, (by_cls.setdefault(target, []) if target is not None else [])))
+                        cargs += [a.buffer_info()[0], len(a)]
+                    if k in made_k:
+                        cargs.append(len(objs))     # how many are in use
+                continue
+            if t.kind == 'reflist':                 # objects kept in the pool: their indexes, written back as the objects
+                a = array.array('q', (-1 if y is None else where[id(y)] for y in x))
+                copies.append((('ref', i, t.cls), a))
+                cargs += [a.buffer_info()[0], len(a)]
+                continue
+            if t.kind == 'inlist':                  # an element of another argument: its place there
+                cargs.append(next(k for k, y in enumerate(args[t.elem]) if y is x))
                 continue
             if t.kind == 'objlist':                 # a list of numbers per attribute, written back into the instances
                 pool, ixs = x, []
@@ -2332,16 +2519,29 @@ class Function:
             cargs.append(entry.counts)
         io = bytearray(entry.io_size)
         status = entry.kernel(*cargs, io)
+        if status == POOL_FULL:                  # nothing has been written back: the same call, with twice the room
+            return self._run(entry, args, 2 * room)
+        if made_k:
+            self._made_into_pool(entry, io, args, pool_t, by_cls, columns, refcols, made_k)
         for i, key, a, ft, held, last in columns:
             if (i, key) in entry.columns:
-                _copy_back_attr(held, last, a, ft)
-        for i, key, a in refcols:                # references the kernel changed: the objects at those indexes
-            if (i, key) in entry.columns:
+                _copy_back_attr(held, last, a[:len(held)] if len(a) > len(held) else a, ft)
+        for i, slot, a, objs, key, targets in refcols:     # references the kernel changed: the objects at those indexes
+            if (i, slot) in entry.columns:
                 for o, k in zip(objs, a):
-                    target = None if k < 0 else objs[k]
+                    target = None if k < 0 else targets[k]
                     if getattr(o, key) is not target:
                         setattr(o, key, target)
         for i, a in copies:                       # what was written, even before an exception, as Python would have
+            if type(i) is tuple:                     # a list of references: the objects at those indexes
+                _, i, cls = i
+                if i in entry.lists:
+                    objs = by_cls.get(cls, [])
+                    for k, j in enumerate(a):
+                        target = None if j < 0 else objs[j]
+                        if args[i][k] is not target:
+                            args[i][k] = target
+                continue
             if i is not None and i in entry.lists:
                 t = entry.types[i]
                 if T.is_pylist(t):
@@ -2351,9 +2551,12 @@ class Function:
         if status == RERUN and entry.rerun:
             return self._py(*self._real(args))
         for i, key, at, ot in entry.outs:
+            if isinstance(key, str) and key.endswith('.#count'):
+                continue                         # how many a pool holds: taken by _made_into_pool
             v = self._box(io, at, at + 8, ot)
-            if _field_type(entry.types[i], key).kind == 'ref':     # an index in the pool: the object, or None
-                v = None if v < 0 else objs[v]
+            ft = _field_type(entry.types[i], key)
+            if ft.kind == 'ref':                 # an index in its class's pool: the object, or None
+                v = None if v < 0 else by_cls[ft.cls][v]
             _set_member(args[i], key, v)
         if status:
             self._failed(entry, status, io)
@@ -2383,13 +2586,54 @@ class Function:
             return self._list_result(entry, io, args)
         if entry.instance_ret and entry.instance_ret[0] == 'pool':     # a reference: the object at that index, or None
             k = self._box(io, 0, 16, r)
-            return None if k < 0 else objs[k]
+            return None if k < 0 else by_cls[entry.instance_ret[1]][k]
         if entry.instance_ret:                  # the instance itself: an argument, an element of one, or an object in one
             k = self._box(io, 0, 16, r)
             if entry.instance_ret[0] == 'path':
                 return _member(args[entry.instance_ret[1]], entry.instance_ret[2])
             return args[k] if entry.instance_ret[0] == 'arg' else args[entry.instance_ret[1]][k]
         return self._box(io, 0, 16, r)
+
+    def _made_into_pool(self, entry, io, args, pool_t, by_cls, columns, refcols, made_k):
+        """The instances the kernel made and kept in the pool: made as __init__ would, after the existing ones, so references
+        to them find them; the existing ones are written back by the caller."""
+        counts = {}
+        for i, key, at, ot in entry.outs:
+            if isinstance(key, str) and key.endswith('.#count'):
+                counts[int(key.split('.')[0])] = self._box(io, at, at + 8, ot)
+        new = {}
+        for k, order in made_k.items():
+            cls = pool_t.elem[0][k][0]
+            objs = by_cls.setdefault(cls, [])
+            start = len(objs)
+            new[k] = (start, [cls.__new__(cls) for _ in range(counts.get(k, start) - start)])
+        for k, (start, made) in new.items():   # every one exists first: a reference may be to any of them
+            by_cls[pool_t.elem[0][k][0]].extend(made)
+        for k, (start, made) in new.items():
+            cls = pool_t.elem[0][k][0]
+            for i, slot, a, ft, held, last in columns:
+                if slot.startswith(f'{k}.'):
+                    for n, o in enumerate(made):
+                        v = a[start + n]
+                        object.__setattr__(o, last, bool(v) if ft is T.BOOL else v)
+            for i, slot, a, held, last, targets in refcols:
+                if slot.startswith(f'{k}.'):
+                    for n, o in enumerate(made):
+                        j = a[start + n]
+                        object.__setattr__(o, last, None if j < 0 else targets[j])
+            order = made_k[k]                    # the attributes in the order __init__ assigns them, as a new one has them
+            for o in made:
+                d = getattr(o, '__dict__', None)
+                if d is not None:
+                    o.__dict__ = {a: d[a] for a in order if a in d}
+        for idx, (i, slot, a, ft, held, last) in enumerate(columns):     # the existing ones: written back as usual
+            k = int(slot.split('.')[0])
+            if k in new:
+                columns[idx] = (i, slot, a, ft, held[:new[k][0]], last)
+        for idx, (i, slot, a, held, last, targets) in enumerate(refcols):
+            k = int(slot.split('.')[0])
+            if k in new:
+                refcols[idx] = (i, slot, a, held[:new[k][0]], last, targets)
 
     def _list_result(self, entry, io, args):
         """A returned list: the argument itself, or a new list of what the kernel built, whose memory is then released."""

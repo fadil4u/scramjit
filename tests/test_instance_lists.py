@@ -196,11 +196,9 @@ def element_and_object(ps, q):
 
 def test_an_element_also_passed_on_its_own():
     p = P(1.0)
-    g = scram(cache=False)(element_and_object)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', FallbackWarning)
-        assert g([p], p) == 6.0 and p.x == 6.0 and not g.signatures
-    assert g([P(1.0)], P(1.0)) == 5.0 and g.signatures
+    g = scram(cache=False, fallback=False)(element_and_object)
+    assert g([p], p) == 6.0 and p.x == 6.0 and g.signatures[0][1].name == 'element of #0'
+    assert g([P(1.0)], P(1.0)) == 5.0 and len(g.signatures) == 2
 
 
 def test_unchanged_values_keep_their_identity():

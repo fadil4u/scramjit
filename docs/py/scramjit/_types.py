@@ -303,18 +303,54 @@ def ref_of(cls):
 _POOLS = {}
 
 
-def pool_of(cls, numbers, refs, roots):
-    """The objects of one class reached through references, each once: a list per number attribute [(name, type)], and an
-    index list per reference attribute [name]. roots: [(argument, path)] it is walked from, path '' for the argument itself."""
-    key = (cls, tuple((a, t.name) for a, t in numbers), tuple(refs), tuple(roots))
+def pool_of(pools, roots, made=()):
+    """The objects references reach, each once, a pool per class: [(class, [(number attribute, type)], [(reference attribute,
+    the class it reaches, or None)])], a list per number and an index list per reference. roots: [(argument, path)] they're
+    walked from, path '' for the argument itself."""
+    key = (tuple((c, tuple((a, t.name) for a, t in ns), tuple(rs)) for c, ns, rs in pools), tuple(roots), tuple(made))
     if key not in _POOLS:
-        shown = ', '.join([f'{a}: {t.name}' for a, t in numbers] + [f'{a}: ref' for a in refs])
-        t = _POOLS[key] = Type(f'pool {cls.__qualname__ if cls else "None"}({shown})', None, 'pool', elem=(list(numbers), list(refs), list(roots)))
-        t.cls = cls
+        shown = '; '.join(f'{c.__qualname__ if c else "None"}(' + ', '.join([f'{a}: {t.name}' for a, t in ns] + [f'{a}: ref' for a, _ in rs]) + ')'
+                          for c, ns, rs in pools)
+        shown += ''.join(f'; makes {pools[k][0].__qualname__}' for k, _ in made)
+        _POOLS[key] = Type(f'pool {shown}', None, 'pool', elem=([(c, list(ns), list(rs)) for c, ns, rs in pools], list(roots), list(made)))
     return _POOLS[key]
 
 
 NOPOOL = Type('no pool', None, 'nopool')
+
+_REFLIST = {}
+
+
+def reflist_of(cls):
+    """A list of objects kept in a pool (or None): a list of their indexes, written back as the objects."""
+    if cls not in _REFLIST:
+        t = _REFLIST[cls] = Type(f'list[ref {cls.__qualname__ if cls else "None"}]', None, 'reflist', elem=cls)
+        t.cls = cls
+    return _REFLIST[cls]
+
+
+_POOLREF = {}
+
+
+def poolref_of(pool, cls, lists=True):
+    """A reference given to a compiled callee: its index, and, for the first such argument of a call (lists), the caller's
+    pool lists, so the callee reads and writes the caller's objects."""
+    key = (pool, cls, lists)
+    if key not in _POOLREF:
+        t = _POOLREF[key] = Type(f'ref {cls.__qualname__ if cls else "None"} into {pool.name}' + ('' if lists else ' (lists given before)'),
+                                 None, 'poolref', elem=(pool, cls, lists))
+        t.cls = cls
+    return _POOLREF[key]
+
+_INLIST = {}
+
+
+def inlist_of(i):
+    """An argument that is an element of argument i, a list of instances: its place there, so its attributes are that
+    list's, and a write through either name is seen through the other."""
+    if i not in _INLIST:
+        _INLIST[i] = Type(f'element of #{i}', 'int64_t', 'inlist', elem=i)
+    return _INLIST[i]
 
 
 _REFS = {}

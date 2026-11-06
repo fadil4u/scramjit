@@ -29,6 +29,7 @@ def attribute_number(name):
     return ATTRIBUTE_NAMES.index(name)
 
 
+POOL_FULL = 14       # an instance made into a pool found no room left: the call is made again with more (nothing was written back)
 LINSPACE_ERROR = 12  # np.linspace of a number of samples, in io[2], that is negative or too many
 MAKE_DTYPES = ['float64', 'int64', 'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
 RETURNS_INT = 2      # a returned float's flag, when the value is really a Python int

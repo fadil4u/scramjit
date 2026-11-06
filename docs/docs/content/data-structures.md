@@ -12,7 +12,7 @@ At a glance:
 | Lists | lists of numbers made in the function, passed in, returned, and at module level (from 0.0.4) | `append` and every method that resizes, `in`, slices, aliases (`ys = xs`), mixed ints and floats |
 | Lists of lists | rectangular, passed in, made in the function and returned (from 0.0.4) | ragged, one row in two places, `m[i, j]`, slices, replacing a row, three levels made in the function |
 | Dicts | passed in, reading and writing the keys the function names | building one, adding or deleting keys, `len`, `in`, `.get`, iterating, a key in a variable |
-| Instances (from 0.0.4) | passed in or at module level, made in the function, `@scram` methods; attributes read and written, objects in attributes; methods; passing them on, returning them, `isinstance`; lists of them: plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | properties, static and class methods, adding an attribute, a list made in the function |
+| Instances (from 0.0.4) | passed in or at module level, made in the function, `@scram` methods; attributes read and written, objects in attributes; methods and operators (`a + b`), new instances from calls; one object under several names; passing them on, returning them, `isinstance`; lists of them; linked structures (`n = n.next`) and rebinding (`a.pos = b.pos`): plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | properties, static and class methods, adding an attribute, a list made in the function, keeping new instances in a linked structure |
 | Enums | `Enum` and `IntEnum` members with int values | `.name`, `Cell(1)`, iterating the class, `Flag` and string enums |
 | Module-level constants | numbers, tuples, arrays, dicts, lists, enum classes, instances (from 0.0.4) | strings, `None`, assigning with `global` |
 | Sets, strings | | all of them |
@@ -978,11 +978,38 @@ An instance made here can hold other objects: `b = Body(Vec(x, y), v)` makes `b.
 
 ### Objects in attributes
 
-`b.pos.x`, `self.pos.norm()` and `d.inner.pos.x += 1.0` compile: each number on the way is a variable, read at the call and written back if assigned. `return b.pos` returns that very object. Assigning an object (`a.pos = b.pos`) runs as Python.
+`b.pos.x`, `self.pos.norm()` and `d.inner.pos.x += 1.0` compile: each number on the way is a variable, read at the call and written back if assigned. `return b.pos` returns that very object. Assigning an object (`a.pos = b.pos`) makes `pos` a reference: see [References chosen by data](#references-chosen-by-data).
 
 ### One object under several names
 
 An object can be reached two ways: `f(p, p)`, `b.pos is b.vel`, `c.pos is a.pos` for two arguments, a node whose `next` is itself, or `p.absorb(p)` and `chase(p, p)` inside a compiled function. Which names share an object is part of the signature, like a type: each object is one set of variables however many names reach it, so a write through one name is seen through the others, as in Python, and nothing in the C can alias. Calling `f(p, p)` and then `f(p, q)` compiles twice, and each call checks which pattern it has. Two elements of one list (`ps[i]` and `ps[j]`) are chosen by data: they may be one instance or two. Given to a compiled function or method that assigns attributes, they go by reference, as the attributes' lists and the place in them, so when `i == j` a write through one is seen through the other, as in Python. A list can hold one instance several times (`[p, q, p]`): its attributes' lists then hold each instance once, and an index list says which instance is at each place, so `ps[0].x = 1.0` is seen at `ps[2].x`.
+
+### References chosen by data
+
+When which object a name or an attribute holds depends on the data, it's a reference: walking a linked structure, rebinding an attribute, `None` at the end.
+
+```python
+@dataclass
+class Node:
+    key: int
+    left: object = None
+    right: object = None
+    visits: int = 0
+
+@scram
+def find(root, key):
+    node = root
+    while node is not None:
+        node.visits += 1
+        if key == node.key:
+            return node
+        node = node.left if key < node.key else node.right
+    return None
+```
+
+At each call, the objects references reach from the arguments are gathered once each into a pool: a list per number they hold, an index list per reference. A reference is its object's index, `None` is -1, so `node = node.left` is reading an index, `node.visits += 1` writes a list, and `is None`, `is`, `is not` and truth (`while node:`) compare indexes. Reading through `None` raises Python's `AttributeError: 'NoneType' object has no attribute 'visits'`. After the call the numbers and references that changed go back onto the objects, so reversing a linked list in place, `cur.next = prev`, leaves the objects linked as Python would, and a returned reference is the object itself, or `None`. A cycle is fine: each object is in the pool once. `a.pos = b.pos`, where `a` and `b` are arguments, makes `a.pos` a reference too, and `a.pos.x = 9.0` is then seen through `b.pos`.
+
+The pool costs a walk over the objects reached at each call, so it pays off when the function does many steps per object, as lookups do. Stays Python, for now: references to objects of more than one class in one function, passing a reference to another function or calling its method, `==` between references (it calls `__eq__`), a class with `__bool__` or `__len__`, and keeping an instance made in the function in a linked structure (`n.next = Node(...)`).
 
 ### Other ways to use an instance
 

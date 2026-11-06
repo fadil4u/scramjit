@@ -27,7 +27,7 @@ import sys
 
 from ._mathlib import snippets
 from . import _mathlib
-from ._runtime import (ARANGE_ERROR, BROADCAST_ERROR, INDEX_ERROR, INTERRUPTED, LINSPACE_ERROR, MAKE_DTYPES, MAKE_ERROR, NO_AXIS, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
+from ._runtime import (ATTRIBUTE_NONE, attribute_number, ARANGE_ERROR, BROADCAST_ERROR, INDEX_ERROR, INTERRUPTED, LINSPACE_ERROR, MAKE_DTYPES, MAKE_ERROR, NO_AXIS, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
                        OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION)
 
 BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'round', 'sum', 'any', 'all')
@@ -522,7 +522,8 @@ def flatten_dicts(fdef, arg_types):
     parameter types, and {variable: (argument index, key, how the user wrote it)}."""
     a = fdef.args
     params = a.posonlyargs + a.args
-    if not any(t is not None and t.kind in ('dict', 'object', 'objlist', 'madeclass', 'elemref') for t in arg_types) or len(params) != len(arg_types):
+    if not any(t is not None and t.kind in ('dict', 'object', 'objlist', 'madeclass', 'elemref', 'pool', 'ref', 'nopool') for t in arg_types) \
+            or len(params) != len(arg_types):
         return fdef, arg_types, {}
     tree = copy.deepcopy(fdef)
     taken = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {p.arg for p in params}
@@ -562,8 +563,25 @@ def flatten_dicts(fdef, arg_types):
     pools = {}                                   # a list with repeats -> its index list
     inner_lists = {}                             # 'ps.pos' -> the type of the objects in that attribute of ps's elements
     refs = {}                                    # an element given by reference -> (its own list's name, its index's, its type)
+    pool, pool_numbers, pool_refs, refnames, ref_fields = None, set(), set(), set(), set()
     for i, (p, t) in enumerate(zip(tree.args.posonlyargs + tree.args.args, arg_types)):
-        if t.kind == 'same':
+        if t.kind in ('same', 'nopool'):
+            continue
+        if t.kind == 'pool':                     # objects references reach: a list per number, an index list per reference
+            pool = p.arg
+            numbers, prefs, _ = t.elem
+            for key, ft in list(numbers) + [(a, T.INT) for a in prefs]:
+                flat[pool, key] = fresh(f'sjpool__{key}')
+                slots[flat[pool, key]] = (i, key, f'[a referenced object].{key}')
+                new_params.append(ast.copy_location(ast.arg(flat[pool, key]), p))
+                new_types.append(T.list_of(ft))
+            pool_numbers, pool_refs = {k for k, _ in numbers}, set(prefs)
+            continue
+        if t.kind == 'ref':                      # a reference chosen by data: its index in the pool, -1 for None
+            refnames.add(p.arg)
+            plain[p.arg] = i
+            new_params.append(p)
+            new_types.append(T.INT)
             continue
         if t.kind == 'elemref':                  # the attributes' lists, then the index: an element of a list of its own
             pl = fresh(f'sjref__{p.arg}')
@@ -603,6 +621,9 @@ def flatten_dicts(fdef, arg_types):
                 base = owner.replace('.', '__')
                 name = fresh(f'{base}__{key}' if isinstance(key, str) and key.isidentifier() and key.isascii() else f'{base}__k{k}')
                 flat[owner, key] = name
+                if ft.kind == 'ref':                # a reference in a fixed place: its index, a variable
+                    ref_fields.add((owner, key))
+                    ft = T.INT
                 if ft.kind == 'function':           # a method: called as a function, with p's attributes as self
                     methods[owner, key] = ft
                 shown = f'{owner}.{key}' if t.kind == 'object' else f'{p.arg}[...].{key}' if t.kind == 'objlist' else f'{p.arg}[{key!r}]'
@@ -640,7 +661,8 @@ def flatten_dicts(fdef, arg_types):
             if isinstance(n, ast.Name) and n.id == p:
                 n.id = q
         start = ast.copy_location(ast.Assign([ast.Name(q, ast.Store())], ast.Name(p, ast.Load())), tree.body[0])
-        tree.body.insert(0, ast.fix_missing_locations(start))
+        doc = 1 if isinstance(tree.body[0], ast.Expr) and isinstance(tree.body[0].value, ast.Constant) and isinstance(tree.body[0].value.value, str) else 0
+        tree.body.insert(doc, ast.fix_missing_locations(start))      # after a docstring, which must stay first
         copied[q] = p
         makers[id(start)] = 'copy'
 
@@ -878,7 +900,45 @@ def flatten_dicts(fdef, arg_types):
             name, ps, counter, start = found
             return ast.comprehension(ast.Name(index[name], ast.Store()), range_of(ps, n.iter), [self.visit(x) for x in n.ifs], n.is_async)
 
+        def visit_If(self, n):
+            n.test = truth(n.test, self.visit)
+            n.body = [x for s in n.body for x in (lambda r: r if isinstance(r, list) else [r])(self.visit(s))]
+            n.orelse = [x for s in n.orelse for x in (lambda r: r if isinstance(r, list) else [r])(self.visit(s))]
+            return n
+
+        visit_While = visit_If
+
+        def visit_IfExp(self, n):
+            ref = refexpr(n)
+            n.test = truth(n.test, self.visit)
+            n.body, n.orelse = [ast.copy_location(ast.Constant(-1), x) if ref and none(x) else self.visit(x) for x in (n.body, n.orelse)]
+            return n
+
+        def visit_BoolOp(self, n):
+            n.values = [truth(v, self.visit) for v in n.values] if any(refexpr(v) for v in n.values) else [self.visit(v) for v in n.values]
+            return n
+
+        def visit_UnaryOp(self, n):
+            if isinstance(n.op, ast.Not) and refexpr(n.operand):
+                return ast.copy_location(ast.Compare(self.visit(n.operand), [ast.Eq()], [ast.Constant(-1)]), n)
+            return self.generic_visit(n)
+
+        def visit_Compare(self, n):
+            sides = [n.left] + n.comparators
+            if any(refexpr(x) for x in sides):
+                if len(n.ops) != 1 or not isinstance(n.ops[0], (ast.Is, ast.IsNot)):
+                    raise Unsupported(n, 'a reference compared other than with is or is not (== calls __eq__)')
+                a, b = sides
+                if not all(refexpr(x) or none(x) for x in sides):
+                    raise Unsupported(n, 'a reference compared with something other than a reference or None')
+                side = [ast.Constant(-1) if none(x) else self.visit(x) for x in (a, b)]
+                return ast.copy_location(ast.Compare(side[0], [ast.Eq() if isinstance(n.ops[0], ast.Is) else ast.NotEq()], [side[1]]), n)
+            return self.generic_visit(n)
+
         def visit_Assign(self, n):
+            if len(n.targets) == 1 and none(n.value) and (isinstance(n.targets[0], ast.Name) and n.targets[0].id in refnames or
+                                                         isinstance(n.targets[0], ast.Attribute) and refexpr(n.targets[0])):
+                n.value = ast.copy_location(ast.Constant(-1), n.value)     # None, as a reference
             if makers.get(id(n)) == 'make':
                 return self.construct(n)
             if makers.get(id(n)) == 'copy':
@@ -908,6 +968,8 @@ def flatten_dicts(fdef, arg_types):
 
         def visit_Call(self, n):
             f = n.func
+            if (refnames or pool) and (any(refexpr(a) for a in n.args) or isinstance(f, ast.Attribute) and refexpr(f.value)):
+                raise Unsupported(n, 'passes a reference chosen by data to a function or method, or calls its method: not yet')
             if isinstance(f, ast.Name) and f.id == 'isinstance' and len(n.args) == 2 and self.instance(n.args[0]):
                 owner = self.instance(n.args[0])[0]
                 mark = ast.copy_location(ClassOf(0), n.args[0])
@@ -1060,6 +1122,11 @@ def flatten_dicts(fdef, arg_types):
                 if idx is None else [(flat[owner, k], pooled(owner, idx)) for k in sorted(t.writes) if (owner, k) in flat]
 
         def visit_Attribute(self, n):
+            if refexpr(n.value):                 # through a reference: the pool's list, at its index
+                if n.attr not in pool_numbers and n.attr not in pool_refs:
+                    raise Unsupported(n, f'.{n.attr} of an object a reference reaches: only its numbers and references compile')
+                idx = deref(self.visit(n.value), n.attr, n)
+                return ast.copy_location(ast.Subscript(ast.Name(flat[pool, n.attr], ast.Load()), idx, n.ctx), n)
             el = element_of(n.value)
             owner = el[0] if el else owner_of(n.value) or (n.value.id if isinstance(n.value, ast.Name) else None)
             if owner is not None and (owner, n.attr) in methods:
@@ -1082,6 +1149,11 @@ def flatten_dicts(fdef, arg_types):
 
         def visit_Return(self, n):
             v = n.value
+            if ref_returns:                      # a reference, or None: the object is found by its index after the call
+                if v is not None and not refexpr(v) and not none(v):
+                    raise Unsupported(n, 'returns a reference at one return and something else at another')
+                returned.append(('pool',))
+                return ast.copy_location(ast.Return(ast.Constant(-1) if v is None or none(v) else self.visit(v)), n)
             if isinstance(v, ast.Name) and v.id in made_local:       # a new instance: its attributes, made into one by the call
                 leaves = []
 
@@ -1353,6 +1425,47 @@ def flatten_dicts(fdef, arg_types):
     def holds_object(v, keys):
         """Of an instance made here, an attribute among keys that is another name for an object."""
         return next((k for k in keys if f'{v}.{k}' in same), None)
+    def refexpr(e):
+        """Is e a reference chosen by data: a name holding one, or a reference attribute reached from one or from a
+        fixed place?"""
+        if isinstance(e, ast.Name):
+            return e.id in refnames
+        if isinstance(e, ast.IfExp):             # a if c else b: a reference if either is, and the other is one or None
+            return (refexpr(e.body) or refexpr(e.orelse)) and all(refexpr(x) or none(x) for x in (e.body, e.orelse))
+        if isinstance(e, ast.Attribute):
+            o = owner_of(e.value)
+            return o is not None and (o, e.attr) in ref_fields or e.attr in pool_refs and refexpr(e.value)
+        return False
+
+    def none(e):
+        return isinstance(e, ast.Constant) and e.value is None
+    if pool is not None or refnames:
+        for _ in range(16):
+            grew = False
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and n.targets[0].id not in refnames \
+                        and refexpr(n.value):
+                    refnames.add(n.targets[0].id)
+                    grew = True
+            if not grew:
+                break
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.AugAssign, ast.For, ast.comprehension, ast.NamedExpr, ast.AnnAssign)) and any(
+                    isinstance(x, ast.Name) and x.id in refnames for x in [n.target] + list(getattr(n.target, 'elts', []))):
+                raise Unsupported(n, 'a reference is assigned in a way other than name = reference or None')
+            if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in refnames for t in n.targets) and \
+                    not (len(n.targets) == 1 and (refexpr(n.value) or none(n.value))):
+                raise Unsupported(n, f'{n.targets[0].id if isinstance(n.targets[0], ast.Name) else "a reference"} holds a reference, and is assigned something else')
+    ref_returns = any(isinstance(n, ast.Return) and n.value is not None and refexpr(n.value) for n in ast.walk(tree))
+
+    def deref(idx, attr, node):
+        """A reference read through: its index, after checking it isn't None, as Python's AttributeError would."""
+        return ast.copy_location(ast.Call(ast.Name('__sj_deref__', ast.Load()), [idx, ast.Constant(attribute_number(attr))], []), node)
+
+    def truth(x, visit):
+        if refexpr(x):                           # an instance is true, None false
+            return ast.copy_location(ast.Compare(visit(x), [ast.NotEq()], [ast.Constant(-1)]), x)
+        return visit(x)
     pindex = {p.arg: i for i, p in enumerate(params)}
     returned = []
     tree = Flatten().visit(tree)
@@ -2880,6 +2993,9 @@ class Compiler:
                 self.fail(e, f'passes {t.name} to {e.func.id}()')
         types = [ts[k] for k in picked]
         for h in spec.hidden:
+            if h[1] == 'sjpool':                 # its references' pool: not made for a call from compiled code, yet
+                types.append(T.NOPOOL)
+                continue
             p = self.hidden_param(h)
             if p not in self.env:
                 self.fail(e, f'calls {e.func.id}(), which reads the global {h[1]}')
@@ -2953,10 +3069,10 @@ class Compiler:
         chosen = []
         for k in picked:
             chosen += done[k][1] if done[k][0] == 'self' else [done[k]]
-        chosen += [(self.env[self.hidden_param(h)], self.hidden_param(h)) for h in spec.hidden]
+        chosen += [(self.env[self.hidden_param(h)], self.hidden_param(h)) if h[1] != 'sjpool' else (T.NOPOOL, None) for h in spec.hidden]
         cargs, arrays = [], []
         for t, v in chosen:
-            if t.kind in ('function', 'enumclass', 'classref', 'madeclass'):
+            if t.kind in ('function', 'enumclass', 'classref', 'madeclass', 'nopool'):
                 continue
             if t.kind == 'array':
                 arrays.append(v)
@@ -4051,6 +4167,8 @@ class Compiler:
         self.fail(e, f'isinstance() of a {t.name}')
 
     def call_type(self, e):
+        if isinstance(e.func, ast.Name) and e.func.id == '__sj_deref__':
+            return T.INT
         if self.isinstance_of(e) is not None:
             return T.BOOL
         if self.callee_of(e) is not None:
@@ -6380,6 +6498,10 @@ class Compiler:
         return r, rf
 
     def call(self, e):
+        if isinstance(e.func, ast.Name) and e.func.id == '__sj_deref__':     # a reference read through: None raises
+            v = self.hold(self.expr(e.args[0])[0], T.INT)
+            self.emit(f'if ({v} < 0) SJ_FAIL({ATTRIBUTE_NONE}, {self.line(e)}, {e.args[1].value}, 0);')
+            return v, flag_of(T.INT)
         known = self.isinstance_of(e)
         if known is not None:
             return ('1' if known else '0'), flag_of(T.BOOL)

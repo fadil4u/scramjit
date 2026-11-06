@@ -93,7 +93,7 @@ def bodies():
     (run, lambda: [bodies(), 50, 0.1], True),
     (writes_inner, lambda: [bodies()], True),
     (deep, lambda: [Deep(bodies())], True),
-    (assigns_object, lambda: [bodies(), bodies()], False),
+    (assigns_object, lambda: [bodies(), bodies()], True),        # pos is a reference: a.pos is b's object after
     (through_property, lambda: [Prop()], False),
 ])
 def test_nested(f, make, compiled):

@@ -29,6 +29,8 @@ Python and through scramjit, and asserts the results are identical. They need nu
 | [`particles.py`](particles.py) | Gravity between 200 particles in a plain list of dataclass instances, with methods, a helper taking two particles and a constant at module level | Every particle pulls on every other, each step on the last | 0.27 s | 13 ms | 21x |
 | [`vectors.py`](vectors.py) | Rays against a sphere with a small vector dataclass: a `Vec` made for each pixel, normalized by a method, handed to the sphere's method | Each pixel's hit depends on its ray, and its shade on the hit | 0.15 s | 5.4 ms | 27x |
 | [`shared_target.py`](shared_target.py) | A bouncing ball that a camera and a spotlight, all dataclasses, both aim at: their `target` is the ball itself | Each step depends on the last; one object under three names | 0.24 s | 3.2 ms | 73x |
+| [`vector_math.py`](vector_math.py) | A charged particle in a magnetic field, with a vector dataclass's `+`, `*` and `@` (cross product) making a new `Vec` at each step | Each step depends on the last; no `Vec` is allocated compiled | 0.47 s | 9.4 ms | 50x |
+| [`search_tree.py`](search_tree.py) | 200,000 lookups in a binary search tree of dataclass nodes, `node = node.left if key < node.key else node.right`, counting visits on the nodes | Where each walk goes depends on the keys; a branch nothing can predict at every node keeps the gain small | 0.44 s | 73 ms | 6x |
 | [`config_dict.py`](config_dict.py) | An epidemic model with its settings and results in dicts | Each day depends on the one before | 0.081 s | 4.4 ms | 18x |
 
 One run of each on arm64 Linux, on a busy machine, so expect faster and somewhat different numbers. The

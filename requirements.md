@@ -217,14 +217,19 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   walking a structure, keeping objects made in a loop) do objects live in per-class struct-of-arrays pools referenced by integer index.
   Rejected: struct pointers everywhere, since cimo doesn't keep fields in registers through them even with `restrict` (1.2x to 1.8x
   slower, measured), and CPython-style objects, whose cost is boxing, dispatch and hashing, not the indirection.
-  **Alias pattern built (2026-11-05):** `_object_graph` walks the instance arguments along the paths the function names with one identity
-  memo; an object met again is `T.same_as(i, path)` (i None: within its own argument) and its type is made for the union of what every name
-  uses, re-walked until the use trees stop growing. `flatten_dicts` rewrites a `same_as` parameter to its target's path and maps a `same_as`
-  attribute to the target's owner, so both names are one set of variables. A plan checks `a_i is a_j` (a pattern through attributes takes
-  the general path). Inside compiled code, `share_passed` does the same for arguments naming one owner at one index: the callee gets one
-  parameter set. An object handed to a callee becomes the callee's root (`handed`): a `same_as` inside it is rebased, one pointing outside
-  is expanded into the target's fields, wired to the caller's variables for it. Not yet in the pattern: dicts and lists (an instance's own
-  `__dict__` passed as a dict, or one list under two names, still refuse).
+  **Built (2026-11-05)**, onto the existing case code rather than replacing it (`TODO.md`, "Object model: what's left"):
+  the alias pattern (`T.same_as`; `_object_graph` walks the paths with one identity memo, an object handed to a callee is rebased or
+  expanded, `handed`); two elements given to a callee go by reference (`T.elemref_of`: the lists and the index) only where what's
+  assigned through one is used through the other, so code that compiled by value keeps its C; a list with repeats, or objects
+  shared by elements, is pooled per path (`objlist_of(..., shared)`: lists of each object once, an index list per pooled level).
+  A call returning a new instance (`returns_made`) hands back its attributes and the caller's name holds them; `a + b` is
+  `type(a).__add__` unless it can return `NotImplemented` or `b` is another class (Python may try `b.__radd__` first); a new
+  instance inside an expression is hoisted to where Python makes it, refused past a call that may assign or under a condition.
+  A parameter only ever given new instances starts as a copy of the argument's numbers, valid only if nothing is written through
+  it first and it isn't returned or compared with `is`. References chosen by data (`n = n.next`, `a.pos = b.pos`) index one
+  pool per call of one class (`T.pool_of`, `_pool_plan`), None is -1, reading through it raises `AttributeError` (status 13,
+  names in `ATTRIBUTE_NAMES`); the pool walk is O(objects reached) per call. Speed: tree lookups 21 ns per node against 170 in
+  Python (6x, branch misses dominate); vector operators 50x; C unchanged on the earlier class examples.
 - **numpy on single numbers (built 2026-11-02).** 25 of 26 functions matched libm bit for bit on 160,024 inputs on arm64 and in Pyodide, so they
   call it; `np.tanh` doesn't, natively. Types are the trap: `np.abs(4)` is int64 natively and int32 in Pyodide, `np.floor(4)` changed in numpy 2.1,
   `np.sqrt(True)` is float16, so those stay Python. `np.minimum(0.0, -0.0)` differs by platform, so the compiler asks the numpy present.

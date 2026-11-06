@@ -18,6 +18,17 @@ BROADCAST_ERROR = 10  # assigning an array to a slice: io[2] and io[3] hold the 
 MAKE_ERROR = 64      # allocating an array failed: 64 + index in MAKE_DTYPES, with the shape in io[0], io[2], io[3], io[4] (NO_AXIS: no such axis)
 NO_AXIS = -(1 << 63)
 ARANGE_ERROR = 11    # np.arange can't compute a length: its numbers in io[0], io[2], io[3], how to read each in io[4]
+ATTRIBUTE_NONE = 13  # an attribute read through a reference that is None: io[2] is the attribute's number in ATTRIBUTE_NAMES
+ATTRIBUTE_NAMES = []
+
+
+def attribute_number(name):
+    """The number an attribute's name has in ATTRIBUTE_NAMES, for the message of an AttributeError a kernel raises."""
+    if name not in ATTRIBUTE_NAMES:
+        ATTRIBUTE_NAMES.append(name)
+    return ATTRIBUTE_NAMES.index(name)
+
+
 LINSPACE_ERROR = 12  # np.linspace of a number of samples, in io[2], that is negative or too many
 MAKE_DTYPES = ['float64', 'int64', 'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
 RETURNS_INT = 2      # a returned float's flag, when the value is really a Python int
@@ -113,6 +124,8 @@ def exception(status, io):
         return OverflowError(OVERFLOW_ERROR_MESSAGES[io[2]])
     if status == LIST_INDEX_ERROR:
         return IndexError(LIST_INDEX_MESSAGES[io[2]])
+    if status == ATTRIBUTE_NONE:
+        return AttributeError(f"'NoneType' object has no attribute '{ATTRIBUTE_NAMES[io[2]]}'")
     if status == MEMORY_ERROR:
         return MemoryError()
     if status == BROADCAST_ERROR:

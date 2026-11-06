@@ -288,6 +288,35 @@ def same_as(i, path=()):
     return _SAME[key]
 
 
+_POOLREFS = {}
+
+
+def ref_of(cls):
+    """A reference to an object of a pooled class, chosen by data (n = n.next, a.pos = b.pos): its index in the pool, or
+    -1 for None. cls None: only ever None seen."""
+    if cls not in _POOLREFS:
+        _POOLREFS[cls] = Type(f'ref {cls.__qualname__ if cls else "None"}', 'int64_t', 'ref', elem=cls)
+        _POOLREFS[cls].cls = cls
+    return _POOLREFS[cls]
+
+
+_POOLS = {}
+
+
+def pool_of(cls, numbers, refs, roots):
+    """The objects of one class reached through references, each once: a list per number attribute [(name, type)], and an
+    index list per reference attribute [name]. roots: [(argument, path)] it is walked from, path '' for the argument itself."""
+    key = (cls, tuple((a, t.name) for a, t in numbers), tuple(refs), tuple(roots))
+    if key not in _POOLS:
+        shown = ', '.join([f'{a}: {t.name}' for a, t in numbers] + [f'{a}: ref' for a in refs])
+        t = _POOLS[key] = Type(f'pool {cls.__qualname__ if cls else "None"}({shown})', None, 'pool', elem=(list(numbers), list(refs), list(roots)))
+        t.cls = cls
+    return _POOLS[key]
+
+
+NOPOOL = Type('no pool', None, 'nopool')
+
+
 _REFS = {}
 
 

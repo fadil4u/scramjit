@@ -216,7 +216,8 @@ Pre-release: the API may still change.
 - Data structures: dicts passed in with keys that don't change, tuples to any depth, enums, local lists, and module-level
   numbers, tuples, arrays and dicts compile. On `main`, from 0.0.4: lists passed in, lists of lists, and attributes of
   classes: instances and dataclasses passed in or made in the function, their methods, objects in attributes, lists of them,
-  and one object reached under several names (`f(p, p)`, `b.pos is b.vel`), which name shares is part of the signature.
+  one object reached under several names (`f(p, p)`, `b.pos is b.vel`), methods and operators returning new
+  instances (`a + b`), and linked structures and rebinding (`n = n.next`, `a.pos = b.pos`).
 - Next: see [`TODO.md`](https://github.com/farizrahman4u/scramjit/blob/main/TODO.md).
 
 ## Development

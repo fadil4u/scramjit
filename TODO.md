@@ -402,8 +402,14 @@ Spills per line, once cimo can report them.
       `math.hypot` in the last bit for 12% of 2M random pairs; viewshed's 0/1 output hides it) and checks no bounds. The
       same loop in C: `sqrt(a*a + b*b)` cimo 0.98, gcc 1.12 ms; glibc `hypot` (gcc) 1.53; cimo's bundled `hypot` 2.19
       (in cimo's TODO); `sj_hypot2` cimo 2.73, gcc 2.93. Bounds checks 0.25 ms, a branchless max nothing. So the gap is
-      the exact `hypot`. Next idea: a certified fast path (one `sqrt` of an fma, its residual checked with fmas, no
-      division; `sj_hypot2` when the check fails), if CPython's result is provably the correctly rounded one there.
+      the exact `hypot`. **Tried, rejected (2026-11-07):** a certified fast path (`h = sqrt(fl(a*a + b*b))`, the
+      residual `s - h*h` from fma splits, `h` or a neighbour picked against the halfway points with 2**-90 * s to
+      spare, the exact code otherwise; CPython's result is t correctly rounded unless t is within about 2**-98 * s of a
+      halfway point). It was bit-identical on 240,000 pairs and never fell back on 10M random pairs, with a latency of
+      16 ns against 42, but throughput didn't improve (about 10 ns a call both), and viewshed got slower: 4.5 against
+      3.8 ms (branches or selects), 4.2 as a function of its own. The loop overlaps iterations, so latency doesn't count
+      there, and the fast path has as many instructions plus moves between FP and integer registers. Speeding up the
+      exact code itself is what's left (fewer instructions, not a shorter chain).
     - ~~**Histogram, 2x behind everyone**~~ **done** (2026-11-07): 1.35 to 0.73 ms (Numba 0.69, gcc 0.62). `int()` of a
       float is one `fabs(v) < 2**63` test and a cast, NaN and inf tested only past it; an `if`'s chained comparisons
       (`0 <= k < nb`) and every comparison of an `and` now add up to range facts for its body (`guard_facts`), so

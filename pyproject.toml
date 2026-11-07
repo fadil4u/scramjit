@@ -22,6 +22,7 @@ scramjit = "scramjit.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest", "numpy"]
+bench = ["numpy", "numba", "cython"]     # bench/compare.py only
 
 [project.urls]
 Homepage = "https://www.scramjit.dev"

@@ -386,24 +386,26 @@ Spills per line, once cimo can report them.
     The cost was mostly cimo's, now much less (cimo 2026-11-05): this shape of function, 60 loops all versioned (4,150 lines
     of C), 32.6 to 7.9 s, 120 small loops 21.4 to 2.7 s; what's left grows about 3x per doubling. Raise the cap to match.
     Depth is a guess at which loops run most: a profile (`counts=True`) would know.
-18. **scramjit against Numba and Cython: measure, then close the gaps.** The README compares with
-    CPython and hand-written C; the question everyone will ask is how it compares with what they use
-    today. `bench/compare.py`, run on x86-64 Linux and arm64 Linux (an investor's or a reviewer's machine
-    is x86), reported as one table in the README and the site:
-    - Kernels: the existing `bench/kernels.py` set plus three where Numba is known to be strong (a
-      float64 dot/axpy that it vectorizes, a stencil, a histogram) and one where it's weak (a loop with
-      Python-level dict or tuple work).
-    - Columns: CPython, scramjit, Numba (`@njit`, `fastmath=False` to match parity, and once with
-      `fastmath=True`), Cython (typed, `boundscheck=False`), hand-written C via gcc -O3. Steady-state
-      time, first-call time including compile, install size on disk (Numba + llvmlite about 100 MB;
-      Cython needs a C compiler; scramjit about 1 MB), and whether it runs in Pyodide (only scramjit).
-    - Report losses as they are; the "runs everywhere" claim doesn't need wins on every row.
-    - Then improve, biggest gap first, each with a measurement before and after. Expected gaps and where
-      they land: FP reductions that Numba vectorizes with `fastmath` (an opt-in `reassociate=True` that maps
-      to cimo's `#pragma omp simd reduction`), 128-bit lanes against Numba's AVX2 on x86 (cimo's TODO: AVX2
-      behind a check at load), bounds checks that Numba drops by proving ranges (#3 above), call overhead
-      (1.4 µs against Numba's about 0.3 µs; a typed fast path in `_dispatch`).
-    - Keep the script runnable by anyone: `pip install numba cython` are dev extras, never dependencies.
+18. **scramjit against Numba and Cython: measured on arm64 (2026-11-07), now close the gaps.** `bench/compare.py`
+    (kernels in `bench/compare_kernels.py`, typed Cython in `bench/compare_cy.pyx`; numba and cython are dev extras,
+    never dependencies), table in the README ("Against Numba and Cython"). Every column matches CPython's results but
+    fastmath's. On par: Gray-Scott, flood fill, dot and axpy without fastmath. Numba doesn't compile the dict and dataclass
+    kernels, and Cython as written gains nothing on them (scramjit 19x and 49x). Still to do: **run on x86-64** (a
+    reviewer's machine is x86; needs another machine) and put the table on the site. Gaps, biggest first, each to fix with
+    a measurement before and after:
+    - **Viewshed, 5.6x behind Numba** (8.7 against 1.6 ms; 3.5 with `parity=False`, Cython 3.3, gcc 2.7): exact
+      `math.hypot` (the correctly rounded vector norm) and `round` half to even, per inner step. A fast path for hypot
+      of two finite values whose result needs no correction? Find where the time goes first.
+    - **Histogram, 2x behind everyone** (1.35 against 0.62 to 0.69 ms): `int(x)` is three tests (NaN, inf, range in
+      `sj_float_to_int`) where one `!(fabs(t) < 0x1p63)` covers all three; `counts[k]` keeps its negative wrap and bounds
+      check though `0 <= k < nb` with `nb = len(counts)` was just tested (range facts from an `if`, #4); `+= 1` checks
+      overflow.
+    - **Float sums with fastmath, 3x** (dot: 0.34 against 1.02 ms): Numba reorders the sum to vectorize it. An opt-in
+      (`parity=False` already reorders nothing; a separate `reassociate=True`, through cimo's `#pragma omp simd reduction`).
+    - **First call, 2 to 8x Numba's** (0.1 to 1 s against 0.04 to 0.12 s, cold, after one warm-up compile each): #19.
+    - Call overhead (1.4 µs against Numba's about 0.3 µs) isn't in the table yet: add a per-call row.
+    - On this CPU (Snapdragon X), LLVM crashes tuning for `oryon-1`, so the script points Numba at a generic arm64 CPU
+      with the host's features and says so.
 19. **Compile time.** A first call costs seconds, not the 0.1 s the README's `ema` example suggests: 0.53 s
     on Gray-Scott, 0.76 s native and 1.75 s in Pyodide for the LLM demo's forward pass, 3 s for a 200-line
     generated loop and up to 15 s with bounds-check versioning (#16). Every candidate in a generated-code

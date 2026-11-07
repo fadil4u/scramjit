@@ -517,32 +517,57 @@ Spills per line, once cimo can report them.
     silently changes semantics. Read `_compiler.py` by lowering (indexing and views first, then
     bounds-check versioning, then calls), and record what was checked and found here.
 22. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has. Little to win: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, which leaves temporary arrays.
-23. **Lists that grow: `append`, `pop`, `extend`, outputs of unknown size. Next up.** The most common Python shape
-    scramjit can't compile: `out = []`, a loop, `out.append(x)`, `return out`. Callers work around it with a
-    preallocated array counted past its end and the call made again with more room (the case study, Demos #2). What
-    exists: a local list is a pointer and a length (`v_x`, `v_x__n`, a flag per element when ints and floats mix,
-    `v_x__np`), freed when it goes; a comprehension with two loops already grows by doubling `realloc`
-    (`make_list`); a list passed in is copied into an `array` and its changed elements written back (`_snapshot`); a
-    returned list is boxed by the dispatcher. In steps, each with its differential tests (results, the caller's list
-    afterwards, and the same after an exception midway):
-    - **Local lists that grow.** A capacity, `v_x__c`, for each list the function appends to (found before
-      inference). `out.append(v)`: `if (n == cap) grow; p[n++] = v`. `pop()` (IndexError "pop from empty list"),
-      `pop(i)`, `extend` of a list, range or comprehension, `+= [..]`, `clear()`, `del out[i]`, `insert`. `[]` takes
-      its element type from what's appended to it, inferred like any variable, and one never appended to stays
-      empty. **One type per growing list (decided 2026-11-07):** a list that's appended to holds only ints, only
-      floats or only bools; one that would mix them (`append(0)` here, `append(x * 0.5)` there) runs as Python, and
-      preflight says why. No flag array to grow beside it, none to check per element, nothing to convert at the
-      write-back. Mixed lists that don't grow keep their flags, as now. Iterating over a list while appending to it stays Python (Python's loop would see the new elements).
-      Returning it, `np.array(out)`, `len`, indexing and `sum` work as for other local lists.
-    - **Appending to a list passed in.** The copy can't grow in place, so the kernel copies to its own buffer on the
-      first append, and the dispatcher writes back the changed elements as now, plus the new tail
-      (`lst.extend(...)`) or the cut (`del lst[n:]`), on the error path too, so the caller sees what Python would
-      have. An empty list passed in (`fill(out)` with `out = []`) is a signature of its own, typed by the appends.
-      An append of another type than the list holds (a float to ints), or appending to a mixed list, runs as Python.
-    - **Lists of tuples and of lists.** `pairs.append((u, v))`, returned as a list of tuples: a struct per element
-      (or a column per position), boxed at the return. Ragged lists of lists (`rows.append(row)` with rows of other
-      lengths): a list of list headers. Then dataclass instances (`out.append(Point(x, y))`), through the object
-      pool.
-    - **Returning more than one,** `return us, vs` (a tuple of lists), as arrays are returned in a tuple now.
-    Measure against Python and against the preallocate-and-rerun pattern; the boxing at the return is the cost to
+23. **Containers that compose: lists that grow, and any nesting of the types that compile. Next up.** Decided
+    2026-11-07: every combination of supported types compiles (lists of lists of lists, lists of tuples, lists of
+    dicts with fixed keys, dicts holding lists, lists of instances), with `append`, `pop`, `extend` and the other
+    methods that resize. Today each depth is its own case (tuples to any depth; lists one level; lists of lists two,
+    rectangular only; dicts of numbers), and `out = []`, a loop, `out.append(x)`, `return out` doesn't compile, so
+    callers preallocate, count past the end and call again with more room (the case study, Demos #2). Rules:
+    - **The type decides the C layout, recursively.** `list[T]` is a header (pointer, length, capacity, the capacity
+      only where something grows it) of `T`s; `T` a number, a tuple (its numbers in place), a list, a dict with fixed
+      keys (a struct) or an instance (the object pool). Copying in, writing back and boxing at the return follow the
+      same recursion, so a depth is never a special case again.
+    - **Nothing that compiles now gets slower.** Generality is resolved when the function compiles, or once per call
+      at the boundary, never per element in a loop: each level's C type is known statically, with no tags and no
+      indirection where the type is known. A rectangular list of lists keeps its one block: the copy already looks at
+      every row, and rows of one length take the block, others the ragged layout. Gate for each step:
+      `bench/compare.py`, `bench/kernels.py` and the examples at the same speed as before.
+    - **One element type per container that grows (decided 2026-11-07).** A list that's appended to holds only ints,
+      only floats or only bools; one that would mix them runs as Python, and preflight says why. Mixed lists that don't
+      grow keep their flags, as now. Tagged elements (the `dyn` scalars, per element) can come later if preflight
+      shows real code mixing; the layout leaves room for a tag beside `T`.
+    - **Python's semantics at the boundary:** an inner list in two places (`[r, r]`) is found when copying in (by
+      identity, as the object pool does for instances) and either kept shared or left to Python; after an exception
+      the caller's structure is what Python would have left, at every depth.
+    Steps, each shippable, each with differential tests (results, the caller's structure afterwards, the same after
+    an exception midway):
+    1. **Local `list[number]` that grows.** A capacity (`v_x__c`) for each list the function appends to, found before
+       inference; `append` is grow-if-full then store (comprehensions with two loops already grow by doubling
+       `realloc`, `make_list`). `pop()` (IndexError "pop from empty list"), `pop(i)`, `extend` of a list, range or
+       comprehension, `+= [..]`, `clear()`, `del out[i]`, `insert`. `[]` typed by its appends, inferred like any
+       variable; one never appended to stays empty. Iterating over a list while appending to it stays Python
+       (Python's loop sees the new elements). Returned, `np.array(out)`, `len`, indexing, `sum` as for other lists.
+    2. **`list[T]` recursive:** lists of tuples (`pairs.append((u, v))`, returned as a list of tuples), then ragged
+       lists of lists to any depth, made in the function and returned.
+    3. **Dicts in it:** lists of fixed-key dicts (records), dicts whose values are lists or tuples.
+    4. **Passed in and grown:** appending to a structure passed in, at any depth. The kernel copies a level to its
+       own buffer on its first append; the dispatcher writes back the changed elements as now plus the new tail
+       (`lst.extend(...)`) or the cut (`del lst[n:]`), on the error path too. An empty list passed in (`fill(out)`)
+       is a signature of its own, typed by the appends.
+    5. **Several returned:** `return us, vs`, as arrays in a tuple are now.
+    6. **Lists of instances** grown in the function (`out.append(Point(x, y))`), through the object pool.
+    Measure each against Python and against the preallocate-and-rerun pattern; the boxing at the return is the cost to
     watch (`array('d', ...).tolist()` is C).
+24. **Preflight's advice: boxed data, and the flags that would help.** Two kinds of note:
+    - **Converting costs more than computing.** `preflight --run` splits each function's time into native and
+      Python; split off the seconds converting arguments and results too (copying lists in, writing back, boxing the
+      return), and say so when they dominate: "`score` spends 85% of its time converting its list of lists: pass a
+      numpy array, or move the loop that calls it inside it". Without `--run`, the static shape: a compiled function
+      taking a nested list, called from a Python loop.
+    - **Flags, measured.** For each hot function under `--run`, compile it again with `parity=False` (and
+      `reassoc=True` once cimo honors `omp simd reduction`), time it on the same calls, and note the gain only past a
+      threshold, with what changes ("1.4x with `parity=False`: `math` results may differ in the last bit, float
+      division by zero gives inf"). `boundscheck=False` is reported, not recommended: the checks left in each hot
+      loop and what dropping them measured, next to a rewrite that lets scramjit prove the index (the histogram's
+      `0 <= k < nb`), since without checks a bad index corrupts memory instead of raising. Also from the case study:
+      arguments wrapped in `float()`, `int()` or `np.ascontiguousarray()` that make no difference (Adoption #7).

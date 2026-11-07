@@ -422,7 +422,13 @@ Spills per line, once cimo can report them.
       and nothing else. **Blocked on cimo:** it drops the pragma today (dot 1.36 ms with or without, same bits; in
       cimo's TODO). No flag until it does something.
     - **First call, 2 to 8x Numba's** (0.1 to 1 s against 0.04 to 0.12 s, cold, after one warm-up compile each): #19.
-    - Call overhead (1.4 µs against Numba's about 0.3 µs) isn't in the table yet: add a per-call row.
+    - **Call overhead, 11 to 16x Numba's** (`bench/compare.py`'s per-call table, 2026-11-07): `a + b` on two floats
+      1,221 ns a call (CPython 36, Numba 112, Cython 24); `x[0]` of a numpy array 2,199 ns (CPython 66, Numba 140,
+      Cython 146). cProfile of 100,000 calls each: `Function.__call__` 0.5 µs of its own, the generated argument
+      `plan` 0.4 µs of its own (1.5 µs with what it calls: `_box` 0.3 µs for an array, `as_narrow`,
+      `is_narrow_dyn`, `from_buffer`, `addressof`), cimo's `Kernel.__call__` 0.24 µs. Next: a per-signature fast
+      path that checks the types it was compiled for and goes straight to the kernel (the plan, `_box` and the
+      write-back only when an argument needs them).
     - On this CPU (Snapdragon X), LLVM crashes tuning for `oryon-1`, so the script points Numba at a generic arm64 CPU
       with the host's features and says so.
 19. **Compile time.** A first call costs seconds, not the 0.1 s the README's `ema` example suggests: 0.53 s

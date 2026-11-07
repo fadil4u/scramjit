@@ -105,8 +105,9 @@ except where marked ≈ (fastmath may round differently).
 | A dict of settings (from 0.0.4) | 80 ms | 4.2 ms | doesn't compile | doesn't compile | 70 ms | |
 | A list of dataclasses (from 0.0.4) | 87 ms | 1.8 ms | doesn't compile | doesn't compile | 106 ms | |
 
-Where scramjit is behind: viewshed, against Numba (2.5 ms with `parity=False`, as gcc), and float sums,
-which keep Python's order unless reordering is allowed. Its
+Where scramjit is behind: viewshed, against Numba (2.5 ms with `parity=False`, as gcc), float sums,
+which keep Python's order, and calling overhead: one call of a tiny function costs 1.2 µs (2.2 µs with a numpy array),
+against Numba's 0.11 µs and CPython's 0.04 µs, so compile the loop, not the function called inside it. Its
 first call takes 0.1 to 1 s, Numba's 0.04 to 0.12 s; Cython builds ahead of time. On disk: scramjit and cimo 3.1 MB of
 pure Python that also runs in Pyodide; Numba and llvmlite 193 MB of binary wheels; Cython 12.6 MB and a C compiler.
 

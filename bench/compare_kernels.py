@@ -74,3 +74,13 @@ def particles(ps, dt, steps):
         for a in ps:
             a.x += a.vx * dt
             a.y += a.vy * dt
+
+
+def add(a, b):
+    """call overhead: two floats in, one out"""
+    return a + b
+
+
+def first(x):
+    """call overhead with an array argument"""
+    return x[0]

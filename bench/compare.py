@@ -294,6 +294,32 @@ def measure(case):
     return row
 
 
+def call_overhead(cy):
+    """name -> column -> nanoseconds a call, best of 7 runs of 200,000 calls (Cython's typed module)."""
+    x = np.ones(8)
+    rows = {}
+    for name, fn, args in (('a + b (two floats)', K.add, (1.5, 2.25)), ('x[0] (a numpy array)', K.first, (x,))):
+        impl = {'CPython': fn, 'scramjit': scram(fn, fallback=False, cache=False),
+                'scramjit parity=False': scram(fn, fallback=False, cache=False, parity=False)}
+        if numba is not None:
+            impl['Numba'] = numba.njit(cache=False)(fn)
+        if cy is not None:
+            impl['Cython'] = getattr(cy, fn.__name__)
+        row = {}
+        for col, f in impl.items():
+            f(*args)
+            n = 200_000
+            ts = []
+            for _ in range(7):
+                t = time.perf_counter()
+                for _ in range(n):
+                    f(*args)
+                ts.append(time.perf_counter() - t)
+            row[col] = min(ts) / n * 1e9
+        rows[name] = row
+    return rows
+
+
 # --- sizes ----------------------------------------------------------------------------------------------------------
 
 def size_mb(*packages):
@@ -352,6 +378,12 @@ def main():
                 steady, _, mark = v
                 cells.append(f'{fmt(steady) + mark:>{width - 7}s}' + (f' {py / steady:5.0f}x' if c != 'CPython' else ' ' * 7))
         print(f'{name:20s}' + ''.join(cells))
+    print('\nOne call of a tiny function, including the Python loop that calls it (best of 7 runs of 200,000):\n')
+    over = call_overhead(cy)
+    cols = ['CPython', 'scramjit', 'scramjit parity=False', 'Numba', 'Cython']
+    print(f'{"function":22s}' + ''.join(f'{c:>{width}s}' for c in cols))
+    for name, row in over.items():
+        print(f'{name:22s}' + ''.join(f'{(f"{row[c]:.0f} ns" if c in row else "-"):>{width}s}' for c in cols))
     print('\nFirst call, including compiling (each tool warmed up once on another function first):\n')
     first_cols = ['scramjit', 'scramjit parity=False', 'Numba', 'Numba fastmath']
     print(f'{"kernel":20s}' + ''.join(f'{c:>{width}s}' for c in first_cols))

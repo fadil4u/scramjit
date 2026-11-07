@@ -109,3 +109,11 @@ def histogram(double[::1] x, long long[::1] counts, double lo, double hi):
         k = <Py_ssize_t>((x[i] - lo) * scale)
         if 0 <= k < nb:
             counts[k] += 1
+
+
+def add(double a, double b):
+    return a + b
+
+
+def first(double[::1] x):
+    return x[0]

@@ -398,7 +398,12 @@ Spills per line, once cimo can report them.
       two values with `frexp`/`ldexp` as bit fields (23 to 6.5 ns a call, bit-identical on 240,000 pairs), its rare cases
       and `sj_truediv`'s long division `noinline` (8.3 to 3.4 ms). cimo's inliner now counts only what its cleanup
       keeps and allows `inline` functions twice the limit, so `sj_hypot2` inlines (3.4 to 3.1 ms; `parity=False` 3.2
-      to 2.5). Left: the four divisions and the sqrt per step, which Numba has too.
+      to 2.5). Where the rest goes (2026-11-07): Numba calls the C library's `hypot` (glibc's differs from CPython's
+      `math.hypot` in the last bit for 12% of 2M random pairs; viewshed's 0/1 output hides it) and checks no bounds. The
+      same loop in C: `sqrt(a*a + b*b)` cimo 0.98, gcc 1.12 ms; glibc `hypot` (gcc) 1.53; cimo's bundled `hypot` 2.19
+      (in cimo's TODO); `sj_hypot2` cimo 2.73, gcc 2.93. Bounds checks 0.25 ms, a branchless max nothing. So the gap is
+      the exact `hypot`. Next idea: a certified fast path (one `sqrt` of an fma, its residual checked with fmas, no
+      division; `sj_hypot2` when the check fails), if CPython's result is provably the correctly rounded one there.
     - ~~**Histogram, 2x behind everyone**~~ **done** (2026-11-07): 1.35 to 0.73 ms (Numba 0.69, gcc 0.62). `int()` of a
       float is one `fabs(v) < 2**63` test and a cast, NaN and inf tested only past it; an `if`'s chained comparisons
       (`0 <= k < nb`) and every comparison of an `and` now add up to range facts for its body (`guard_facts`), so

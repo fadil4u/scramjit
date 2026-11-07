@@ -254,6 +254,35 @@ after with `bench/`, and write the numbers into the item when done.
 
 ## From cimo
 
+- **Kernel calls without ctypes (cimo 2026-11-07):** a kernel's `__call__` is now a CPython `METH_FASTCALL` builtin:
+  exact floats, exact ints and writable buffers convert in C, anything else takes the old Python path with the same
+  results and errors. A `double, double, long` call 661 to 92 ns on the Snapdragon X laptop. Kernels on threads still
+  run without the GIL.
+- **Ctrl-C stops a running kernel (cimo 2026-11-07, Linux and macOS):** SIGINT while a kernel runs its own code unwinds
+  it and runs Python's handler (`KeyboardInterrupt`, or yours, after which the call raises `KernelError` kind
+  `'interrupt'`). The generated `if (*sj_stop) SJ_FAIL(...)` check in every loop can go there; keep it for Windows,
+  where Ctrl-C still waits for the kernel.
+- **`#pragma STDC FP_CONTRACT ON|OFF|DEFAULT` works (cimo 2026-11-07):** per block or from there on at file scope, so
+  `fma=` code and exact math can share a module.
+- **`module.cached` (cimo 2026-11-07):** True when the compile came from the cache; `preflight --run` can show `disk`.
+- **Public cache export/import (cimo 2026-11-07):** `module.cache_entry()` (bytes) and `cimo.add_cache_entry(data)`,
+  native and Pyodide; an entry is used only by a compile of the same source and options. The LLM demo's
+  `CIMO_CACHE_DIR` listing can switch to these.
+- **The CLI framework is public (cimo 2026-11-07):** `cimo.cli.parse` (Command, parse, UsageError, complete),
+  `cimo.cli.term.Terminal`, `cimo.cli.completion.script(shell, prog)`; your terminal fixes (FORCE_COLOR,
+  CLICOLOR_FORCE, encoding fallback) are in, and the root's "did you mean" hint is `Command(..., unknown_hint=f)`.
+  The copies in `scramjit/cli/` (term, parse, completion) can be replaced by imports.
+- **Inlining spends its budget on the deepest loops first (cimo 2026-11-07),** and helpers no bigger than their call
+  always inline: the four wrapping helpers made macros for this can go back to functions. llama2 tok/s not
+  re-measured yet.
+- **Freed large blocks are reused (cimo 2026-11-07):** up to 8 per thread, 128 MB; `y = y * 0.5 + 1` ten times over
+  1M doubles 30.1 to 4.1 ms.
+- **gcc -O3 parity (cimo 2026-11-07, bench/gcc.py on mains):** gray_scott level, viewshed 0.64x of gcc's time, hand
+  flood_fill level; generated flood_fill 2.1-2.2 vs 1.84 ms. Two things on your side help it: emit the floor-division
+  sign fix as an explicit branch (`q = p / w; r = p % w; if (r != 0 && ((r < 0) != (w < 0))) { q -= 1; r += w; }` when
+  `w != 0` is known): 2.47 to 2.00 ms on this loop with cimo (gcc 1.82); and drop the `*sj_stop` check (see Ctrl-C).
+  cimo's remaining gap is gcc's unswitching of that loop on `w`.
+
 - **cimo's `hypot` is glibc's algorithm (cimo 2026-11-07):** one `sqrt` of an fma on arm64 (a correction step on x86-64 and
   wasm), under 1 ulp; a `hypot` loop 1.47x faster than before, about glibc's speed by your viewshed ratio. Still a
   call (no inlining of the runtime yet). Its last bits differ from musl's in places.

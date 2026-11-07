@@ -415,8 +415,12 @@ Spills per line, once cimo can report them.
       (`0 <= k < nb`) and every comparison of an `and` now add up to range facts for its body (`guard_facts`), so
       `counts[k]` loses its wrap and bounds check (`tests/test_guards.py`). `+= 1` never checked overflow. What's left is
       that one test, which `int(nan)` raising needs.
-    - **Float sums with fastmath, 3x** (dot: 0.34 against 1.02 ms): Numba reorders the sum to vectorize it. An opt-in
-      (`parity=False` already reorders nothing; a separate `reassociate=True`, through cimo's `#pragma omp simd reduction`).
+    - **Float sums with fastmath, 3x** (dot: 0.34 against 1.02 ms): Numba reorders the sum to vectorize it. Plan
+      (2026-11-07): `reassociate=True`, separate from `parity` (reordering changes plain `+` everywhere, by more than
+      a last bit under cancellation, and with the vector width; `parity=False` never reorders), emitting
+      `#pragma omp simd reduction(+:s)` before a loop whose float sums (products, min, max) it lets go out of order,
+      and nothing else. **Blocked on cimo:** it drops the pragma today (dot 1.36 ms with or without, same bits; in
+      cimo's TODO). No flag until it does something.
     - **First call, 2 to 8x Numba's** (0.1 to 1 s against 0.04 to 0.12 s, cold, after one warm-up compile each): #19.
     - Call overhead (1.4 µs against Numba's about 0.3 µs) isn't in the table yet: add a per-call row.
     - On this CPU (Snapdragon X), LLVM crashes tuning for `oryon-1`, so the script points Numba at a generic arm64 CPU

@@ -389,17 +389,18 @@ Spills per line, once cimo can report them.
 18. **scramjit against Numba and Cython: measured on arm64 (2026-11-07), now close the gaps.** `bench/compare.py`
     (kernels in `bench/compare_kernels.py`, typed Cython in `bench/compare_cy.pyx`; numba and cython are dev extras,
     never dependencies), table in the README ("Against Numba and Cython"). Every column matches CPython's results but
-    fastmath's. On par: Gray-Scott, flood fill, dot and axpy without fastmath. Numba doesn't compile the dict and dataclass
+    fastmath's. On par: Gray-Scott, flood fill, dot, axpy and (since its fix below) the histogram without fastmath. Numba doesn't compile the dict and dataclass
     kernels, and Cython as written gains nothing on them (scramjit 19x and 49x). Still to do: **run on x86-64** (a
     reviewer's machine is x86; needs another machine) and put the table on the site. Gaps, biggest first, each to fix with
     a measurement before and after:
     - **Viewshed, 5.6x behind Numba** (8.7 against 1.6 ms; 3.5 with `parity=False`, Cython 3.3, gcc 2.7): exact
       `math.hypot` (the correctly rounded vector norm) and `round` half to even, per inner step. A fast path for hypot
       of two finite values whose result needs no correction? Find where the time goes first.
-    - **Histogram, 2x behind everyone** (1.35 against 0.62 to 0.69 ms): `int(x)` is three tests (NaN, inf, range in
-      `sj_float_to_int`) where one `!(fabs(t) < 0x1p63)` covers all three; `counts[k]` keeps its negative wrap and bounds
-      check though `0 <= k < nb` with `nb = len(counts)` was just tested (range facts from an `if`, #4); `+= 1` checks
-      overflow.
+    - ~~**Histogram, 2x behind everyone**~~ **done** (2026-11-07): 1.35 to 0.73 ms (Numba 0.69, gcc 0.62). `int()` of a
+      float is one `fabs(v) < 2**63` test and a cast, NaN and inf tested only past it; an `if`'s chained comparisons
+      (`0 <= k < nb`) and every comparison of an `and` now add up to range facts for its body (`guard_facts`), so
+      `counts[k]` loses its wrap and bounds check (`tests/test_guards.py`). `+= 1` never checked overflow. What's left is
+      that one test, which `int(nan)` raising needs.
     - **Float sums with fastmath, 3x** (dot: 0.34 against 1.02 ms): Numba reorders the sum to vectorize it. An opt-in
       (`parity=False` already reorders nothing; a separate `reassociate=True`, through cimo's `#pragma omp simd reduction`).
     - **First call, 2 to 8x Numba's** (0.1 to 1 s against 0.04 to 0.12 s, cold, after one warm-up compile each): #19.

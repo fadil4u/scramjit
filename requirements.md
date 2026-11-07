@@ -71,8 +71,9 @@ desktop or server.
 - **MicroPython's `@micropython.viper`:** the same idea for microcontrollers; not a competitor.
 
 Measured (`bench/compare.py`, arm64, 2026-11-07; `TODO.md` #18): on par with Numba, typed Cython and gcc on stencils,
-flood fill, dot and axpy with exact floats; behind on exact `hypot`/`round` (viewshed 5.6x), float-to-int and range
-proofs (histogram 2x), reordered float sums (Numba fastmath 3x) and first-call compile time (2 to 8x). Ahead on Python
+flood fill, dot, axpy and a histogram with exact floats (the histogram after one-test `int()` and range facts from an
+`if`'s comparisons: 2x to 1.06x); behind on exact `hypot`/`round` (viewshed 5.6x), reordered float sums (Numba
+fastmath 3x) and first-call compile time (2 to 8x). Ahead on Python
 data: Numba doesn't compile a dict of settings or a list of dataclasses, and Cython as written doesn't speed them up.
 
 ## API: a decorator

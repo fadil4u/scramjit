@@ -5725,17 +5725,19 @@ class Compiler:
         tests = test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) else [test]
         stored = set() if region is None else {n.id for r in region for n in ast.walk(r)
                                                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        pairs = []                            # 0 <= k < n is 0 <= k and k < n
         for t in tests:
-            if not (isinstance(t, ast.Compare) and len(t.ops) == 1):
-                continue
-            left, op, right = t.left, type(t.ops[0]), t.comparators[0]
+            if isinstance(t, ast.Compare):
+                operands = [t.left] + t.comparators
+                pairs += [(operands[k], type(o), operands[k + 1]) for k, o in enumerate(t.ops)]
+        for left, op, right in pairs:
             if isinstance(right, ast.Name) and not isinstance(left, ast.Name):
                 left, right = right, left
                 op = {ast.Lt: ast.Gt, ast.LtE: ast.GtE, ast.Gt: ast.Lt, ast.GtE: ast.LtE}.get(op, op)
             if not isinstance(left, ast.Name) or left.id in stored \
                     or self.env.get(left.id) not in (T.INT, T.NP_INT64, T.INT_DYN):
                 continue
-            lo, hi, slack = self.facts.get(left.id, (None, None, 0))[:3]
+            lo, hi, slack = (out.get(left.id) or self.facts.get(left.id) or (None, None, 0))[:3]   # what the test showed so far
             if isinstance(right, ast.Constant) and type(right.value) is int and op in (ast.Gt, ast.GtE):
                 c = right.value + (1 if op is ast.Gt else 0)
                 lo = c if lo is None else max(lo, c)
@@ -6810,9 +6812,13 @@ class Compiler:
         if name == 'round':                 # halves to even: C's rint in the default rounding mode
             c = f'rint((double)({c}))'
         v = self.hold(c, T.FLOAT)
-        self.emit(f'if ({v} != {v}) SJ_FAIL({VALUE_ERROR}, {line}, 0, 0);')
-        self.emit(f'if (isinf({v})) SJ_FAIL({OVERFLOW_ERROR}, {line}, 0, 0);')
-        return f'sj_float_to_int({v})', '0'
+        r = self.temp()
+        # one test on the way that matters: a cast truncates toward zero, as trunc; NaN, inf and the rest go the long way
+        self.emit(f'int64_t {r};')
+        self.emit(f'if (fabs({v}) < 9223372036854775808.0) {r} = (int64_t){v}; else {{ '
+                  f'if ({v} != {v}) SJ_FAIL({VALUE_ERROR}, {line}, 0, 0); '
+                  f'if (isinf({v})) SJ_FAIL({OVERFLOW_ERROR}, {line}, 0, 0); {r} = sj_float_to_int({v}); }}')
+        return r, '0'
 
 
     def source_loops(self, src, after_first, item):

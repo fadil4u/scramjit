@@ -50,7 +50,8 @@ A shape that doesn't broadcast raises numpy's `ValueError`. An array can go into
 | Assigning | an element; a number or an array into a slice | `x[1:] += y`, a list into a slice |
 | Functions on one number | [these](#functions-on-single-numbers) | `np.tanh`, `np.power` |
 | Reductions to one number | [`sum`, `mean`, `std`, `var`, `max`, `argmax` and the rest](#reductions) | `axis=` on more than one dimension, `keepdims=True` |
-| Making arrays | [`np.zeros`, `x.copy()`, `np.arange` and the rest](#making-arrays) | `x * 2`, `a + b`, `np.sqrt(x)`, `x.reshape(...)`, `np.eye(n)` |
+| Making arrays | [`np.zeros`, `x.copy()`, `np.arange` and the rest](#making-arrays) | `x.reshape(...)`, `np.eye(n)` |
+| Whole-array arithmetic (from 0.0.4) | [`a * 2 + b`, `np.sqrt(a)`, broadcasting](#whole-array-arithmetic) | `//`, `%`, comparisons, more than two dimensions |
 | Element types | `float64`, `int64`, and [`float32`, `int32`, `uint8` and friends](#narrow-dtypes), with arithmetic and most reductions, and `uint64` | on `float32` `np.sin`, `np.exp` and the like, `.std()`, `.var()` |
 | Other | `len()`, `.shape`, `.size`, `.ndim`, returning arrays and views, alone or in a tuple | `np.dot`, `np.linalg`, `np.sort`, `np.cumsum` |
 
@@ -84,6 +85,27 @@ They take `dtype=` with `float64`, `int64` and the narrower types. `order=` and 
 Arrays no variable holds any more are freed while the function runs, so a loop making a new array each time doesn't build up memory. A small array made inside a loop costs about 24 ns, against 256 for numpy from Python. A very large one is a little slower than numpy's, at about 11 µs against 7 for 800 KB.
 
 A returned array is copied once, into memory numpy owns, so that `resize` and everything else behave as they do on any array. Both copies exist for a moment, and a function returning a small array costs about 3 µs, against 0.15 for `np.zeros` itself: below a few hundred loop iterations, or for arrays near your memory limit, take the array as an argument instead.
+
+## Whole-array arithmetic
+
+From 0.0.4. Operators and numpy functions on whole arrays compile, giving numpy's result: the same dtype, shape and values, bit for bit.
+
+```python
+@scram
+def step(y, x, k):
+    for _ in range(10):
+        y = y * 0.5 + np.sqrt(x) * k
+    return y
+```
+
+- `+`, `-`, `*`, `/` and `**` between arrays and numbers, and unary `-`
+- the numpy functions [on single numbers](#functions-on-single-numbers) applied to arrays: `np.sqrt`, `np.exp`, `np.sin`, `np.abs`, `np.maximum` and the rest
+- broadcasting, as numpy does it: `m + row`, `col + row`, a number with an array; a shape that doesn't broadcast raises numpy's `ValueError`
+- arrays of up to two dimensions, of `float64`, `int64` and the [narrow dtypes](#narrow-dtypes), and views of them, except a two-dimensional view with gaps such as `m.T`
+
+A whole expression is computed in one pass, element by element, with no temporary arrays in between. The numbers in it must be plain values: names, constants, elements such as `w[k]`, and arithmetic on those. A call such as `a * f()` runs as Python, as do `//`, `%`, comparisons that give arrays of booleans, and an integer array to a power that may be negative. The loops around them still compile.
+
+Up to tens of thousands of elements, this is faster than numpy from Python (`y = y * 0.5 + b` ten times: 7 µs against 12 for 1,000 elements, 42 against 59 for 10,000). A loop that makes a new array of hundreds of thousands of elements each time is slower for now; see [the gotcha](#a-new-big-array-in-each-pass-of-a-loop-is-slow).
 
 ## Functions on single numbers
 
@@ -296,6 +318,10 @@ Check for `inf` and `nan` yourself if you rely on these.
 ### A few whole-array calls are slower outside a loop
 
 numpy runs `max`, `min`, `argmax`, `argmin`, `any` and `all` with SIMD. Compiled loops use SIMD too, but not yet for these, since each element is tested. On 1,000,000 `float64` elements on arm64, `x.max()` took 1.3 ms against numpy's 0.16, and `x.all()` 0.43 against 0.20; narrower dtypes widen the gap, as numpy fits more in a register (`float32` `x.max()`: 1.3 ms against 0.09). `x.sum()` is close to numpy's: 0.24 ms against 0.21 on `float64`. Inside a loop, where a numpy call costs about a microsecond each time, compiled code is far faster unless the arrays are huge. Preflight notes the calls this can affect that aren't in a loop.
+
+### A new big array in each pass of a loop is slow
+
+From 0.0.4, `y = y * 0.5 + b` in a loop makes a new array each time, as numpy does. Above about 256 KB per array (32,000 `float64` elements), each new one gets fresh memory from the system, which numpy's allocator avoids by reusing the last one. On 1,000,000 elements, ten passes took 33 ms against numpy's 8. `y[:] = y * 0.5 + b` doesn't help yet, since the right side is made first. Until that is fixed, loop over the elements: `for i in range(len(y)): y[i] = y[i] * 0.5 + b[i]` took 5.8 ms.
 
 ### min and max of two different NaNs
 

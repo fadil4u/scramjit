@@ -73,7 +73,7 @@ desktop or server.
 Measured (`bench/compare.py`, arm64, 2026-11-07; `TODO.md` #18): on par with Numba, typed Cython and gcc on stencils,
 flood fill, dot, axpy and a histogram with exact floats (the histogram after one-test `int()` and range facts from an
 `if`'s comparisons: 2x to 1.06x); behind on viewshed (2.3x; 6x before a two-value exact `hypot`, `noinline` cold paths and cimo's inliner counting only what its cleanup keeps; the rest is the exact `hypot`: Numba calls the C library's, which differs from CPython's in the last bit for 12% of random pairs), reordered float sums (Numba
-fastmath 3x) first-call compile time (2 to 8x) and call overhead (1.2 µs a call against Numba's 0.11). Ahead on Python
+fastmath 3x) first-call compile time (2 to 8x) and call overhead (0.8 µs a call against Numba's 0.11). Whole-array arithmetic compiles (2026-11-07): one pass per expression, faster than numpy below tens of thousands of elements, slower above while cimo maps each large block anew. Ahead on Python
 data: Numba doesn't compile a dict of settings or a list of dataclasses, and Cython as written doesn't speed them up.
 
 ## API: a decorator

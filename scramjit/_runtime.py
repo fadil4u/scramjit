@@ -31,6 +31,7 @@ def attribute_number(name):
 
 POOL_FULL = 14       # an instance made into a pool found no room left: the call is made again with more (nothing was written back)
 LINSPACE_ERROR = 12  # np.linspace of a number of samples, in io[2], that is negative or too many
+OPERANDS_ERROR = 15  # an array expression's operands don't broadcast: their shapes as for BROADCAST_ERROR
 MAKE_DTYPES = ['float64', 'int64', 'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
 RETURNS_INT = 2      # a returned float's flag, when the value is really a Python int
 NARROW_INT_DTYPES = ['int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8', 'int64', 'uint64']
@@ -134,6 +135,11 @@ def exception(status, io):
             dims = (packed >> 32, packed & 0xffffffff)[2 - nd:]
             return '(' + ','.join(map(str, dims)) + (',)' if nd == 1 else ')')
         return ValueError(f'could not broadcast input array from shape {shape(io[2], io[4] >> 8)} into shape {shape(io[3], io[4] & 255)}')
+    if status == OPERANDS_ERROR:
+        def shape(packed, nd):
+            dims = (packed >> 32, packed & 0xffffffff)[2 - nd:]
+            return '(' + ','.join(map(str, dims)) + (',)' if nd == 1 else ')')
+        return ValueError(f'operands could not be broadcast together with shapes {shape(io[2], io[4] >> 8)} {shape(io[3], io[4] & 255)} ')
     if MAKE_ERROR <= status < MAKE_ERROR + len(MAKE_DTYPES):     # numpy's own error, for what it was asked
         import numpy
         return _numpys_error(numpy.empty, (tuple(n for n in (io[0], io[2], io[3], io[4]) if n != NO_AXIS), MAKE_DTYPES[status - MAKE_ERROR]))

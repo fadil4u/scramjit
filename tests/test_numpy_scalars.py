@@ -150,9 +150,11 @@ def test_power_stays_python():
     check('power', -0.0, 0.5, compiled=False)
 
 
-def test_an_array_stays_python():
-    check('sqrt', np.arange(4.0), compiled=False)
-    check('minimum', np.arange(4.0), 1.0, compiled=False)
+def test_an_array_goes_element_by_element():
+    """From 0.0.4 a numpy function of arrays compiles as whole-array arithmetic (tests/test_elementwise.py)."""
+    check('sqrt', np.arange(4.0), compiled=True)
+    check('minimum', np.arange(4.0), 1.0, compiled=True)
+    check('isnan', np.arange(4.0), compiled=False)          # an array of booleans: still Python
 
 
 def test_other_shapes_of_call():

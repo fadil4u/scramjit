@@ -32,6 +32,7 @@ Python and through scramjit, and asserts the results are identical. They need nu
 | [`vector_math.py`](vector_math.py) | A charged particle in a magnetic field, with a vector dataclass's `+`, `*` and `@` (cross product) making a new `Vec` at each step | Each step depends on the last; no `Vec` is allocated compiled | 0.47 s | 9.4 ms | 50x |
 | [`search_tree.py`](search_tree.py) | 200,000 lookups in a binary search tree of dataclass nodes, `node = node.left if key < node.key else node.right`, counting visits on the nodes | Where each walk goes depends on the keys; a branch nothing can predict at every node keeps the gain small | 0.44 s | 73 ms | 6x |
 | [`config_dict.py`](config_dict.py) | An epidemic model with its settings and results in dicts | Each day depends on the one before | 0.081 s | 4.4 ms | 18x |
+| [`whole_array.py`](whole_array.py) (from 0.0.4) | 1,000 damped oscillators stepped with `a = -k * x - c * v + drive` on whole arrays | numpy does this, a call and a temporary array per operator; compiled, one pass per line | 0.010 s | 2.3 ms | 4x |
 
 One run of each on arm64 Linux, on a busy machine, so expect faster and somewhat different numbers. The
 first call for a set of argument types compiles, which took under a second here; these times exclude it,

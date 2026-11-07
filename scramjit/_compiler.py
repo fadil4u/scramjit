@@ -28,7 +28,7 @@ import sys
 
 from ._mathlib import snippets
 from . import _mathlib
-from ._runtime import (ATTRIBUTE_NONE, POOL_FULL, attribute_number, ARANGE_ERROR, BROADCAST_ERROR, INDEX_ERROR, INTERRUPTED, LINSPACE_ERROR, MAKE_DTYPES, MAKE_ERROR, NO_AXIS, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
+from ._runtime import (ATTRIBUTE_NONE, POOL_FULL, attribute_number, ARANGE_ERROR, BROADCAST_ERROR, OPERANDS_ERROR, INDEX_ERROR, INTERRUPTED, LINSPACE_ERROR, MAKE_DTYPES, MAKE_ERROR, NO_AXIS, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
                        OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION)
 
 BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'round', 'sum', 'any', 'all')
@@ -293,6 +293,10 @@ NP_MAKE_SHAPED = {'zeros', 'ones', 'empty', 'full'}
 NP_MAKE_LIKE = {'zeros_like', 'ones_like', 'empty_like', 'full_like'}
 NP_MAKE = NP_MAKE_SHAPED | NP_MAKE_LIKE | {'copy', 'array', 'asarray', 'arange', 'linspace'}
 MAX_MADE_DIMS = 4      # sj_block has room for this many
+# whole-array arithmetic (_elementwise): operators and numpy functions applied element by element
+EW_BINOPS = {ast.Add: 'Add', ast.Sub: 'Sub', ast.Mult: 'Mult', ast.Div: 'Div', ast.Pow: 'Pow'}
+EW_FUNCS = set(NP_LIBM1) | set(NP_DIRECT1) | NP_ROUND | {'abs', 'absolute', 'square', 'sign'} | set(NP_LIBM2) | {'copysign'} | NP_MINMAX
+EW_MAX_DIMS = 2        # what an OPERANDS_ERROR's message can show
 ARRAY_METHODS = {'sum', 'prod', 'mean', 'max', 'min', 'any', 'all', 'argmax', 'argmin', 'std', 'var'}
 NP_FLOAT_ONLY = {'round': 1, 'around': 1, 'clip': 3, 'degrees': 1, 'rad2deg': 1, 'radians': 1, 'deg2rad': 1}
 NP_FUNCS = {'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8', 'uint64'} | NP_MAKE | set(NP_LIBM1) | set(NP_DIRECT1) | NP_ROUND | NP_KEEPS_INT | set(NP_LIBM2) | {'copysign'} | NP_MINMAX | NP_TESTS | NP_CONVERT \
@@ -2840,6 +2844,8 @@ class Compiler:
                 if e.attr in ('ndim', 'size'):
                     return T.INT
             self.fail(e, f'the attribute .{e.attr}')
+        if isinstance(e, (ast.BinOp, ast.UnaryOp)) and self.elementwise_of(e):
+            return self.make_type(e, self.make_of(e))
         if isinstance(e, ast.BinOp) and folds(e) is not None:
             return T.U64 if folds(e) > INT64_MAX else T.INT
         if isinstance(e, ast.BinOp):
@@ -3591,7 +3597,10 @@ class Compiler:
 
     # ---- arrays made in the function: np.zeros(n), x.copy()
     def make_of(self, e):
-        """For a call making an array: (what it is, its arguments, its keywords), else None."""
+        """For a call making an array: (what it is, its arguments, its keywords), else None. Whole-array arithmetic
+        (a * 2 + b, np.sqrt(a)) makes one too: ('elementwise', [e], [])."""
+        if self.elementwise_of(e):
+            return 'elementwise', [e], []
         if not isinstance(e, ast.Call):
             return None
         f = e.func
@@ -3605,6 +3614,199 @@ class Compiler:
         if name in NP_MAKE:
             return name, e.args, e.keywords
         return None
+
+    # ---- whole-array arithmetic: y = a * 2 + b, np.sqrt(a)
+    def ew_children(self, e):
+        """The operands of an operator or numpy function that can apply element by element, else None."""
+        if isinstance(e, ast.BinOp) and type(e.op) in EW_BINOPS:
+            return [e.left, e.right]
+        if isinstance(e, ast.UnaryOp) and isinstance(e.op, (ast.USub, ast.UAdd)):
+            return [e.operand]
+        if isinstance(e, ast.Call) and not e.keywords and e.args and not any(isinstance(a, ast.Starred) for a in e.args) \
+                and self.numpy_func(e.func) in EW_FUNCS:
+            return list(e.args)
+        return None
+
+    def ew_array_leaf(self, e):
+        """Is e an array operand: a variable holding an array, or a view of one?"""
+        if isinstance(e, ast.Name):
+            t = self.env.get(e.id)
+            return t is not None and t.kind == 'array' and not T.is_pylist(t)
+        if isinstance(e, ast.Subscript) or (isinstance(e, ast.Attribute) and e.attr == 'T'):
+            try:
+                t = self.typeof(e)
+            except Unsupported:
+                return False
+            return t.kind == 'array' and not T.is_pylist(t)
+        return False
+
+    def elementwise_of(self, e):
+        """Does e compute an array element by element (an array operand somewhere below operators and numpy functions)?"""
+        kids = self.ew_children(e)
+        if kids is None:
+            return False
+        cache = self.__dict__.setdefault('ew_known', {})
+        if id(e) in cache:
+            return cache[id(e)]
+        r = any(self.ew_array_leaf(k) or self.elementwise_of(k) for k in kids)
+        cache[id(e)] = r
+        return r
+
+    def ew_pure(self, e):
+        """A number an array expression may take: evaluated once, before the elements, so it mustn't change anything."""
+        if isinstance(e, (ast.Constant, ast.Name)):
+            return True
+        if isinstance(e, ast.Attribute):
+            return self.ew_pure(e.value)
+        if isinstance(e, ast.Subscript):
+            return self.ew_pure(e.value) and all(self.ew_pure(x) for x in (e.slice.elts if isinstance(e.slice, ast.Tuple) else [e.slice]))
+        if isinstance(e, ast.BinOp):
+            return self.ew_pure(e.left) and self.ew_pure(e.right)
+        if isinstance(e, ast.UnaryOp):
+            return self.ew_pure(e.operand)
+        if isinstance(e, ast.Call):
+            return (self.numpy_func(e.func) is not None or bool(self.math_func(e.func))) and not e.keywords and all(self.ew_pure(a) for a in e.args)
+        return False
+
+    def ew_plan(self, e):
+        """(the expression with each operand a name, [(kind, node, name)] in evaluation order), kinds 'array' and 'number'.
+        The names hold one element of each array, or the number, while the elements are computed (self.cnames)."""
+        plans = self.__dict__.setdefault('ew_plans', {})
+        if id(e) in plans:
+            return plans[id(e)]
+        leaves = []
+
+        def walk(n):
+            if self.ew_children(n) is not None and self.elementwise_of(n):
+                if isinstance(n, ast.BinOp):
+                    m = ast.BinOp(walk(n.left), n.op, walk(n.right))
+                elif isinstance(n, ast.UnaryOp):
+                    m = ast.UnaryOp(n.op, walk(n.operand))
+                else:
+                    m = ast.Call(n.func, [walk(a) for a in n.args], [])
+                return ast.copy_location(m, n)
+            kind = 'array' if self.ew_array_leaf(n) else 'number'
+            if kind == 'number' and not self.ew_pure(n):
+                self.fail(n, 'an array expression with a call in it (numbers in one must be plain values)')
+            name = f'sjew{len(self.__dict__.setdefault("ew_names", []))}'
+            self.ew_names.append(name)
+            leaves.append((kind, n, name))
+            return ast.copy_location(ast.Name(name, ast.Load()), n)
+        synth = walk(e)
+        plans[id(e)] = synth, leaves
+        return synth, leaves
+
+    def elementwise_type(self, e):
+        """(dimensions, element type) of an array expression, by numpy's rules: those of its numbers' scalars."""
+        synth, leaves = self.ew_plan(e)
+        ndim = 0
+        for kind, n, name in leaves:
+            t = self.typeof(n)
+            if kind == 'array':
+                if t.ndim > EW_MAX_DIMS:
+                    self.fail(n, f'arithmetic on arrays of more than {EW_MAX_DIMS} dimensions')
+                if t.strided and t.ndim > 1:
+                    self.fail(n, 'arithmetic on a view with gaps in more than one dimension (numpy may give a Fortran-ordered result)')
+                if t.elem not in (T.NP_FLOAT64, T.NP_INT64) and not T.is_narrow(t.elem):
+                    self.fail(n, f'arithmetic on an array of {t.elem.name[3:]}')
+                ndim = max(ndim, t.ndim)
+                self.env[name] = t.elem
+            else:
+                if not t.is_number or t.kind == 'bool' or t.np == 'dyn':
+                    self.fail(n, f'arithmetic of arrays and {t.name}')
+                self.env[name] = t
+        for n in ast.walk(synth):                       # an integer power can raise for some elements: numpy checks all first
+            if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Pow) and self.typeof(n).kind == 'int' and not (
+                    isinstance(n.right, ast.Name) and any(m == n.right.id and k == 'number' and isinstance(x, ast.Constant)
+                                                         and type(x.value) is int and x.value >= 0 for k, x, m in leaves)):
+                self.fail(e, 'an integer array to a power that may be negative')
+        elem = self.typeof(synth)
+        if elem.np is not True or numpy_dtype(elem) not in MAKE_DTYPES:
+            self.fail(e, f'an array expression whose elements are {elem.name}')
+        return ndim, elem
+
+    def make_elementwise(self, e, name, t):
+        """The operands in Python's order, each operator's shapes checked as numpy would when it gets there, then one
+        loop computing every element as the scalars would (which is what numpy's loops do)."""
+        synth, leaves = self.ew_plan(e)
+        line = self.line(e)
+        byleaf = {id(n): (kind, name_) for kind, n, name_ in leaves}
+        arrays = []                                          # (variable, its element name, its extents, its strides)
+
+        def packed(shape):
+            return '0' if not shape else shape[-1] if len(shape) == 1 else f'(({shape[0]} << 32) | {shape[1]})'
+
+        def walk(n):
+            if id(n) in byleaf:
+                kind, nm = byleaf[id(n)]
+                if kind == 'array':
+                    var = self.materialize(n)
+                    shape, strides = self.view_axes(var)
+                    arrays.append((var, nm, shape, strides))
+                    return shape
+                c, f = self.expr(n)
+                self.cnames[nm] = (self.hold(c, self.env[nm]), self.hold_flag(f))
+                return None
+            shapes = [walk(k) for k in self.ew_children(n)]
+            got = [x for x in shapes if x is not None]
+            if len(got) == 1:
+                return got[0]
+            a, b = got[0], got[1]
+            nd = max(len(a), len(b))
+            out = []
+            bad = []
+            for k in range(nd):
+                x = a[k - (nd - len(a))] if k >= nd - len(a) else None
+                y = b[k - (nd - len(b))] if k >= nd - len(b) else None
+                if x is None or y is None:
+                    out.append(x if y is None else y)
+                    continue
+                bad.append(f'({x} != {y} && {x} != 1 && {y} != 1)')
+                out.append(self.hold(f'({x} == 1 ? {y} : {x})', T.INT))
+            if bad:
+                self.open(f'if ({" || ".join(bad)})')
+                self.emit(f'sj_io[4] = {len(a) << 8 | len(b)};')
+                self.emit(f'SJ_FAIL({OPERANDS_ERROR}, {line}, {packed(a)}, {packed(b)});')
+                self.close()
+            return out
+        shape = walk(e)
+        self.new_block(name, t, shape, 0, line)
+        nd = len(shape)
+        steps = {}
+        for var, nm, ashape, astrides in arrays:              # an extent of 1 repeats its one element
+            off = nd - len(ashape)
+            steps[nm] = (var, off, [self.hold(f'({n} == 1 ? 0 : {st})', T.INT) for n, st in zip(ashape, astrides)])
+        rt = self.typeof(synth)
+        # the usual case: every operand is the result's shape, without gaps, so one flat loop of x[i] (which vectorizes)
+        dense = [len(ashape) == nd and not self.env[var].strided for var, _, ashape, _ in arrays]
+        if all(dense):
+            same = ' && '.join(f'{x} == {r}' for _, _, ashape, _ in arrays for x, r in zip(ashape, shape)) or '1'
+            self.open(f'if ({same})')
+            i = self.temp()
+            total = ' * '.join(['1LL'] + shape)
+            self.open(f'for (int64_t {i} = 0, n_ = {total}; {i} < n_; {i}++)')
+            for var, nm, _, _ in arrays:
+                self.cnames[nm] = (f'v_{var}[{i}]', '1')
+            c, f = self.expr(synth)
+            self.emit(f'v_{name}[{i}] = {self.coerce(c, rt, t.elem)};')
+            self.close()
+            self.close()
+            self.open('else')
+        at = self.temp()
+        self.emit(f'int64_t {at} = 0;')
+
+        def body(idx):
+            for var, nm, ashape, astrides in arrays:
+                v, off, st = steps[nm]
+                read = ' + '.join(f'{i} * {k}' for i, k in zip(idx[off:], st)) or '0'
+                self.cnames[nm] = (f'v_{v}[{read}]', '1')
+            c, f = self.expr(synth)
+            self.emit(f'v_{name}[{at}++] = {self.coerce(c, rt, t.elem)};')
+        self.each_element(shape, shape, body)
+        if all(dense):
+            self.close()
+        for _, _, nm in leaves:
+            self.cnames.pop(nm, None)
 
     def default_int(self):
         """What numpy makes of a Python int here: int32 on wasm32."""
@@ -3735,6 +3937,8 @@ class Compiler:
             ndim, elem = 2, self.typeof(c)
             if elem not in (T.INT, T.FLOAT, T.BOOL):
                 self.fail(e, f'a list of lists of {elem.name}')
+        elif kind == 'elementwise':
+            ndim, elem = self.elementwise_type(e)
         elif kind == 'arange':
             ndim, elem = 1, self.arange_elem(e, made)
         elif kind == 'linspace':
@@ -4002,6 +4206,9 @@ class Compiler:
             val = self.hold(self.coerce(c[0], self.typeof(made[1][2]), t.elem), t.elem)
             self.new_block(name, t, shape, 0, line)
             self.fill_block(name, t, val)
+            return name
+        if kind == 'elementwise':
+            self.make_elementwise(e, name, t)
             return name
         if kind == 'arange':
             self.make_arange(e, name, t)
@@ -4638,7 +4845,7 @@ class Compiler:
     def add_safepoints(self, stmts):
         """After each statement that makes an array, and at the top of a loop in which one is made."""
         def makes(node):
-            return any(isinstance(n, ast.Call) and (self.make_of(n) is not None or self.callee_of(n) is not None) for n in ast.walk(node))
+            return any((isinstance(n, ast.Call) or self.elementwise_of(n)) and (self.make_of(n) is not None or self.callee_of(n) is not None) for n in ast.walk(node))
 
         def point(near):
             return ast.copy_location(ast.Expr(ast.copy_location(Safepoint(None), near)), near)
@@ -4660,7 +4867,7 @@ class Compiler:
         if self.makes:
             for n in ast.walk(self.f):
                 if isinstance(n, (ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)) \
-                        and any(isinstance(c, ast.Call) and (self.make_of(c) is not None or self.callee_of(c) is not None) for c in ast.walk(n)):
+                        and any((isinstance(c, ast.Call) or self.elementwise_of(c)) and (self.make_of(c) is not None or self.callee_of(c) is not None) for c in ast.walk(n)):
                     self.fail(n, 'an array made inside a comprehension')
             self.f.body = self.add_safepoints(self.f.body)
         da_block(self, self.f.body, set(self.params))
@@ -5919,7 +6126,7 @@ class Compiler:
             return e.id
         if self.callee_of(e) is not None:
             return self.call_array(e)
-        if isinstance(e, ast.Call):
+        if isinstance(e, ast.Call) or self.elementwise_of(e):
             return self.make(e)
         if isinstance(e, ast.Attribute):           # .T: the axes in reverse
             base = self.materialize(e.value)

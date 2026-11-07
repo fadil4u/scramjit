@@ -237,6 +237,8 @@ Pre-release: the API may still change.
   benchmarked on arm64 Linux and in Pyodide. Run by hand on arm64 Windows and x86-64 Windows (emulated), where a NaN's sign can
   differ. cimo also targets x86-64 Linux and macOS, where scramjit's tests haven't been run yet, and nothing runs in CI yet.
 - A function that doesn't compile whole has its loops compiled on their own, where they fit.
+- On `main`, from 0.0.4: whole-array arithmetic (`a * 2 + b`, `np.sqrt(a)`, broadcasting) compiles, one pass per
+  expression, with numpy's results bit for bit.
 - Data structures: dicts passed in with keys that don't change, tuples to any depth, enums, local lists, and module-level
   numbers, tuples, arrays and dicts compile. On `main`, from 0.0.4: lists passed in, lists of lists, and attributes of
   classes: instances and dataclasses passed in or made in the function, their methods, objects in attributes, lists of them,

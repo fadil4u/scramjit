@@ -354,8 +354,11 @@ Spills per line, once cimo can report them.
    parameter as its value (pointers are told apart), so calls needn't wrap such arguments in `int(...)`. In Pyodide about 13 µs, not yet
    broken down. Break-even is 30 to 50 loop iterations per call. A Gymnasium-style `step` is below it, with no loop
    at all: CartPole from a Python loop does 396k steps/s compiled against 698k plain, and 53M with the loop compiled too, which calls between compiled functions now allow without pasting. Rejected: caching an array's address (saves
-   200 ns, but `resize(refcheck=False)` would corrupt memory silently); `__call__` by argument count (100 to
-   150 ns, not worth its keyword edge cases).
+   200 ns, but `resize(refcheck=False)` would corrupt memory silently). **`__call__` by argument count, done
+   (2026-11-07)** after all: measured, it saves 350 ns, not 100 to 150 (`Function.__call__` 517 to 166 ns). Each
+   Function of up to 8 positional parameters is an instance of a generated subclass (`_front`) whose `__call__`
+   takes them by position and calls the last plan made when every type matches (`_fast`); keywords, defaults, extra
+   arguments and other types take the general path. `tests/test_front.py`. `self` as a keyword argument works now.
 10. **Variables that change type, what's left:** a name used for separate things compiles (each web is its own
    variable), and so does an int that becomes a float, where the int is a literal up to 2^53 or a parameter, and it's only
    returned or combined with a float. Not yet: other uses of such a variable (`-s`, `s + 1`, `t = s`, `a[s]`, `if s:`), and
@@ -422,9 +425,10 @@ Spills per line, once cimo can report them.
       and nothing else. **Blocked on cimo:** it drops the pragma today (dot 1.36 ms with or without, same bits; in
       cimo's TODO). No flag until it does something.
     - **First call, 2 to 8x Numba's** (0.1 to 1 s against 0.04 to 0.12 s, cold, after one warm-up compile each): #19.
-    - **Call overhead, 11 to 16x Numba's** (`bench/compare.py`'s per-call table, 2026-11-07): `a + b` on two floats
-      1,221 ns a call (CPython 36, Numba 112, Cython 24); `x[0]` of a numpy array 2,199 ns (CPython 66, Numba 140,
-      Cython 146). cProfile of 100,000 calls each: `Function.__call__` 0.5 µs of its own, the generated argument
+    - **Call overhead, 7 to 13x Numba's** (`bench/compare.py`'s per-call table, 2026-11-07): `a + b` on two floats
+      829 ns a call, from 1,221 before `__call__` by argument count (#9) (CPython 36, Numba 112, Cython 24); `x[0]`
+      of a numpy array 1,775 ns, from 2,199 (CPython 66, Numba 140, Cython 146). Of the 829, cimo's ctypes call is
+      about 650 to 830: "kernel calls without ctypes" in cimo's TODO. Before, profiled: cProfile of 100,000 calls each: `Function.__call__` 0.5 µs of its own, the generated argument
       `plan` 0.4 µs of its own (1.5 µs with what it calls: `_box` 0.3 µs for an array, `as_narrow`,
       `is_narrow_dyn`, `from_buffer`, `addressof`), cimo's `Kernel.__call__` 0.24 µs. Next: a per-signature fast
       path that checks the types it was compiled for and goes straight to the kernel (the plan, `_box` and the

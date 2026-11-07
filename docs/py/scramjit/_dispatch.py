@@ -69,7 +69,7 @@ def _libm_table():
 def _arg_type(x):
     """The compiled type of an argument, or None if it isn't compiled."""
     t = type(x)
-    if t is Function or T.is_c_module(x) or T.is_c_function(x):
+    if issubclass(t, Function) or T.is_c_module(x) or T.is_c_function(x):
         return T.function_of(x)
     if t is int:                             # past int64 but below 2**64: held unsigned, passed as its bits
         return T.INT if -(1 << 63) <= x < (1 << 63) else T.U64 if 0 <= x < 1 << 64 else None
@@ -319,7 +319,7 @@ def _made_by(e, g, known):
         x = g.get(e.func.id)
         if isinstance(x, type) and not issubclass(x, (enum.Enum, BaseException)):
             return x
-        if type(x) is Function and x._tree is not None:
+        if isinstance(x, Function) and x._tree is not None:
             return returns_made(x._tree, x._fn.__globals__)
         return None
     w = None
@@ -329,7 +329,7 @@ def _made_by(e, g, known):
     elif isinstance(e, (ast.BinOp, ast.UnaryOp)) and type(e.op) in OPERATORS:
         c = _class_of(e.left if isinstance(e, ast.BinOp) else e.operand, g, known)
         w = _in_class(c, OPERATORS[type(e.op)]) if c is not None else None
-    if type(w) is Function or type(w) is types.FunctionType:
+    if isinstance(w, Function) or type(w) is types.FunctionType:
         w = _method(w)
         if w._tree is not None:
             return returns_made(w._tree, w._fn.__globals__)
@@ -365,7 +365,7 @@ def _callees_of(f, known):
     facts = _facts(tree)
     for n in facts.calls + facts.operators:
         w, me = None, None
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and type(g.get(n.func.id)) is Function:
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and isinstance(g.get(n.func.id), Function):
             out.append((g[n.func.id], {}))
             continue
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
@@ -374,7 +374,7 @@ def _callees_of(f, known):
         elif isinstance(n, (ast.BinOp, ast.UnaryOp)) and type(n.op) in OPERATORS:
             me = _class_of(n.left if isinstance(n, ast.BinOp) else n.operand, g, known)
             w = _in_class(me, OPERATORS[type(n.op)]) if me is not None else None
-        if type(w) is Function or type(w) is types.FunctionType:
+        if isinstance(w, Function) or type(w) is types.FunctionType:
             w = _method(w)
             ps = w._tree.args.posonlyargs + w._tree.args.args if w._tree is not None else []
             if ps:
@@ -411,7 +411,7 @@ def _made_uses(f, cls, owners, seen=None):
             if isinstance(n.func, ast.Name):
                 h = g.get(n.func.id)
                 for pos, a in enumerate(n.args):
-                    if isinstance(a, ast.Name) and a.id in local and type(h) is Function and h._tree is not None:
+                    if isinstance(a, ast.Name) and a.id in local and isinstance(h, Function) and h._tree is not None:
                         u = _param_uses(h, pos, cls, h._attrs.get(pos, ((), set(), set())))
                         for k in range(3):
                             uses[k].update(u[k])
@@ -960,13 +960,13 @@ def _param_uses(f, idx, cls, base, owners=None, stack=(), nested_out=None):
         elif target[0] == 'e' and owners is not None:
             cls_of = _class_of(target[1], f._fn.__globals__, owners)
             c = _in_class(cls_of, target[2]) if cls_of is not None else None
-            g, at = (c if type(c) is Function or type(c) is types.FunctionType else None), pos + 1
+            g, at = (c if isinstance(c, Function) or type(c) is types.FunctionType else None), pos + 1
             g = None if g is None else _method(g)
         elif target[0] == 'm' and owners is not None and target[1] in owners:
             c = _in_class(owners[target[1]], target[2])
-            g, at = (c if type(c) is Function or type(c) is types.FunctionType else None), pos + 1
+            g, at = (c if isinstance(c, Function) or type(c) is types.FunctionType else None), pos + 1
             g = None if g is None else _method(g)
-        if type(g) is not Function or g._tree is None:
+        if not isinstance(g, Function) or g._tree is None:
             continue
         deeper = {}
         inner = _param_uses(g, at, cls, g._attrs.get(at, ((), set(), set())), None, stack, deeper)
@@ -1016,7 +1016,7 @@ _methods = weakref.WeakKeyDictionary()   # a plain function on a class -> the Fu
 
 def _method(fn):
     """The Function a method on a class compiles as, when compiled code calls it: itself if it's @scram."""
-    if type(fn) is Function:
+    if isinstance(fn, Function):
         return fn
     w = _methods.get(fn)
     if w is None:
@@ -1135,7 +1135,7 @@ def _methods_called(x, calls, cls=None):
         if m in found:
             continue
         c = _in_class(cls, m)
-        if type(c) is not Function and type(c) is not types.FunctionType:
+        if not isinstance(c, Function) and type(c) is not types.FunctionType:
             return f'{cls.__name__}.{m} is {"not there" if c is _MISSING else "not a plain method"}'
         if type(held) is dict and m in held:
             return f'{m} is on the instance, so calling it calls what is held there'
@@ -1188,7 +1188,7 @@ def _construction_uses(f):
             if a in attrs:
                 _node_merge(out.setdefault(attrs[a], [set(), set(), set(), {}]), sub)
         targets = [(_method(w), 0) for w in (_in_class(cls, m) for m in (mine[2] if mine else ())) if type(w) in (Function, types.FunctionType)]
-        targets += [(g[t[1]], pos) for t, pos, *path in facts.given.get(v, ()) if t[0] == 'f' and not path and type(g.get(t[1])) is Function]
+        targets += [(g[t[1]], pos) for t, pos, *path in facts.given.get(v, ()) if t[0] == 'f' and not path and isinstance(g.get(t[1]), Function)]
         for w, at in targets:                    # through v's methods, and what v is given to
             if w._tree is None:
                 continue
@@ -1246,7 +1246,7 @@ def _pool_plan(f, args):
     names = set(names)
     for n in facts.calls:                        # given where a compiled callee takes a reference: a reference here too
         h = g.get(n.func.id) if isinstance(n.func, ast.Name) else None
-        if type(h) is Function and h._tree is not None:
+        if isinstance(h, Function) and h._tree is not None:
             theirs = _ref_candidates(h._tree)[1]
             ps = [q.arg for q in h._tree.args.posonlyargs + h._tree.args.args]
             for q, a in zip(ps, n.args):
@@ -1448,7 +1448,7 @@ def _callee_ref_uses(f, tree, refnames, classes):
                 w = _in_class(cls, n.func.attr)
                 if type(w) in (Function, types.FunctionType):
                     targets.append((_method(w), 0))
-        elif isinstance(n.func, ast.Name) and type(g.get(n.func.id)) is Function:
+        elif isinstance(n.func, ast.Name) and isinstance(g.get(n.func.id), Function):
             targets += [(g[n.func.id], k) for k, a in enumerate(n.args) if isinstance(a, ast.Name) and a.id in refnames]
         for w, at in targets:
             if w._tree is None:
@@ -2291,6 +2291,40 @@ def _write_back(entry, m, args):
                 _copy_back(args[i], a, t.elem, before[id(a)])
 
 
+class _Never:
+    """No value has this type: an empty fast slot matches no call."""
+
+
+class _Absent:
+    """An argument a front's call left out."""
+
+
+_ABSENT = _Absent()
+_FRONTS = {}
+_FRONT_MAX = 8              # positional parameters up to which a Function gets a __call__ of its own arity
+
+
+def _front(n):
+    """A subclass of Function whose __call__ takes n arguments by position and, when their types are those of the
+    last plan made (_fast: the types, then the plan), calls that plan directly: no *args tuple, no dict lookup, no
+    tuple of types. Anything else (a keyword, a default, another type) takes Function.__call__, as before."""
+    cls = _FRONTS.get(n)
+    if cls is not None:
+        return cls
+    ps = [f'_sj_a{i}' for i in range(n)]
+    test = ''.join(f'type({a}) is f[{i}] and ' for i, a in enumerate(ps)) or 'f[0] is not None and '
+    src = (f"def __call__(_sj_self, {''.join(a + '=ABSENT, ' for a in ps)}*_sj_rest, **_sj_kw):\n"
+           f"    f = _sj_self._fast\n"
+           f"    if {test}not _sj_rest and not _sj_kw:\n"
+           f"        return f[{n}]({', '.join(ps)})\n"
+           f"    return general(_sj_self, *[a for a in ({''.join(a + ', ' for a in ps)}) if a is not ABSENT], *_sj_rest, **_sj_kw)\n")
+    env = {'ABSENT': _ABSENT, 'general': Function.__call__}
+    exec(src, env)  # noqa: S102
+    cls = _FRONTS[n] = type('Function', (Function,), {'__call__': env['__call__'], '__module__': Function.__module__,
+                                                     '__qualname__': 'Function'})
+    return cls
+
+
 class Function:
     def __init__(self, fn, boundscheck=True, cache=True, fallback=True, parity=True, _loop=None, counts=False):
         functools.update_wrapper(self, fn)
@@ -2341,6 +2375,10 @@ class Function:
         self._nested = _nested_uses(self._tree)
         self._replans = 8         # how many times more a dict's new value types get a call plan of their own
         self._np = None
+        n = code.co_argcount
+        self._fast = (_Never,) * n + (None,)        # the last plan's argument types and the plan (see _front)
+        if not self._kwonly and not code.co_flags & (inspect.CO_VARARGS | inspect.CO_VARKEYWORDS) and n <= _FRONT_MAX:
+            self.__class__ = _front(n)
 
     @staticmethod
     def _parse(fn):
@@ -2428,14 +2466,23 @@ class Function:
                 bound[i] = defaults[i - (n - len(defaults))]
         return tuple(bound)
 
-    def __call__(self, *args, **kwargs):
+    def _set_plan(self, key, plan):
+        """A plan for calls with these argument types; the last one made is also what the front tries first."""
+        self._plans[key] = plan
+        if len(key) == len(self._fast) - 1:
+            self._fast = key + (plan,)
+
+    def __call__(self, /, *args, **kwargs):
         if kwargs or len(args) != self._fn.__code__.co_argcount or self._kwonly:     # a default or a keyword: bound as Python binds it
             full = self._bind(args, kwargs)
             if full is None:
                 return self._fn(*args, **kwargs)
             args, kwargs = full, {}
-        plan = self._plans.get(tuple(map(type, args)))
+        key = tuple(map(type, args))
+        plan = self._plans.get(key)
         if plan is not None and not kwargs:             # these types were checked when the plan was made
+            if len(key) == len(self._fast) - 1:
+                self._fast = key + (plan,)              # the front tries these types first from now on
             return plan(*args)
         for i, p, ann in self._contracts:
             if i < len(args) and not _contract_ok(args[i], ann):
@@ -2449,9 +2496,9 @@ class Function:
         if _profile:
             return self._timed(key, entry, args)
         if entry is not PYTHON:
-            self._plans[tuple(map(type, real))] = _make_plan(self, entry, args)
+            self._set_plan(tuple(map(type, real)), _make_plan(self, entry, args))
         elif None not in key and not any(t.kind in ('array', 'object', 'objlist') for t in key) and dict not in map(type, args) and not self._hidden:
-            self._plans[tuple(map(type, real))] = self._py   # these types always run as Python
+            self._set_plan(tuple(map(type, real)), self._py)   # these types always run as Python
         if entry is PYTHON:
             return self._py(*real)
         return self._run(entry, args)
@@ -2476,7 +2523,7 @@ class Function:
                 continue
             for _, ft in (t.elem.elem if t.kind in ('objlist', 'elemref') else t.recipe['methods'] if t.kind == 'madeclass' else t.elem):
                 w = ft.elem if ft.kind == 'function' else None
-                if type(w) is not Function or w._tree is None:
+                if not isinstance(w, Function) or w._tree is None:
                     continue
                 if w._hidden is None:
                     w._find_globals()
@@ -2497,6 +2544,7 @@ class Function:
         self._dict_keys, self._attrs, self._elems = _dict_keys(self._ctree), _attrs_used(self._ctree), _element_attrs(self._ctree)
         self._passes = _passes(self._ctree)
         self._plans.clear()             # a plan reads the globals it was made with
+        self._fast = (_Never,) * len(self._fast[:-1]) + (None,)
         return True
 
     def _with_globals(self, args):
@@ -2526,7 +2574,7 @@ class Function:
         self._hidden = sorted(n for n in loads - local - called if n in g and (
             _arg_type(g[n]) is not None or type(g[n]) is dict
             or (n in attrs and type(_object_fields(g[n], sorted(attrs[n][0]), attrs[n][1], attrs[n][2])) is list)))
-        callees = sorted(n for n in called - local if type(g.get(n)) is Function)
+        callees = sorted(n for n in called - local if isinstance(g.get(n), Function))
         self._hidden += callees + sorted(n for n in called - local if T.is_c_function(g.get(n)))
         self._made = sorted(n for n in called - local if isinstance(g.get(n), type) and not issubclass(g[n], (enum.Enum, BaseException)))      # classes it makes instances of: in the signature, by identity
         self._hidden += self._made
@@ -2573,7 +2621,7 @@ class Function:
             return self._py(*real)
         if self._replans and any(t.kind in ('dict', 'object') for t in entry.types):    # writing p['s'] can change what the plan checks for
             self._replans -= 1
-            self._plans[tuple(map(type, real))] = _make_plan(self, entry, args)
+            self._set_plan(tuple(map(type, real)), _make_plan(self, entry, args))
         return self._run(entry, args)
 
     def _failed(self, entry, status, io):

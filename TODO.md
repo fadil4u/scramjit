@@ -517,3 +517,30 @@ Spills per line, once cimo can report them.
     silently changes semantics. Read `_compiler.py` by lowering (indexing and views first, then
     bounds-check versioning, then calls), and record what was checked and found here.
 22. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has. Little to win: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, which leaves temporary arrays.
+23. **Lists that grow: `append`, `pop`, `extend`, outputs of unknown size. Next up.** The most common Python shape
+    scramjit can't compile: `out = []`, a loop, `out.append(x)`, `return out`. Callers work around it with a
+    preallocated array counted past its end and the call made again with more room (the case study, Demos #2). What
+    exists: a local list is a pointer and a length (`v_x`, `v_x__n`, a flag per element when ints and floats mix,
+    `v_x__np`), freed when it goes; a comprehension with two loops already grows by doubling `realloc`
+    (`make_list`); a list passed in is copied into an `array` and its changed elements written back (`_snapshot`); a
+    returned list is boxed by the dispatcher. In steps, each with its differential tests (results, the caller's list
+    afterwards, and the same after an exception midway):
+    - **Local lists that grow.** A capacity, `v_x__c`, for each list the function appends to (found before
+      inference). `out.append(v)`: `if (n == cap) grow; p[n++] = v`. `pop()` (IndexError "pop from empty list"),
+      `pop(i)`, `extend` of a list, range or comprehension, `+= [..]`, `clear()`, `del out[i]`, `insert`. `[]` takes
+      its element type from what's appended to it (the join of every `append` and store, inferred like any
+      variable; ints then floats give the mixed flags Python's list would have), and one never appended to stays
+      empty. Iterating over a list while appending to it stays Python (Python's loop would see the new elements).
+      Returning it, `np.array(out)`, `len`, indexing and `sum` work as for other local lists.
+    - **Appending to a list passed in.** The copy can't grow in place, so the kernel copies to its own buffer on the
+      first append, and the dispatcher writes back the changed elements as now, plus the new tail
+      (`lst.extend(...)`) or the cut (`del lst[n:]`), on the error path too, so the caller sees what Python would
+      have. An empty list passed in (`fill(out)` with `out = []`) is a signature of its own, typed by the appends.
+      An append of another type than the list holds (a float to ints) makes it mixed, as Python would.
+    - **Lists of tuples and of lists.** `pairs.append((u, v))`, returned as a list of tuples: a struct per element
+      (or a column per position), boxed at the return. Ragged lists of lists (`rows.append(row)` with rows of other
+      lengths): a list of list headers. Then dataclass instances (`out.append(Point(x, y))`), through the object
+      pool.
+    - **Returning more than one,** `return us, vs` (a tuple of lists), as arrays are returned in a tuple now.
+    Measure against Python and against the preallocate-and-rerun pattern; the boxing at the return is the cost to
+    watch (`array('d', ...).tolist()` is C).

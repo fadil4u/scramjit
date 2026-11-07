@@ -126,7 +126,7 @@ Their element type is fixed by what they're made with. Storing a numpy scalar in
 
 Still Python, each for that function or the loop it's in:
 
-- **Methods and operators:** `sort`, `index`, `count`, `copy`, `remove`, `x in xs`, `xs + ys`, `xs * 2` after it's made, slices (`xs[1:]`), slice assignment, `sorted(xs)`.
+- **Methods and operators:** `sort`, `index`, `count`, `copy`, `remove`, `xs + ys`, `xs * 2` after it's made, `sorted(xs)`.
 - **Mixed element types:** `[1, 2.5]`, or `[1.0, n]` with an int `n`.
 
 ### Lists that grow, nest and are shared (from 0.0.4)
@@ -174,7 +174,11 @@ def record(hits, xs, r):
 - **Calls:** a compiled function can pass these lists to another and get one back; what the callee made becomes the caller's.
 - **Comprehensions** over a list of arrays compile, as loops do.
 
-Not yet: sets, `sort`, `in`, slices of lists, and Pyodide, where these lists haven't been run.
+- **Slices** (from 0.0.4): `xs[a:b:c]` is a new list, a shallow copy, as Python's; `xs[a:b] = ys` and `del xs[a:b]` resize the list, and an extended slice (`xs[::2] = ys`) must be as long, with Python's `ValueError` otherwise. A list sliced anywhere in a function is held this way.
+- **`in`** (from 0.0.4): `x in xs` and `not in` on a list of numbers or of tuples of numbers compare with `==`, in order, and `x in [a, b]` or `x in (1, 2, 3)` compares with each; `'k' in d` asks a dict whether it has that key. One difference: Python finds a NaN in a list when it is the very object there (`x in [x]` is true even for `x = nan`), while compiled code compares values, so it never finds a NaN.
+- **Pyodide:** all of this runs there too (`tools/run_pyodide_tests.mjs tests/test_glists.py`).
+
+Not yet: sets, and `sort`.
 
 ### Lists passed in (from 0.0.4)
 

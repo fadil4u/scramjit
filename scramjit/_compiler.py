@@ -2130,6 +2130,8 @@ class Compiler(GList):
                 self.fail(v, f'returns {self.env[v.id].name}, whose elements may be numpy scalars')
             return self.env[v.id]          # handed back whole: copied into a new list, or the one passed in
         if isinstance(v, ast.Tuple) and self.has_views(v):        # only a return can hold arrays in a tuple
+            if any(self.gl_is(x) or self.rc_is(x) for x in v.elts):
+                self.fail(v, 'returns a tuple of lists and arrays (or a rectangular list of lists)')
             return T.tuple_of([self.typeof(x) for x in v.elts])
         if isinstance(v, ast.Tuple) and any(self.gl_is(x) or self.rc_is(x) for x in v.elts):   # lists in a returned tuple: a level deep
             ts = [self.typeof(x) for x in v.elts]
@@ -2969,6 +2971,8 @@ class Compiler(GList):
             if t is T.NP_UINT64:                     # wraps, as numpy's does
                 return t
             return T.INT if t is T.BOOL else t
+        if isinstance(e, ast.Compare) and self.gl_is_in(e):
+            return self.gl_in_type(e)
         if isinstance(e, ast.Compare):
             ts = [self.typeof(x) for x in [e.left] + e.comparators]
             if any(t.kind == 'enum' for t in ts):
@@ -6851,6 +6855,8 @@ class Compiler(GList):
             if t.kind == 'float':
                 return f'(-({c}))', f
             return f'{cast}sj_neg((int64_t)({c}))', f
+        if isinstance(e, ast.Compare) and self.gl_is_in(e):
+            return self.gl_in(e)
         if isinstance(e, ast.Compare):
             return self.compare(e)
         if isinstance(e, ast.BoolOp):

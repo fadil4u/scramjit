@@ -575,8 +575,11 @@ Spills per line, once cimo can report them.
     - **Calls** between compiled functions pass and return them; comprehensions over a list of arrays.
     - Filter 1M keeping 500k: Python 83 ms, compiled 20 ms; `examples/grow_lists.py` 5x. `tests/test_glists.py`.
     - **Methods** of instances held in them (`p.step(dt)`): the method compiled as a callee with `self` the record.
-    - **Left:** `sort`, slices of lists, `in`, sets (list features beyond composition), and a run in Pyodide (the
-      decoders read memory with ctypes, natively).
+    - **Slices** (`xs[a:b:c]`, slice assignment and `del`, Python's clamping and errors) and **`in`** (lists of numbers or
+      tuples, literal lists and tuples, a dict's keys). **Pyodide:** works (cimo's wasm code has 8-byte pointers inside, so
+      the decoders read pointer fields as 8 bytes); `tools/run_pyodide_tests.mjs tests/test_glists.py
+      tests/test_elementwise.py`, 27 passed. Not yet run in CI.
+    - **Left:** sets, `sort`.
 24. **Preflight's advice: boxed data, and the flags that would help.** Two kinds of note:
     - **Converting costs more than computing.** `preflight --run` splits each function's time into native and
       Python; split off the seconds converting arguments and results too (copying lists in, writing back, boxing the

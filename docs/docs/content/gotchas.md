@@ -108,6 +108,10 @@ Python's integers are unbounded. Compiled integers are `int64`, and past that th
 
 Checking every operation would cost speed on every loop, and numeric code rarely comes near `2 ** 63`. If yours might, leave that function undecorated, or use floats. An argument that doesn't fit in 64 bits is safe: that call runs as Python.
 
+### `nan in xs` compares values, not objects
+
+From 0.0.4, `x in xs` compiles. Python checks identity before `==`, so `x in [x]` is true even when `x` is a NaN, the very object being in the list. Compiled code holds numbers, not objects, and compares values, so it never finds a NaN. Use `math.isnan` on the elements if a NaN may be what you look for.
+
 ### On Windows, a NaN's sign can differ
 
 A few operations give a NaN with the opposite sign bit from CPython's on Windows: `inf % 1.0`, `inf // 1.0`, `math.atan2(0.0, nan)` and `nan * -1`. Both are NaN and compare the same; only `math.copysign` or the raw bytes can tell. Seen on Windows arm64; Linux matches exactly.

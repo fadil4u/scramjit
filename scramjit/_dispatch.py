@@ -2834,7 +2834,31 @@ class Function:
         return entry
 
     def _key(self, args):
-        """The signature of a call. A dict's type is the keys this function uses: nothing else in it matters."""
+        """The signature of a call. A dict's type is the keys this function uses: nothing else in it matters. A dict
+        holding lists, or held by reference here, is a record (_glist)."""
+        key = self._key_of(args)
+        if any(type(x) is dict for x in args):
+            self._held()
+            out = list(key)
+            for i, x in enumerate(args):
+                if type(x) is dict and (i in self._gl_held or (out[i] is None and any(
+                        type(v) in (list, dict) or hasattr(v, '__array_interface__') for v in x.values()))) \
+                        and not any(getattr(a, '__dict__', None) is x for a in args):   # an object's own dict stays with it
+                    t = _glist_elem_type(x, 0)
+                    if t is not None and t.kind == 'record':
+                        out[i] = t
+            key = tuple(out)
+        return key
+
+    def _held(self):
+        if self._gl_held is None:
+            from ._glist import held_names
+            code = self._fn.__code__
+            names = held_names(self._tree) if self._tree is not None else set()
+            self._gl_held = {i for i, n in enumerate(code.co_varnames[:code.co_argcount]) if n in names}
+        return self._gl_held
+
+    def _key_of(self, args):
         key = tuple(map(_arg_type, args))
         if any(type(x) is list for x in args):
             key = self._glist_key(args, key)
@@ -2948,13 +2972,6 @@ class Function:
                 out[i] = _objlist_type(x, (sorted(uses[0]),) + tuple(uses[1:]), seen, dict in map(type, args), nested)
         for q, (k, _) in joined.items():
             out[q] = T.inlist_of(k) if out[k] is not None and out[k].kind == 'objlist' else None
-        for i, x in enumerate(args):                 # a dict holding lists, or held by reference: a record (_glist)
-            if type(x) is dict and (i in (self._gl_held or ()) or (out[i] is None and any(
-                    type(v) in (list, dict) or hasattr(v, '__array_interface__') for v in x.values()))) \
-                    and not any(getattr(a, '__dict__', None) is x for a in args):   # an object's own dict stays with it
-                t = _glist_elem_type(x, 0)
-                if t is not None and t.kind == 'record':
-                    out[i] = t
         return tuple(out)
 
     @staticmethod
@@ -3077,11 +3094,7 @@ class Function:
     def _glist_key(self, args, key):
         """Lists held by reference (_glist): those the other kinds can't hold (ragged, deeper, of tuples or arrays,
         empty), those this function grows or gives another name, and lists shared between arguments."""
-        if self._gl_held is None:
-            from ._glist import held_names
-            code = self._fn.__code__
-            names = held_names(self._tree) if self._tree is not None else set()
-            self._gl_held = {i for i, n in enumerate(code.co_varnames[:code.co_argcount]) if n in names}
+        self._held()
         ids = collections.Counter()
         for x in args:
             if type(x) is list:
@@ -3317,7 +3330,7 @@ def _rc_struct_new(t):
     fields = []
     for k, (_, x) in enumerate(t.elem):
         if x.kind in ('glist', 'record'):
-            ct = ctypes.c_void_p
+            ct = ctypes.c_uint64          # a C pointer: 8 bytes, natively and in cimo's wasm
         elif x.kind == 'array':
             ct = ctypes.c_int64 * (10 + 2 * x.ndim)
         elif x.kind == 'tuple':
@@ -3380,11 +3393,10 @@ def _read_glist(addr, t, memo, blocks, arrays=None):
 def _read_glist_values(addr, t, memo, blocks, arrays=None):
     """The elements of the list whose header is at addr, as Python values."""
     import ctypes
-    ptr = ctypes.sizeof(ctypes.c_void_p)
-    raw = ctypes.string_at(addr, 32)
-    p = int.from_bytes(raw[:ptr], 'little')
+    raw = ctypes.string_at(addr, 32)                 # sj_glist: pointers are 8 bytes, natively and in cimo's wasm
+    p = int.from_bytes(raw[:8], 'little')
     n, _cap = struct.unpack_from('<qq', raw, 8)
-    db = int.from_bytes(raw[24:24 + ptr], 'little')
+    db = int.from_bytes(raw[24:32], 'little')
     blocks.append(addr - SJ_BLOCK)                    # its header's block: sizeof(sj_block) before it
     if db:
         blocks.append(db)
@@ -3393,7 +3405,7 @@ def _read_glist_values(addr, t, memo, blocks, arrays=None):
     if not n:
         return out
     if et.kind in ('glist', 'record'):
-        ptrs = (ctypes.c_void_p * n).from_address(p)
+        ptrs = (ctypes.c_uint64 * n).from_address(p)
         out.extend(_read_held(x, et, memo, blocks, arrays) for x in ptrs)
     elif et.kind == 'array':
         width = 10 + 2 * et.ndim
@@ -3586,7 +3598,7 @@ class _GLBuild:
         et = t.elem
         n = len(x)
         if et.kind in ('glist', 'record'):
-            esize = ctypes.sizeof(ctypes.c_void_p)
+            esize = 8
         elif et.kind == 'array':
             esize = 8 * (10 + 2 * et.ndim)
         elif et.kind == 'tuple':
@@ -3598,9 +3610,9 @@ class _GLBuild:
         d = self.buffer(esize * n)
         if n:
             if et.kind == 'glist':
-                (ctypes.c_void_p * n).from_address(d)[:] = [self.build(v, et) for v in x]
+                (ctypes.c_uint64 * n).from_address(d)[:] = [self.build(v, et) for v in x]
             elif et.kind == 'record':
-                (ctypes.c_void_p * n).from_address(d)[:] = [self.build_record(v, et) for v in x]
+                (ctypes.c_uint64 * n).from_address(d)[:] = [self.build_record(v, et) for v in x]
             elif et.kind == 'array':
                 recs = (ctypes.c_int64 * ((10 + 2 * et.ndim) * n)).from_address(d)
                 at = 0
@@ -3655,7 +3667,7 @@ class _GLBuild:
                 n = struct.unpack_from('<q', (self.ctypes.c_char * 16).from_address(h), 8)[0]
                 p = struct.unpack_from('<q', (self.ctypes.c_char * 8).from_address(h), 0)[0]
                 if n and p:
-                    for x in (self.ctypes.c_void_p * n).from_address(p):
+                    for x in (self.ctypes.c_uint64 * n).from_address(p):
                         retype(x, t.elem, seen)
         seen = set()
         for i, h in self.top:

@@ -20,7 +20,7 @@ import ast
 import copy
 
 from . import _types as T
-from ._runtime import LIST_INDEX_ERROR, MEMORY_ERROR
+from ._runtime import LIST_INDEX_ERROR, MEMORY_ERROR, VALUE_ERROR, VALUE_ERROR_MESSAGES
 
 GROWERS = ('append', 'pop', 'extend', 'insert', 'clear')
 
@@ -48,6 +48,19 @@ static void sj_take(sj_heap *h, sj_block *b, int64_t ph) {
     if (!b) return;
     if (b->owner == SJ_ORPHAN) { b->owner = h; b->next = h->all; h->all = b; h->since += b->bytes + 64; }
     b->mark = ph;
+}
+/* A slice of a sequence of n, as PySlice_AdjustIndices: its first index and how many it holds (step is not 0). */
+static int64_t sj_gl_slice(int64_t n, int has_lo, int64_t lo, int has_hi, int64_t hi, int64_t step, int64_t *start) {
+    if (step > 0) {
+        if (!has_lo) lo = 0; else { if (lo < 0) { lo += n; if (lo < 0) lo = 0; } else if (lo > n) lo = n; }
+        if (!has_hi) hi = n; else { if (hi < 0) { hi += n; if (hi < 0) hi = 0; } else if (hi > n) hi = n; }
+        *start = lo;
+        return hi > lo ? (int64_t)(((uint64_t)hi - (uint64_t)lo - 1) / (uint64_t)step) + 1 : 0;
+    }
+    if (!has_lo) lo = n - 1; else { if (lo < 0) { lo += n; if (lo < 0) lo = -1; } else if (lo >= n) lo = n - 1; }
+    if (!has_hi) hi = -1; else { if (hi < 0) { hi += n; if (hi < 0) hi = -1; } else if (hi >= n) hi = n - 1; }
+    *start = lo;
+    return lo > hi ? (int64_t)(((uint64_t)lo - (uint64_t)hi - 1) / (0 - (uint64_t)step)) + 1 : 0;
 }
 static void *sj_record_new(sj_heap *h, int64_t size) {
     int64_t one = 1;
@@ -78,9 +91,9 @@ def receiver(call):
     return None
 
 
-def grown_names(tree):
+def grown_names(tree, uses=True):
     """Names the function grows or empties (x.append(...), del x[i], x += [...]) or makes empty (x = []): these lists
-    are held by reference."""
+    are held by reference. uses: also those it slices or asks `in` of (which may be arrays)."""
     out = set()
     for n in ast.walk(tree):
         if isinstance(n, ast.Call) and receiver(n) and isinstance(receiver(n)[0], ast.Name):
@@ -92,6 +105,10 @@ def grown_names(tree):
             out.add(n.target.id)
         elif isinstance(n, ast.Assign) and isinstance(n.value, ast.List) and not n.value.elts:
             out |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+        elif uses and isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Slice) and isinstance(n.value, ast.Name):
+            out.add(n.value.id)                  # a slice: a new list, or one that resizes
+        elif uses and isinstance(n, ast.Compare) and any(isinstance(o, (ast.In, ast.NotIn)) for o in n.ops):
+            out |= {c.id for c in n.comparators if isinstance(c, ast.Name)}
     return out
 
 
@@ -547,9 +564,16 @@ class GList:
             return lt.elem
         return T.NONE
 
+    def gl_slice_parts(self, e):
+        for part in (e.slice.lower, e.slice.upper, e.slice.step):
+            if part is not None and (self.typeof(part).kind not in ('int', 'bool') or self.typeof(part) in (T.U64, T.NP_UINT64)):
+                self.fail(e, 'a slice of a list with a bound that is not an int')
+
     def gl_subscript_type(self, e):
-        if isinstance(e.slice, ast.Slice):
-            self.fail(e, 'a slice of a list (a copy in Python)')
+        if isinstance(e.slice, ast.Slice):           # a new list, a shallow copy of those elements
+            self.gl_slice_parts(e)
+            self.makes = True
+            return self.typeof(e.value)
         if self.typeof(e.slice).kind not in ('int', 'bool') or self.typeof(e.slice) in (T.U64, T.NP_UINT64):
             self.fail(e, f'a list indexed with {self.typeof(e.slice).name}')
         et = self.typeof(e.value).elem
@@ -561,13 +585,21 @@ class GList:
 
     def gl_store_type(self, target, t, s):
         lt = self.typeof(target.value)
+        if isinstance(target.slice, ast.Slice):      # xs[a:b] = ys: ys's elements in their place
+            self.gl_slice_parts(target)
+            if t.kind != 'glist':
+                self.fail(s, f'assigns {t.name} to a slice of a list (only a list compiles there)')
+            self.makes = True
+            self.gl_unify_into(target.value, lt, t.elem, 'assigns the elements of')
+            return
         self.gl_subscript_type_index(target)
         self.gl_elem_ok(s, t)
         self.gl_unify_into(target.value, lt, t, 'stores')
 
     def gl_subscript_type_index(self, e):
         if isinstance(e.slice, ast.Slice):
-            self.fail(e, 'assigning to a slice of a list')
+            self.gl_slice_parts(e)
+            return
         if self.typeof(e.slice).kind not in ('int', 'bool'):
             self.fail(e, f'a list indexed with {self.typeof(e.slice).name}')
 
@@ -834,7 +866,9 @@ class GList:
         return i
 
     def gl_read(self, e):
-        """x[i]: (C value, flag)."""
+        """x[i]: (C value, flag). x[a:b]: a new list."""
+        if isinstance(e.slice, ast.Slice):
+            return self.gl_slice_read(e)
         l = self.hold_ptr(self.expr(e.value)[0])
         i = self.gl_index(l, e.slice, self.line(e), 0)
         et = self.typeof(e)
@@ -842,6 +876,9 @@ class GList:
 
     def gl_store(self, target, v, vt):
         """x[i] = v: the list and index first, then the store (the value is already computed, as Python does)."""
+        if isinstance(target.slice, ast.Slice):
+            self.gl_slice_store(target, v[0])
+            return
         l = self.hold_ptr(self.expr(target.value)[0])
         i = self.gl_index(l, target.slice, self.line(target), 1)
         et = self.typeof(target.value).elem
@@ -890,7 +927,173 @@ class GList:
                 return out, (flag_of(et) if et.kind != 'glist' else '0')
         return None
 
+    def gl_slice(self, l, e):
+        """The slice e of list l (bounds evaluated in order): (first index, step, how many)."""
+        sl = e.slice
+        line = self.line(e)
+        vals = []
+        for part in (sl.lower, sl.upper, sl.step):
+            vals.append(None if part is None else self.hold(self.coerce(self.expr(part)[0], self.typeof(part), T.INT), T.INT))
+        lo, hi, step = vals
+        st = step or '1LL'
+        if step is not None:
+            self.emit(f'if ({step} == 0) SJ_FAIL({VALUE_ERROR}, {line}, {VALUE_ERROR_MESSAGES.index("slice step cannot be zero")}, 0);')
+        start, n = self.temp(), self.temp()
+        self.emit(f'int64_t {start}; int64_t {n} = sj_gl_slice({l}->n, {int(lo is not None)}, {lo or "0LL"}, {int(hi is not None)}, '
+                  f'{hi or "0LL"}, {st}, &{start});')
+        return start, st, n
+
+    def gl_slice_read(self, e):
+        """xs[a:b:c]: a new list of those elements (shallow, as Python's)."""
+        t = self.typeof(e.value)
+        ct = self.gl_ctype(t.elem)
+        l = self.hold_ptr(self.expr(e.value)[0])
+        start, st, n = self.gl_slice(l, e)
+        out = self.gl_new(t, n, self.line(e))
+        k = self.temp()
+        self.emit(f'for (int64_t {k} = 0; {k} < {n}; {k}++) (({ct} *){out}->p)[{k}] = (({ct} *){l}->p)[{start} + {k} * {st}];')
+        self.emit(f'{out}->n = {n};')
+        return out, '0'
+
+    def gl_slice_store(self, target, src):
+        """xs[a:b] = ys (src, already evaluated): ys's elements in place of those, the list resizing for a step of 1; an
+        extended slice must be as long as ys. If ys is xs, its elements as they were before."""
+        t = self.typeof(target.value)
+        ct = self.gl_ctype(t.elem)
+        line = self.line(target)
+        l = self.hold_ptr(self.expr(target.value)[0])
+        start, st, n = self.gl_slice(l, target)
+        m, sp = self.temp(), self.temp()
+        self.emit(f'int64_t {m} = {src}->n; {ct} *{sp} = ({ct} *){src}->p;')
+        self.open(f'if ({src} == {l} && {m})')                        # xs[a:b] = xs: a copy first
+        tmp = self.gl_new(t, m, line)
+        self.emit(f'memcpy({tmp}->p, {sp}, sizeof({ct}) * (size_t){m}); {sp} = ({ct} *){tmp}->p;')
+        self.close()
+        self.open(f'if ({st} == 1)')
+        self.emit(f'int64_t nn_ = {l}->n - {n} + {m};')
+        self.emit(f'if (nn_ > {l}->cap && !sj_glist_reserve(&sj_h, {l}, (int64_t)sizeof({ct}), nn_)) SJ_FAIL({MEMORY_ERROR}, {line}, 0, 0);')
+        self.emit(f'memmove(({ct} *){l}->p + {start} + {m}, ({ct} *){l}->p + {start} + {n}, sizeof({ct}) * (size_t)({l}->n - {start} - {n}));')
+        self.emit(f'if ({m}) memcpy(({ct} *){l}->p + {start}, {sp}, sizeof({ct}) * (size_t){m}); {l}->n = nn_;')
+        self.close()
+        self.open('else')
+        msg = VALUE_ERROR_MESSAGES.index('attempt to assign sequence of size {} to extended slice of size {}')
+        self.emit(f'if ({m} != {n}) {{ sj_io[4] = {n}; SJ_FAIL({VALUE_ERROR}, {line}, {msg}, {m}); }}')
+        self.emit(f'for (int64_t k_ = 0; k_ < {n}; k_++) (({ct} *){l}->p)[{start} + k_ * {st}] = {sp}[k_];')
+        self.close()
+
+    def gl_slice_delete(self, target):
+        """del xs[a:b:c]: those elements out, the rest closing up, in order."""
+        t = self.typeof(target.value)
+        ct = self.gl_ctype(t.elem)
+        l = self.hold_ptr(self.expr(target.value)[0])
+        start, st, n = self.gl_slice(l, target)
+        self.open(f'if ({n})')
+        self.emit(f'int64_t lo_ = {st} > 0 ? {start} : {start} + ({n} - 1) * {st}, ast_ = {st} > 0 ? {st} : -{st}, w_ = lo_;')
+        self.emit(f'for (int64_t r_ = lo_; r_ < {l}->n; r_++) if (!(r_ <= lo_ + ({n} - 1) * ast_ && (r_ - lo_) % ast_ == 0)) '
+                  f'(({ct} *){l}->p)[w_++] = (({ct} *){l}->p)[r_];')
+        self.emit(f'{l}->n = w_;')
+        self.close()
+
+    def gl_in(self, e):
+        """x in xs, x not in xs: == against each element, in order; 'k' in d: whether the dict has that key."""
+        right = e.comparators[0]
+        negate = isinstance(e.ops[0], ast.NotIn)
+        if isinstance(right, (ast.List, ast.Tuple)):
+            xt = self.typeof(e.left)
+            x = self.texpr(e.left) if xt.kind == 'tuple' else self.hold(self.expr(e.left)[0], xt)
+            ys = [(self.texpr(y) if xt.kind == 'tuple' else self.hold(self.expr(y)[0], self.typeof(y)), self.typeof(y)) for y in right.elts]
+
+            def flat_(v):
+                out = []
+                for z in v:
+                    out += flat_(z) if isinstance(z, list) else [z[0]]
+                return out
+            conds = []
+            for y, yt in ys:
+                if xt.kind == 'tuple':
+                    conds.append('(' + ' && '.join(self.cmp(a, at_, b, bt_, '==') for a, at_, b, bt_ in
+                                                   zip(flat_(x), leaves(xt), flat_(y), leaves(yt))) + ')')
+                else:
+                    conds.append(f'({self.cmp(x, xt, y, yt, "==")})')
+            r = self.hold('(' + (' || '.join(conds) or '0') + ')', T.BOOL)
+            return (f'(!{r})' if negate else r), '0'
+        rt = self.typeof(right)
+        if rt.kind == 'record':                          # the key is a constant string: nothing to evaluate there
+            self.expr(right)
+            has = e.left.value in [k for k, _ in rt.elem]
+            return ('1' if has != negate else '0'), '0'
+        xt = self.typeof(e.left)
+        r = self.temp()
+        self.emit(f'int {r} = 0;')
+        if xt.kind == 'tuple':
+            xs = []
+
+            def walk(v):
+                for y in v:
+                    walk(y) if isinstance(y, list) else xs.append(y[0])
+            walk(self.texpr(e.left))
+        else:
+            x = self.hold(self.expr(e.left)[0], xt)
+        if rt.kind == 'glist':
+            l = self.hold_ptr(self.expr(right)[0])
+            n, elem = f'{l}->n', (lambda k: f'(({self.gl_ctype(rt.elem)} *){l}->p)[{k}]')
+            et = rt.elem
+        else:                                              # a list of numbers, the fast kind
+            name = self.materialize(right) if not isinstance(right, ast.Name) else right.id
+            n, elem, et = f'v_{name}__n', (lambda k: f'v_{name}[{k}]'), rt.elem
+        k = self.temp()
+        self.open(f'for (int64_t {k} = 0; {k} < {n}; {k}++)')
+        if xt.kind == 'tuple':
+            conds = [self.cmp(c, lt_, f'{elem(k)}.f{j}', et_, '==') for j, (c, lt_, et_) in enumerate(zip(xs, leaves(xt), leaves(et)))]
+            self.emit(f'if ({" && ".join(conds)}) {{ {r} = 1; break; }}')
+        else:
+            self.emit(f'if ({self.cmp(x, xt, elem(k), et, "==")}) {{ {r} = 1; break; }}')
+        self.close()
+        return (f'(!{r})' if negate else r), '0'
+
+    def gl_is_in(self, e):
+        """x in xs (one comparison) with xs a list or a dict held here, or a list of numbers."""
+        if len(e.ops) != 1 or not isinstance(e.ops[0], (ast.In, ast.NotIn)):
+            return False
+        right = e.comparators[0]
+        if self.gl_is(right) or (self.rc_is(right) and not isinstance(right, ast.Dict)):
+            return True
+        if isinstance(right, (ast.List, ast.Tuple)):        # x in [a, b], x in (1, 2): each element, made first
+            return True
+        return isinstance(right, ast.Name) and self.env.get(right.id) is not None and self.env[right.id].kind == 'list'
+
+    def gl_in_type(self, e):
+        right = e.comparators[0]
+        if isinstance(right, (ast.List, ast.Tuple)):
+            xt = self.typeof(e.left)
+            for y in right.elts:
+                yt = self.typeof(y)
+                ok = (xt.is_number and yt.is_number) or (xt.kind == 'tuple' and yt.kind == 'tuple' and len(leaves(xt)) == len(leaves(yt))
+                                                         and all(a.is_number and b.is_number for a, b in zip(leaves(xt), leaves(yt))))
+                if not ok or isinstance(y, ast.Starred):
+                    self.fail(e, f'{xt.name} in a list holding {yt.name}')
+            return T.BOOL
+        rt = self.typeof(right)
+        if rt.kind == 'record':
+            if not (isinstance(e.left, ast.Constant) and type(e.left.value) is str):
+                self.fail(e, 'in on a dict with something other than a constant string')
+            return T.BOOL
+        xt = self.typeof(e.left)
+        et = rt.elem
+        if et is T.PENDING:
+            raise Pending()
+        if xt.kind == 'tuple' and et.kind == 'tuple':
+            if len(leaves(xt)) != len(leaves(et)) or any(not (a.is_number and b.is_number) for a, b in zip(leaves(xt), leaves(et))):
+                self.fail(e, f'{xt.name} in {rt.name}')
+            return T.BOOL
+        if not (xt.is_number and et.is_number):
+            self.fail(e, f'{xt.name} in {rt.name} (in compiles for numbers and tuples of numbers)')
+        return T.BOOL
+
     def gl_delete(self, target):
+        if isinstance(target.slice, ast.Slice):
+            self.gl_slice_delete(target)
+            return
         l = self.hold_ptr(self.expr(target.value)[0])
         i = self.gl_index(l, target.slice, self.line(target), 1)
         ct = self.gl_ctype(self.typeof(target.value).elem)

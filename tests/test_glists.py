@@ -1,7 +1,10 @@
 """Lists held by reference (_glist): lists that grow, nest and are shared, as Python's are. Each function's result
 must be Python's: the same values, types and sharing, or the same exception with the same message."""
 
-import resource
+try:
+    import resource
+except ImportError:                     # Pyodide
+    resource = None
 
 import numpy as np
 import pytest
@@ -234,8 +237,9 @@ def test_element_types():
     a = np.array([0.5, -1.0, 2.0, 0.0])
     got = same(numpy_elements, a)
     assert all(type(v) is np.float64 for v in got)
-    got = same(numpy_elements, np.arange(-2, 3))
-    assert all(type(v) is np.int64 for v in got)
+    ints = np.arange(-2, 3)                                 # int32 on wasm32, int64 elsewhere
+    got = same(numpy_elements, ints)
+    assert all(type(v) is type(ints[0]) for v in got)
     got = same(flags, a)
     assert got == [False, False, True, False]
 
@@ -294,6 +298,7 @@ def churn(n):
     return total
 
 
+@pytest.mark.skipif(resource is None, reason='no resource module (Pyodide)')
 def test_memory_is_freed():
     f = scram(churn, fallback=False, cache=False)
     f(10)
@@ -378,6 +383,7 @@ def test_lists_of_arrays():
     assert got[0] is got[1] and got[2] is x and got[3] is x
 
 
+@pytest.mark.skipif(resource is None, reason='no resource module (Pyodide)')
 def test_arrays_in_lists_are_freed():
     f = scram(churn_arrays, fallback=False, cache=False)
     f(10)
@@ -676,3 +682,66 @@ def test_methods_of_instances_in_lists():
     first = bs[0]
     same_passed(drive_bodies, bs, 10)
     assert bs[0] is first
+
+
+def slices(n):
+    xs = [i * 1.5 for i in range(n)]
+    a = xs[2:5]
+    b = xs[::-2]
+    c = xs[-3:]
+    d = xs[100:]
+    e = xs[1:-1:3]
+    xs[1:3] = [9.0, 9.5, 10.0]
+    xs[::2] = [0.0] * len(xs[::2])
+    del xs[:2]
+    del xs[::3]
+    xs[0:0] = xs
+    return a, b, c, d, e, xs
+
+
+def step_of(xs, s):
+    return xs[::s]
+
+
+def short_extended(n):
+    xs = [1, 2, 3, 4]
+    xs[::2] = [5]
+    return xs
+
+
+def rows_slice(m):
+    top = m[:1]
+    top[0].append(99)                                       # a shallow copy: the row is the same list
+    return m[1:], top
+
+
+def test_slices():
+    for n in (0, 1, 5, 12):
+        same_passed(slices, n)
+    for s in (1, 2, -1, -3, 0):                             # 0: ValueError, as Python
+        same_passed(step_of, [1, 2, 3, 4, 5], s)
+    same_passed(short_extended, 1)
+    m = [[1], [2, 3]]
+    got = same_passed(rows_slice, m)
+    assert got[1][0] is m[0]
+
+
+def members(n, q):
+    xs = []
+    for i in range(n):
+        xs.append(i * i)
+    hits = 0
+    for k in range(n * n):
+        if k in xs:
+            hits += 1
+    return hits, q in xs, q not in xs, (2, 4) in [(1, 2), (2, 4)], q in (1, 4, 9), 2.0 in xs
+
+
+def has_keys(d):
+    return 'a' in d, 'z' in d, 'z' not in d
+
+
+def test_in():
+    for q in (0, 9, 10, -1):
+        same_passed(members, 6, q)
+    same_passed(has_keys, {'a': [1], 'b': 2.0})

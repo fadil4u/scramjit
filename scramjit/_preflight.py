@@ -315,7 +315,7 @@ def assumed_signature(fdef, globals_=None, seen=()):
         if isinstance(d, ast.Constant) and type(d.value) in (int, float, bool):
             literal[p.arg] = {int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(d.value)]
     from ._glist import grown_names
-    grown = grown_names(fdef)
+    grown = grown_names(fdef, uses=False)
     for p in params:
         name = ast.unparse(p.annotation) if p.annotation is not None else None
         if p.arg in grown and name is None:     # appended to: a list given empty, typed by what's appended (_glist)

@@ -393,11 +393,12 @@ Spills per line, once cimo can report them.
     kernels, and Cython as written gains nothing on them (scramjit 19x and 49x). Still to do: **run on x86-64** (a
     reviewer's machine is x86; needs another machine) and put the table on the site. Gaps, biggest first, each to fix with
     a measurement before and after:
-    - **Viewshed, 2.5x behind Numba** (3.4 against 1.4 ms; Cython 3.4, gcc 2.5): was 8.7 ms. The exact `math.hypot`
+    - **Viewshed, 2.3x behind Numba** (3.2 against 1.4 ms; Cython 3.3, gcc 2.5): was 8.7 ms. The exact `math.hypot`
       was 6.5 of the 8.3 ms (`round` costs nothing measurable). `sj_hypot2` does CPython's vector-norm arithmetic for
       two values with `frexp`/`ldexp` as bit fields (23 to 6.5 ns a call, bit-identical on 240,000 pairs), its rare cases
-      and `sj_truediv`'s long division `noinline` (8.3 to 3.4 ms). Next: cimo inlining `sj_hypot2` (3.07 ms with
-      `CIMO_INLINE=300`; in cimo's TODO), then the four divisions and sqrt per step Numba also has.
+      and `sj_truediv`'s long division `noinline` (8.3 to 3.4 ms). cimo's inliner now counts only what its cleanup
+      keeps and allows `inline` functions twice the limit, so `sj_hypot2` inlines (3.4 to 3.1 ms; `parity=False` 3.2
+      to 2.5). Left: the four divisions and the sqrt per step, which Numba has too.
     - ~~**Histogram, 2x behind everyone**~~ **done** (2026-11-07): 1.35 to 0.73 ms (Numba 0.69, gcc 0.62). `int()` of a
       float is one `fabs(v) < 2**63` test and a cast, NaN and inf tested only past it; an `if`'s chained comparisons
       (`0 <= k < nb`) and every comparison of an `and` now add up to range facts for its body (`guard_facts`), so

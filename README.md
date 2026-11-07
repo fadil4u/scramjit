@@ -98,14 +98,14 @@ except where marked ≈ (fastmath may round differently).
 |:---|---:|---:|---:|---:|---:|---:|
 | Gray-Scott, 256×256 | 116 ms | 0.17 ms | 0.17 ms | 0.13 ms ≈ | 0.15 ms | 0.16 ms |
 | Flood fill, 512×512 | 253 ms | 2.2 ms | 2.3 ms | 2.2 ms | 1.9 ms | 1.9 ms |
-| Viewshed, 96×96 | 123 ms | 8.7 ms | 1.6 ms | 1.2 ms | 3.3 ms | 2.7 ms |
+| Viewshed, 96×96 | 119 ms | 3.4 ms | 1.4 ms | 1.2 ms | 3.4 ms | 2.5 ms |
 | Dot product, 1M | 150 ms | 1.0 ms | 1.0 ms | 0.34 ms ≈ | 1.0 ms | 1.0 ms |
 | axpy, 1M | 186 ms | 0.38 ms | 0.32 ms | 0.41 ms ≈ | 0.28 ms | 0.32 ms |
 | Histogram, 1M | 289 ms | 0.73 ms | 0.69 ms | 0.69 ms | 0.63 ms | 0.62 ms |
 | A dict of settings (from 0.0.4) | 80 ms | 4.2 ms | doesn't compile | doesn't compile | 70 ms | |
 | A list of dataclasses (from 0.0.4) | 87 ms | 1.8 ms | doesn't compile | doesn't compile | 106 ms | |
 
-Where scramjit is behind: viewshed's exact `math.hypot` and `round` (3.3 ms with `parity=False`), and float sums,
+Where scramjit is behind: viewshed, against Numba (calls cimo doesn't inline yet), and float sums,
 which keep Python's order unless reordering is allowed. Its
 first call takes 0.1 to 1 s, Numba's 0.04 to 0.12 s; Cython builds ahead of time. On disk: scramjit and cimo 3.1 MB of
 pure Python that also runs in Pyodide; Numba and llvmlite 193 MB of binary wheels; Cython 12.6 MB and a C compiler.

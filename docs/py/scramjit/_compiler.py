@@ -7217,6 +7217,8 @@ class Compiler:
         if kind == 'hypot':
             if not xs:
                 return '0.0', '0'
+            if len(xs) == 2:
+                return self.hold(f'sj_hypot2({xs[0]}, {xs[1]})', T.FLOAT), '0'
             v, mx, fn = self.temp(), self.temp(), self.temp()
             self.emit(f'double {v}[{len(xs)}] = {{{", ".join(f"fabs({x})" for x in xs)}}}; double {mx} = 0.0; int {fn} = 0;')
             self.emit(f'for (int k = 0; k < {len(xs)}; k++) {{ {fn} |= {v}[k] != {v}[k]; if ({v}[k] > {mx}) {mx} = {v}[k]; }}')

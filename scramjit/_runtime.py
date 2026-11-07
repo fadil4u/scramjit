@@ -253,7 +253,7 @@ static inline double sj_ffloordiv(double a, double b) {
 
 /* int / int, correctly rounded for every int64, as Python's true division is. b != 0. */
 static int sj_bitlen(uint64_t x) { int n = 0; while (x) { n++; x >>= 1; } return n; }
-static double sj_truediv_big(int64_t a, int64_t b) {
+static __attribute__((noinline)) double sj_truediv_big(int64_t a, int64_t b) {
     int neg = (a < 0) != (b < 0);
     uint64_t ua = a < 0 ? 0 - (uint64_t)a : (uint64_t)a;
     uint64_t ub = b < 0 ? 0 - (uint64_t)b : (uint64_t)b;
@@ -389,7 +389,7 @@ static int sj_math_fmod(double x, double y, double *out) {
 }
 
 /* vector_norm (math.hypot): error-free squares and sums, then a corrected sqrt */
-static double sj_vector_norm(int64_t n, double *vec, double max, int found_nan) {
+static __attribute__((noinline)) double sj_vector_norm(int64_t n, double *vec, double max, int found_nan) {
     double x, h, scale, csum = 1.0, frac1 = 0.0, frac2 = 0.0, hi, lo, s;
     int max_e;
     if (isinf(max)) return max;
@@ -416,5 +416,34 @@ static double sj_vector_norm(int64_t n, double *vec, double max, int found_nan) 
     x = csum - 1.0 + (frac1 + frac2);
     h += x / (2.0 * h);
     return h / scale;
+}
+
+/* hypot(a, b): sj_vector_norm's arithmetic for two finite values whose larger has an exponent
+ * frexp and ldexp handle as plain bit fields; everything else goes the long way. Same bits. */
+static __attribute__((noinline)) double sj_hypot2_slow(double a, double b) {
+    double v[2] = {a, b}, m = a > 0.0 ? a : 0.0;
+    if (b > m) m = b;
+    return sj_vector_norm(2, v, m, a != a || b != b);
+}
+static inline double sj_hypot2(double a, double b) {
+    a = fabs(a); b = fabs(b);
+    union { double d; uint64_t u; } c;
+    c.d = a > b ? a : b;
+    uint64_t be = c.u >> 52;
+    if (a != a || b != b || be - 1 >= 2044) return sj_hypot2_slow(a, b);
+    c.u = (2045 - be) << 52;                  /* scale = ldexp(1.0, -max_e), max_e = be - 1022 */
+    double scale = c.d;
+    c.u = (be + 1) << 52;                     /* 1 / scale: h / scale is exact, so h * inv is too */
+    double inv = c.d;
+    double x = a * scale, hi = x * x, lo = fma(x, x, -hi);
+    double csum = 1.0 + hi, frac2 = 0.0 + ((1.0 - csum) + hi), frac1 = 0.0 + lo, s;
+    x = b * scale; hi = x * x; lo = fma(x, x, -hi);
+    s = csum + hi; frac2 += (csum - s) + hi; csum = s; frac1 += lo;
+    double h = sqrt(csum - 1.0 + (frac1 + frac2));
+    hi = -h * h; lo = fma(-h, h, -hi);
+    s = csum + hi; frac2 += (csum - s) + hi; csum = s; frac1 += lo;
+    x = csum - 1.0 + (frac1 + frac2);
+    h += x / (2.0 * h);
+    return h * inv;
 }
 '''

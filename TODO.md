@@ -528,15 +528,17 @@ Spills per line, once cimo can report them.
     - **Local lists that grow.** A capacity, `v_x__c`, for each list the function appends to (found before
       inference). `out.append(v)`: `if (n == cap) grow; p[n++] = v`. `pop()` (IndexError "pop from empty list"),
       `pop(i)`, `extend` of a list, range or comprehension, `+= [..]`, `clear()`, `del out[i]`, `insert`. `[]` takes
-      its element type from what's appended to it (the join of every `append` and store, inferred like any
-      variable; ints then floats give the mixed flags Python's list would have), and one never appended to stays
-      empty. Iterating over a list while appending to it stays Python (Python's loop would see the new elements).
+      its element type from what's appended to it, inferred like any variable, and one never appended to stays
+      empty. **One type per growing list (decided 2026-11-07):** a list that's appended to holds only ints, only
+      floats or only bools; one that would mix them (`append(0)` here, `append(x * 0.5)` there) runs as Python, and
+      preflight says why. No flag array to grow beside it, none to check per element, nothing to convert at the
+      write-back. Mixed lists that don't grow keep their flags, as now. Iterating over a list while appending to it stays Python (Python's loop would see the new elements).
       Returning it, `np.array(out)`, `len`, indexing and `sum` work as for other local lists.
     - **Appending to a list passed in.** The copy can't grow in place, so the kernel copies to its own buffer on the
       first append, and the dispatcher writes back the changed elements as now, plus the new tail
       (`lst.extend(...)`) or the cut (`del lst[n:]`), on the error path too, so the caller sees what Python would
       have. An empty list passed in (`fill(out)` with `out = []`) is a signature of its own, typed by the appends.
-      An append of another type than the list holds (a float to ints) makes it mixed, as Python would.
+      An append of another type than the list holds (a float to ints), or appending to a mixed list, runs as Python.
     - **Lists of tuples and of lists.** `pairs.append((u, v))`, returned as a list of tuples: a struct per element
       (or a column per position), boxed at the return. Ragged lists of lists (`rows.append(row)` with rows of other
       lengths): a list of list headers. Then dataclass instances (`out.append(Point(x, y))`), through the object

@@ -233,6 +233,10 @@ after with `bench/`, and write the numbers into the item when done.
 
 ## From cimo
 
+- **cimo's `hypot` is glibc's algorithm (cimo 2026-11-07):** one `sqrt` of an fma on arm64 (a correction step on x86-64 and
+  wasm), under 1 ulp; a `hypot` loop 1.47x faster than before, about glibc's speed by your viewshed ratio. Still a
+  call (no inlining of the runtime yet). Its last bits differ from musl's in places.
+
 - **A flag set in a loop no longer stops it vectorizing (cimo 2026-11-07):** `for (...) { s += x[i]; f = 1; }` runs as
   fast as the loop without `f`.
 
@@ -333,8 +337,15 @@ Spills per line, once cimo can report them.
      Not yet: views with gaps in more than one dimension (numpy's order depends on strides), other dtypes.
    - **Arrays made inside a function: built.** See "Making arrays" in `numpy.md`. Not yet: `x.reshape()`, `np.eye`, `.size` or `.shape` directly on a call (`np.ones(n).size`), a conditional expression of arrays (`y = a if c else b`),
      five dimensions or more, `uint64` and `bool` dtypes, an array made in a comprehension. Returning one costs a copy (3.1 µs for 10 elements): worth removing if a Gymnasium-style `reset` or `step` shows it.
-   - **Not now, whole-array arithmetic:** `x * 2`, `a + b` need broadcasting and dtype rules on top, which is rewriting numpy.
-     They stay in Python, with the loops around them lifted.
+   - **Whole-array arithmetic: built (2026-11-07),** scoped: `+ - * / **`, unary `-`, and the numpy functions on single
+     numbers, applied to arrays of up to 2 dimensions (`float64`, `int64`, narrow), views without gaps in 2-D, and
+     plain numbers (names, constants, `w[k]`), with broadcasting (`OPERANDS_ERROR`, numpy's message). One pass per
+     expression: each operand's element goes in a name (`cnames`) and the scalar rules, which are numpy's, compute it;
+     a flat loop when every operand has the result's shape. `tests/test_elementwise.py`, `examples/whole_array.py`.
+     Faster than numpy up to tens of thousands of elements; a big new array each pass of a loop is 4x slower (cimo maps
+     each block over 256 KB on its own: in its TODO). Not yet: `//`, `%`, comparisons (bool arrays), more than 2
+     dimensions, `x[1:] += y`, writing straight into the target of `y[:] = ...` when they don't overlap (it makes the
+     right side first), and reusing a dead array's block for `y = y * 0.5 + b`.
    - **Not `np.dot`, and no MKL or BLAS:** they would break "standard library plus cimo", and their results depend on the library, CPU and thread count.
      `A @ B` and `np.linalg` already run at full speed in Python. An opt-in through cimo's `link=` for BLAS inside a hot loop is possible
      later; untried.

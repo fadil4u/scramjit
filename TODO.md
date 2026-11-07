@@ -233,6 +233,9 @@ after with `bench/`, and write the numbers into the item when done.
 
 ## From cimo
 
+- **Large `malloc` in Pyodide returns NULL (cimo 2026-11-07),** where a 4 GiB request returned a small block and one just under
+  2 GiB killed Pyodide; and `module.free`/`reset_heap`/`heap_bytes` work there, so `sj_release` can go.
+
 - **Signed overflow is now undefined in cimo, as in C** (`compile(wrapv=True)` for `-fwrapv`): `x + 1 > x` folds to true
   and `int` counters widen to 64 bits. Generated C must keep doing wrapping arithmetic through unsigned, as it
   does today (scramjit's 726 tests pass).

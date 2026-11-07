@@ -236,6 +236,11 @@ after with `bench/`, and write the numbers into the item when done.
 - **Signed overflow is now undefined in cimo, as in C** (`compile(wrapv=True)` for `-fwrapv`): `x + 1 > x` folds to true
   and `int` counters widen to 64 bits. Generated C must keep doing wrapping arithmetic through unsigned, as it
   does today (scramjit's 726 tests pass).
+- **Half types are accepted (cimo 2026-11-06):** `_Float16` and `__bf16` as storage, computed in `float`, converted
+  by runtime calls (hardware conversions and vectorized loads still open, cimo's `TODO.md` Adoption #6). Enough
+  to start Directions #6's types; not yet fast.
+- **cimo already returns `uint64_t` and pointers** from a kernel (`0xffffffffffffffff` comes back as
+  18446744073709551615, `malloc`'s result as an int). The "returning a pointer or `uint64_t`" gap in #16 is scramjit's.
 
 ## Workarounds waiting on cimo
 

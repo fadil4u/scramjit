@@ -404,6 +404,25 @@ def tuple_of(elems):
     return _TUPLES[key]
 
 
+_GLISTS = {}
+# A list whose element type isn't known yet: `out = []` before anything is appended to it (see Pending in _glist)
+PENDING = Type('unknown', 'int64_t', 'pending')
+
+
+def glist_of(elem):
+    """A list held by reference, as Python holds it (see _glist): it can grow, and its elements can be numbers, tuples
+    of numbers, or lists of these. In C a pointer to a header (data, length, capacity)."""
+    if elem.name not in _GLISTS:
+        _GLISTS[elem.name] = Type(f'list[{elem.name}]', 'sj_glist *', 'glist', elem=elem)
+    return _GLISTS[elem.name]
+
+
+def has_pending(t):
+    while t is not None and t.kind == 'glist':
+        t = t.elem
+    return t is PENDING
+
+
 _ARRAYS = {}
 
 

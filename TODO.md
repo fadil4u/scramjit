@@ -539,6 +539,16 @@ Spills per line, once cimo can report them.
     - **Python's semantics at the boundary:** an inner list in two places (`[r, r]`) is found when copying in (by
       identity, as the object pool does for instances) and either kept shared or left to Python; after an exception
       the caller's structure is what Python would have left, at every depth.
+    **Done (2026-11-07), made in the function:** `_glist.py`. A list that grows, nests, starts empty or holds
+    non-numbers is a header on the array heap (`sj_glist`: data, length, capacity, its block), its elements by value
+    (numbers, a struct per tuple type, an array's return record, a pointer per inner list), marked through by a
+    function per list type at each sweep. `append`, `pop`, `extend`, `insert`, `clear`, `del`, `+=`, aliases and
+    shared rows (`[[0.0] * w] * h`), lists of tuples, lists of lists to any depth, lists of arrays (views of the
+    arguments come back as views), returned alone or in a tuple, read back in bulk (`memoryview.cast`,
+    `struct.iter_unpack`), shared lists staying shared. `[]` typed by its appends (inference comes back to reads
+    before them, `Pending`). Filter 1M, 500k kept: Python 83 ms, compiled 20 ms (the preallocated array 4.6);
+    `examples/grow_lists.py` 5x. `tests/test_glists.py`. Left: steps 3 (dicts in it) to 6, passed-in lists of
+    these kinds, a callee returning one, comprehensions over a list of arrays.
     Steps, each shippable, each with differential tests (results, the caller's structure afterwards, the same after
     an exception midway):
     1. **Local `list[number]` that grows.** A capacity (`v_x__c`) for each list the function appends to, found before

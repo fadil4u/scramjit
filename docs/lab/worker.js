@@ -3,7 +3,7 @@
 // stage shows and, one frame at a time, the arrays the page draws.
 'use strict';
 const PYODIDE = 'https://cdn.jsdelivr.net/pyodide/v0.27.7/full/';
-const SJ_FILES = ['__init__.py', '_compiler.py', '_dispatch.py', '_errors.py', '_interrupt.py', '_lift.py', '_mathlib.py', '_runtime.py', '_types.py', '_webs.py'];
+const SJ_FILES = ['__init__.py', '_compiler.py', '_dispatch.py', '_errors.py', '_glist.py', '_interrupt.py', '_lift.py', '_mathlib.py', '_runtime.py', '_types.py', '_webs.py'];
 let py = null, lab = null, compiled = false, preset = null, ready = false;
 let active = true, looping = false, inFlight = false, paced = false, nextCode = null;
 

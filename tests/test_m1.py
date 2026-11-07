@@ -355,9 +355,9 @@ def test_boundscheck_off_still_wraps_negative_indices():
 # ---- fallback, contracts, errors
 
 def uses_a_list(n):
-    out = []
+    out = set()                     # sets don't compile (lists that grow do, from 0.0.4)
     for i in range(n):
-        out.append(i)
+        out.add(i)
     return len(out)
 
 

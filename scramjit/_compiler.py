@@ -24,6 +24,7 @@ import re
 from . import _types as T
 from . import _webs
 from ._errors import Unsupported
+from ._glist import GList, Pending, ArrayOf, grown_names, has_arrays, receiver, unify_lists, SNIPPET as GLIST_SNIPPET
 import sys
 
 from ._mathlib import snippets
@@ -301,6 +302,9 @@ ARRAY_METHODS = {'sum', 'prod', 'mean', 'max', 'min', 'any', 'all', 'argmax', 'a
 NP_FLOAT_ONLY = {'round': 1, 'around': 1, 'clip': 3, 'degrees': 1, 'rad2deg': 1, 'radians': 1, 'deg2rad': 1}
 NP_FUNCS = {'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8', 'uint64'} | NP_MAKE | set(NP_LIBM1) | set(NP_DIRECT1) | NP_ROUND | NP_KEEPS_INT | set(NP_LIBM2) | {'copysign'} | NP_MINMAX | NP_TESTS | NP_CONVERT \
     | set(NP_REDUCE) | set(NP_FLOAT_ONLY)
+
+
+_mathlib.SNIPPETS['glist'] = (('np_make',), GLIST_SNIPPET)
 
 
 class Tables(ast.NodeTransformer):
@@ -1945,7 +1949,7 @@ class Unit:
         return c
 
 
-class Compiler:
+class Compiler(GList):
     def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, parity=True, counts=False, unit=None, hidden_map=None):
         fdef, arg_types, self.dict_slots = flatten_dicts(fdef, arg_types)
         self.instance_ret = getattr(fdef, 'sj_instance_ret', None)
@@ -2051,7 +2055,7 @@ class Compiler:
         self.outs = [(flat, i, key) for flat, (i, key, _) in self.dict_slots.items() if flat in stored]
         shown = {id(n.targets[0]) for n in ast.walk(self.f) if getattr(n, 'sj_shown', False)}
         self.assigned = {n.id for n in ast.walk(self.f) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and id(n) not in shown}
-        self.tracks = bool(ret_arrays(self.ret))
+        self.tracks = bool(ret_arrays(self.ret)) or has_arrays(self.ret)
         self.array_args = [(self.dict_slots[p][:2] if p in self.dict_slots else (self.plain_arg(p), None))
                            for p in self.params if self.came_as(p).kind == 'array'] if self.tracks else []
         for flat, _, _ in self.outs:
@@ -2082,15 +2086,19 @@ class Compiler:
 
     # ---- type inference
     def infer(self):
+        self.gl_names = grown_names(self.f)
         for _ in range(8):
             before = dict(self.env)
             self.returns = []
+            self.gl_pending_at = None
             self.infer_block(self.f.body)
-            if before == self.env:
+            if before == self.env and self.gl_pending_at is None:
                 break
+        if self.gl_pending_at is not None:
+            self.fail(self.gl_pending_at, 'reads a list before anything is appended to it (its element type is never known)')
         ret = None
         for node, t in self.returns:
-            j = t if ret is None else T.join_returns(ret, t)
+            j = t if ret is None else (unify_lists(ret, t) if ret.kind == 'glist' and t.kind == 'glist' else T.join_returns(ret, t))
             if j is None:
                 self.fail(node, f'returns {ret.name} in one place and {t.name} in another')
             ret = j
@@ -2109,6 +2117,11 @@ class Compiler:
             return self.env[v.id]          # handed back whole: copied into a new list, or the one passed in
         if isinstance(v, ast.Tuple) and self.has_views(v):        # only a return can hold arrays in a tuple
             return T.tuple_of([self.typeof(x) for x in v.elts])
+        if isinstance(v, ast.Tuple) and any(self.gl_is(x) for x in v.elts):   # lists in a returned tuple: a level deep
+            ts = [self.typeof(x) for x in v.elts]
+            if not all(t.kind == 'glist' or t.is_number for t in ts):
+                self.fail(v, 'returns a tuple of lists and something other than numbers (an array, or a rectangular list of lists)')
+            return T.tuple_of(ts)
         return self.typeof(v)
 
     def is_list_ctor(self, v):
@@ -2134,6 +2147,14 @@ class Compiler:
         if t is T.NONE:
             self.fail(node, f'{name} would be None')
         old = self.env.get(name)
+        if old is not None and old.kind == 'glist' and t.kind == 'glist':
+            u = unify_lists(old, t)
+            if u is None:
+                self.fail(node, f'{name} is {old.name} and later {t.name}; a variable must keep one type')
+            self.env[name] = u
+            return
+        if (old is not None and old.kind == 'glist') != (t.kind == 'glist') and old is not None:
+            self.fail(node, f'{name} is {old.name} and later {t.name}; a variable must keep one type')
         if old is not None and old is not t and (old.kind == 'array' or t.kind == 'array') and self.split_done:
             self.fail(node, f'{name} is {old.name} and later {t.name}; a variable must keep one type')
         if t is T.INT and not exact_int_literal(node):
@@ -2206,14 +2227,26 @@ class Compiler:
 
     def infer_block(self, stmts):
         for i, s in enumerate(stmts):
-            self.infer_stmt(s, docstring_ok=(i == 0 and stmts is self.f.body))
+            try:
+                self.infer_stmt(s, docstring_ok=(i == 0 and stmts is self.f.body))
+            except Pending:                      # a list's element type isn't known yet: the next pass comes back
+                self.gl_pending_at = s
 
     def infer_stmt(self, s, docstring_ok=False):
         if isinstance(s, ast.Assign):
             if self.is_list_ctor(s.value):
+                if len(s.targets) == 1 and isinstance(s.targets[0], ast.Subscript) and self.gl_is(s.targets[0].value):
+                    self.makes = True
+                    self.gl_store_type(s.targets[0], self.gl_ctor_type(s.value), s)
+                    return
                 if len(s.targets) != 1 or not isinstance(s.targets[0], ast.Name):
                     self.fail(s, 'a list assigned to something other than one name')
-                self.assign_type(s, s.targets[0].id, self.list_type(s.value))
+                name = s.targets[0].id
+                if name in self.gl_names or self.gl_wants(s.value) or (self.env.get(name) is not None and self.env[name].kind == 'glist'):
+                    self.makes = True
+                    self.assign_type(s, name, self.gl_ctor_type(s.value))
+                else:
+                    self.assign_type(s, name, self.list_type(s.value))
                 return
             if self.has_views(s.value):
                 for target in s.targets:
@@ -2231,6 +2264,13 @@ class Compiler:
             if s.value is None:
                 self.fail(s, 'annotation without a value')
             self.infer_target(s.target, self.typeof(s.value), s)
+        elif isinstance(s, ast.AugAssign) and isinstance(s.op, ast.Add) and self.gl_is(s.target):
+            self.gl_infer_method(self.gl_extend_call(s))
+        elif isinstance(s, ast.Delete):
+            for t in s.targets:
+                if not (isinstance(t, ast.Subscript) and self.gl_is(t.value)):
+                    self.fail(s, 'the Delete statement')
+                self.gl_subscript_type_index(t)
         elif isinstance(s, ast.AugAssign):
             op = ARITH.get(type(s.op))
             if op is None:
@@ -2243,6 +2283,7 @@ class Compiler:
             self.infer_block(s.orelse)
         elif isinstance(s, ast.For):
             self.infer_block(s.orelse)
+            self.gl_loop_check(s)
             self.bind_types(s.target, self.elem_struct(self.iterable(s.iter)), s)
             lists = {n.id for n in ast.walk(s.iter) if isinstance(n, ast.Name)
                      and self.env.get(n.id) is not None and self.env[n.id].kind in ('list', 'array')}
@@ -2257,6 +2298,8 @@ class Compiler:
         elif isinstance(s, ast.Expr) and docstring_ok and isinstance(s.value, ast.Constant) \
                 and isinstance(s.value.value, str):
             pass
+        elif isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and receiver(s.value) and self.gl_is(receiver(s.value)[0]):
+            self.gl_infer_method(s.value)
         elif isinstance(s, ast.Expr) and self.calls_out(s.value):
             self.typeof(s.value)
         elif isinstance(s, ast.Expr):
@@ -2265,6 +2308,9 @@ class Compiler:
             self.fail(s, f'the {type(s).__name__} statement')
 
     def infer_target(self, target, t, s):
+        if isinstance(target, ast.Subscript) and self.gl_is(target.value):
+            self.gl_store_type(target, t, s)
+            return
         if isinstance(target, ast.Name):
             self.assign_type(s, target.id, t)
         elif isinstance(target, ast.Subscript) and T.is_pylist(self.array_of(target)) and (
@@ -2314,6 +2360,8 @@ class Compiler:
     # ---- iterables: range(), arrays, enumerate(), zip(), reversed(), nested. Each lowers to one
     # counted loop that reads elements by index; no iterator exists at run time.
     def iterable(self, it):
+        if self.gl_is(it):
+            return ('glist', it)
         if isinstance(it, ast.Name) and it.id in self.env and self.env[it.id].kind in ('array', 'list'):
             if self.env[it.id].kind == 'array' and self.env[it.id].ndim != 1:
                 return ('rows', it.id, None)
@@ -2369,6 +2417,11 @@ class Compiler:
 
     def elem_struct(self, d):
         kind = d[0]
+        if kind == 'glist':
+            et = self.typeof(d[1]).elem
+            if et is T.PENDING:
+                raise Pending()
+            return et
         if kind == 'range':
             return T.INT
         if kind == 'rows':
@@ -2903,6 +2956,8 @@ class Compiler:
             if not t.is_number and t.kind != 'enum':
                 self.fail(e, f'a conditional expression of type {t.name}')
             return t
+        if isinstance(e, ast.Subscript) and self.gl_is(e.value):
+            return self.gl_subscript_type(e)
         if isinstance(e, ast.Subscript):
             if self.is_shape(e.value):
                 if self.shape_index(e) is None:
@@ -2916,6 +2971,11 @@ class Compiler:
             if not all(T.is_number_tree(t) for t in ts):
                 self.fail(e, 'tuples of non-numbers (arrays, lists)')
             return T.tuple_of(ts)
+        if isinstance(e, ast.Call) and receiver(e) and receiver(e)[1] == 'pop' and self.gl_is(receiver(e)[0]):
+            return self.gl_infer_method(e)
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == 'len' and len(e.args) == 1 \
+                and self.is_builtin('len', 'len') and self.gl_is(e.args[0]):
+            return T.INT
         if isinstance(e, ast.Call):
             made = self.make_of(e)
             return self.make_type(e, made) if made else self.call_type(e)
@@ -3632,7 +3692,8 @@ class Compiler:
         if isinstance(e, ast.Name):
             t = self.env.get(e.id)
             return t is not None and t.kind == 'array' and not T.is_pylist(t)
-        if isinstance(e, ast.Subscript) or (isinstance(e, ast.Attribute) and e.attr == 'T'):
+        if isinstance(e, ast.Subscript) or (isinstance(e, ast.Attribute) and e.attr == 'T') or (
+                isinstance(e, ast.Call) and self.ew_children(e) is None and (self.make_of(e) is not None or self.callee_of(e) is not None)):
             try:
                 t = self.typeof(e)
             except Unsupported:
@@ -4731,7 +4792,7 @@ class Compiler:
             self.fail(src, 'a reduction over tuples')
         return t
 
-    def comp_types(self, e):
+    def comp_types(self, e, any_elem=False):
         saved = {}
         try:
             for g in e.generators:
@@ -4740,8 +4801,10 @@ class Compiler:
                 self.comp_bind_types(g.target, self.elem_struct(self.no_rows(self.iterable(g.iter), g.iter)), saved, e)
                 for c in g.ifs:
                     self.check_test(c)
-            t = self.typeof(e.elt)
-            if not t.is_number:
+            t = self.gl_value_type(e.elt) if any_elem else self.typeof(e.elt)
+            if any_elem:
+                self.gl_elem_ok(e.elt, t)
+            elif not t.is_number:
                 self.fail(e.elt, f'elements of type {t.name}')
             return t
         finally:
@@ -4845,7 +4908,8 @@ class Compiler:
     def add_safepoints(self, stmts):
         """After each statement that makes an array, and at the top of a loop in which one is made."""
         def makes(node):
-            return any((isinstance(n, ast.Call) or self.elementwise_of(n)) and (self.make_of(n) is not None or self.callee_of(n) is not None) for n in ast.walk(node))
+            return any((isinstance(n, ast.Call) or self.elementwise_of(n)) and (self.make_of(n) is not None or self.callee_of(n) is not None) for n in ast.walk(node)) \
+                or any(isinstance(n, ast.Call) and receiver(n) is not None or isinstance(n, (ast.List, ast.ListComp)) for n in ast.walk(node)) and self.gl_any()
 
         def point(near):
             return ast.copy_location(ast.Expr(ast.copy_location(Safepoint(None), near)), near)
@@ -4953,6 +5017,7 @@ class Compiler:
         for s in self.f.body:
             self.stmt(s)
         marks = ' '.join(f'if (v_{n}__h) v_{n}__h->mark = 1;' for n, t in self.env.items() if t.kind == 'array' and not n.startswith('sjh__'))
+        marks = (marks + ' ' + self.gl_marks()).strip()
         self.lines = [ln.replace('/*sj_marks*/', marks) for ln in self.lines]
         frees = [f'free(v_{n});' for n, t in self.env.items() if t.kind == 'list' and n not in self.params] + \
                 [f'free(v_{n}__np);' for n, t in self.env.items() if t.kind == 'list' and t.elem.np == 'dyn' and n not in self.params] + \
@@ -5104,6 +5169,21 @@ class Compiler:
             self.emit(f'v_{name}__int = {1 if vt.kind == "int" else 0};')
 
     def stmt(self, s):
+        if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and receiver(s.value) and self.gl_is(receiver(s.value)[0]):
+            self.mark(s)
+            if self.counts:
+                self.count(s)
+            self.gl_method(s.value)
+            return
+        if isinstance(s, ast.Delete):
+            self.mark(s)
+            for t in s.targets:
+                self.gl_delete(t)
+            return
+        if isinstance(s, ast.AugAssign) and isinstance(s.op, ast.Add) and self.gl_is(s.target):
+            self.mark(s)
+            self.gl_method(self.gl_extend_call(s))
+            return
         if isinstance(s, ast.Expr) and not self.calls_out(s.value):     # a docstring, or a place to free arrays
             if isinstance(s.value, Safepoint):
                 self.emit('if (sj_h.since > sj_h.limit) { /*sj_marks*/ sj_sweep(&sj_h); }')
@@ -5114,6 +5194,14 @@ class Compiler:
             self.count(s)
         if isinstance(s, ast.Expr):
             self.call_statement(s.value)
+            return
+        if isinstance(s, ast.Assign) and self.is_list_ctor(s.value) and isinstance(s.targets[0], ast.Subscript):
+            v = self.gl_make_value(s.value, self.gl_ctor_type(s.value))
+            self.gl_store(s.targets[0], (v, '0'), self.typeof(s.targets[0].value).elem)
+            return
+        if isinstance(s, ast.Assign) and self.is_list_ctor(s.value) and self.env[s.targets[0].id].kind == 'glist':
+            v = self.gl_make_value(s.value, self.env[s.targets[0].id])
+            self.emit(f'v_{s.targets[0].id} = {v};')
             return
         if isinstance(s, ast.Assign) and self.is_list_ctor(s.value):
             self.make_list(s.targets[0].id, s.value, s)
@@ -5134,7 +5222,9 @@ class Compiler:
                 return
             if vt.kind == 'array':
                 for target in targets:
-                    if isinstance(target, ast.Subscript):
+                    if isinstance(target, ast.Subscript) and self.gl_is(target.value):
+                        self.gl_store(target, (self.gl_value(s.value, self.typeof(target.value).elem), '0'), self.typeof(target.value).elem)
+                    elif isinstance(target, ast.Subscript):
                         self.store_slice_array(target, self.materialize(s.value))
                     else:
                         self.assign_view(target.id, s.value)
@@ -5144,6 +5234,8 @@ class Compiler:
             for target in targets:
                 if isinstance(target, ast.Name):
                     self.assign(target.id, v, vt)
+                elif isinstance(target, ast.Subscript) and self.gl_is(target.value):
+                    self.gl_store(target, v, vt)
                 elif self.typeof(target).kind == 'array':
                     self.store_slice_number(target, v, vt)
                 elif isinstance(target, ast.Subscript):
@@ -5209,6 +5301,17 @@ class Compiler:
                 for b in s.orelse:
                     self.stmt(b)
                 self.close()
+        elif isinstance(s, ast.Return) and self.ret.kind == 'glist':
+            self.gl_return(s.value)
+            self.emit('goto sj_done;')
+        elif isinstance(s, ast.Return) and self.ret.kind == 'tuple' and any(t.kind == 'glist' for t in self.ret.elem):
+            for i, (x, rt) in enumerate(zip(s.value.elts, self.ret.elem)):
+                if rt.kind == 'glist':
+                    self.gl_return(x, slot=4 + 2 * i)
+                else:
+                    c, f = self.expr(x)
+                    self.return_number(i, c, f, self.typeof(x), rt, x)
+            self.emit('goto sj_done;')
         elif isinstance(s, ast.Return) and self.ret.kind == 'list':
             name = s.value.id
             if name in self.params:          # the list passed in, which Python returns itself
@@ -5490,6 +5593,8 @@ class Compiler:
         """Evaluate an iterable's operands (in Python's order); return (trip count, elem(k)),
         where elem(k) gives (C value, type, flag) leaves, nested in lists for tuples."""
         kind = d[0]
+        if kind == 'glist':
+            return self.gl_iter_prep(d[1])
         if kind == 'rows':
             name = self.materialize(d[2]) if d[2] is not None else d[1]
             first = self.hold(self.stride(name, 0), T.INT)
@@ -5566,7 +5671,11 @@ class Compiler:
         return n, lambda k: (f'(int64_t)((uint64_t){ts} + ({tn} - 1 - {k}) * (uint64_t){tp})', T.INT, '0')
 
     def bind_values(self, target, v):
-        if isinstance(v, RowOf):
+        if isinstance(v, ArrayOf):
+            rec = self.temp()
+            self.emit(f'{self.gl_record(v.t.ndim)} {rec} = {v.record};')
+            self.gl_bind_array(target.id, rec)
+        elif isinstance(v, RowOf):
             self.bind_row(target.id, v)
         elif isinstance(v, TupleOf):
             if isinstance(target, ast.Name):
@@ -6124,6 +6233,8 @@ class Compiler:
         first, in order, as Python builds the index before numpy looks at it."""
         if isinstance(e, ast.Name):
             return e.id
+        if isinstance(e, ast.Subscript) and self.gl_is(e.value):
+            return self.gl_materialize(e)
         if self.callee_of(e) is not None:
             return self.call_array(e)
         if isinstance(e, ast.Call) or self.elementwise_of(e):
@@ -6501,6 +6612,8 @@ class Compiler:
             def held(vals, ts):
                 return [held(v, et.elem) if et.kind == 'tuple' else (self.hold(v[0], et), self.hold_flag(v[1])) for v, et in zip(vals, ts)]
             return held(self.tuple_var(e.id), t.elem)
+        if (isinstance(e, ast.Subscript) and self.gl_is(e.value)) or (isinstance(e, ast.Call) and receiver(e) and self.gl_is(receiver(e)[0])):
+            return self.gl_texpr(e)
         if isinstance(e, ast.Subscript) and self.tuple_typed(e.value):
             return self.texpr(e.value)[self.tuple_index(e)]
         if self.is_shape(e):
@@ -6663,6 +6776,8 @@ class Compiler:
             if isinstance(e.value, ast.Name):
                 return self.tuple_var(e.value.id)[self.tuple_index(e)]
             return self.texpr(e.value)[self.tuple_index(e)]
+        if isinstance(e, ast.Subscript) and self.gl_is(e.value):
+            return self.gl_read(e)
         if isinstance(e, ast.Subscript):
             e = self.named(e)
             name = e.value.id
@@ -6670,6 +6785,10 @@ class Compiler:
                 return self.forwards[name][1][self.is_previous(e, name, self.forwards[name][0]) - 1], '1'
             arr, idx = self.element(e)
             return self.hold(f'{arr}[{idx}]', self.env[name].elem), self.hold_flag(self.elem_flag(name, idx))
+        if isinstance(e, ast.Call) and receiver(e) and receiver(e)[1] == 'pop' and self.gl_is(receiver(e)[0]):
+            return self.gl_method(e, want_value=True)
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == 'len' and len(e.args) == 1 and self.gl_is(e.args[0]):
+            return f'({self.expr(e.args[0])[0]})->n', '0'
         if isinstance(e, ast.Call):
             return self.call(e)
         raise AssertionError(e)
@@ -7060,6 +7179,8 @@ class Compiler:
             self.restore(saved, saved_c)
 
     def comp_bind_values(self, target, v, saved, saved_c):
+        if isinstance(v, ArrayOf):
+            raise Unsupported(target, 'a comprehension over a list of arrays (a for loop compiles)')
         if isinstance(v, TupleOf):
             v = [TupleOf(val, et) if et.kind == 'tuple' else (val[0], et, val[1]) for val, et in zip(v.vals, v.t.elem)]
         if isinstance(target, ast.Name):

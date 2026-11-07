@@ -1985,7 +1985,7 @@ def _make_plan(f, entry, args):
     dtype, dimension or layout, an empty one) goes to f._slow, so plans change only speed."""
     if any(t.kind == 'pool' for t in entry.types) and entry.counts is None:
         return _pooled_plan(f, entry, args)
-    if entry.counts is not None or entry.ret.kind == 'list' or entry.instance_ret or any(t.kind in ('pool', 'ref') for t in entry.types):
+    if entry.counts is not None or entry.ret.kind in ('list', 'glist') or (entry.ret.kind == 'tuple' and any(t.kind == 'glist' for t in entry.ret.elem)) or entry.instance_ret or any(t.kind in ('pool', 'ref') for t in entry.types):
         return f._slow_call
     env = {'kernel': entry.kernel, 'slow': f._slow, 'failed': f._failed, 'box': f._box, 'ret': entry.ret, 'pool': [], 'compiled': entry,
            'addressof': ctypes.addressof, 'from_buffer': ctypes.c_char.from_buffer, 'bytearray': bytearray, 'memoryview': memoryview}
@@ -2988,6 +2988,10 @@ class Function:
             return build(cls, attrs)
         if r is T.NONE:
             return None
+        if r.kind == 'glist':
+            return self._glist_result(entry, io, args)
+        if r.kind == 'tuple' and any(t.kind == 'glist' for t in r.elem):
+            return self._glist_tuple(entry, io, r, args)
         if entry.records:
             return self._array_result(entry, io, args)
         if r.kind == 'tuple':
@@ -3044,6 +3048,55 @@ class Function:
             k = int(slot.split('.')[0])
             if k in new:
                 refcols[idx] = (i, slot, a, held[:new[k][0]], last, targets)
+
+    def _glist_result(self, entry, io, args):
+        """A returned list held by reference (_glist): read into Python lists, one list object per header so a list in two
+        places is one list in two places, then every block it used released."""
+        blocks = []
+        try:
+            return _read_glist(struct.unpack_from('<q', io, 0)[0], entry.ret, {}, blocks, self._array_reader(entry, args))
+        finally:
+            for b in set(blocks):
+                entry.free(b)
+
+    def _glist_tuple(self, entry, io, r, args):
+        """A returned tuple holding lists: each read as _glist_result reads one, sharing kept across them."""
+        blocks, memo, out = [], {}, []
+        reader = self._array_reader(entry, args)
+        try:
+            for i, et in enumerate(r.elem):
+                if et.kind == 'glist':
+                    out.append(_read_glist(struct.unpack_from('<q', io, 32 + 16 * i)[0], et, memo, blocks, reader))
+                else:
+                    out.append(self._box(io, 32 + 16 * i, 40 + 16 * i, et))
+            return tuple(out)
+        finally:
+            for b in set(blocks):
+                entry.free(b)
+
+    def _array_reader(self, entry, args):
+        """For arrays in a returned list: record values -> the numpy array, as _arrays makes one (a copy of what the kernel
+        made, once per block; the argument itself or a view of it)."""
+        made = {}
+
+        def read(value, et, blocks):
+            numpy = self._np or _numpy()
+            address, which, same, block, data, ndim = value[:6]
+            typestr = numpy.dtype(et.elem.name[3:]).str
+            if block:
+                blocks.append(block)
+                root = made.get(block)
+                if root is None:
+                    root = made[block] = numpy.array(_Interface(None, data, value[6:6 + ndim], None, typestr))
+                if not same:
+                    address += root.__array_interface__['data'][0] - data
+            else:
+                i, key = entry.array_args[which]
+                root = args[i] if key is None else _member(args[i], key)
+            if same:
+                return root
+            return numpy.asarray(_Interface(root, address, value[10::2][:et.ndim], [x * root.itemsize for x in value[11::2][:et.ndim]]))
+        return read
 
     def _list_result(self, entry, io, args):
         """A returned list: the argument itself, or a new list of what the kernel built, whose memory is then released."""
@@ -3143,3 +3196,98 @@ class Function:
             name = T.as_narrow(r).name[3:] if T.is_narrow_dyn(r) or r.np is True else {'int': 'int64', 'float': 'float64', 'bool': 'bool_'}[r.kind]
             return getattr(self._np, 'bool_' if name == 'bool' else name)(v)
         return bool(v) if r.kind == 'bool' else v
+
+
+_GL_CTYPES = None
+_GL_CODES = {'int64_t': 'q', 'double': 'd', 'int': 'i', 'float': 'f', 'int32_t': 'i', 'int16_t': 'h', 'int8_t': 'b',
+             'uint64_t': 'Q', 'uint32_t': 'I', 'uint16_t': 'H', 'uint8_t': 'B'}
+
+
+def _gl_leaf(t):
+    """(ctypes type, Python value of a C value) for a number a list holds."""
+    global _GL_CTYPES
+    import ctypes
+    if _GL_CTYPES is None:
+        _GL_CTYPES = {'int64_t': ctypes.c_int64, 'double': ctypes.c_double, 'int': ctypes.c_int, 'float': ctypes.c_float,
+                      'int32_t': ctypes.c_int32, 'int16_t': ctypes.c_int16, 'int8_t': ctypes.c_int8, 'uint64_t': ctypes.c_uint64,
+                      'uint32_t': ctypes.c_uint32, 'uint16_t': ctypes.c_uint16, 'uint8_t': ctypes.c_uint8}
+    ct = _GL_CTYPES[t.ctype]
+    if t.np is True:
+        import numpy
+        make = getattr(numpy, t.name[3:])
+    else:
+        make = {'int': int, 'float': float, 'bool': bool}[t.kind]
+    return ct, make
+
+
+def _gl_struct(t):
+    import ctypes
+    fields = []
+
+    def walk(tt):
+        for x in tt.elem:
+            walk(x) if x.kind == 'tuple' else fields.append(x)
+    walk(t)
+    cls = type('sjT', (ctypes.Structure,), {'_fields_': [(f'f{k}', _gl_leaf(x)[0]) for k, x in enumerate(fields)]})
+    return cls, fields
+
+
+def _numpy():
+    import numpy
+    return numpy
+
+
+def _read_glist(addr, t, memo, blocks, arrays=None):
+    """The Python list for the header at addr, of list type t; the blocks it used go in blocks. arrays: reads an array
+    element's record (_array_reader)."""
+    import ctypes
+    if addr in memo:
+        return memo[addr]
+    ptr = ctypes.sizeof(ctypes.c_void_p)
+    raw = ctypes.string_at(addr, 32)
+    p = int.from_bytes(raw[:ptr], 'little')
+    n, _cap = struct.unpack_from('<qq', raw, 8)
+    db = int.from_bytes(raw[24:24 + ptr], 'little')
+    blocks.append(addr - 64)                          # its header's block: sizeof(sj_block) before it
+    if db:
+        blocks.append(db)
+    out = []
+    memo[addr] = out
+    et = t.elem
+    if not n:
+        return out
+    if et.kind == 'glist':
+        ptrs = (ctypes.c_void_p * n).from_address(p)
+        out.extend(_read_glist(x, et, memo, blocks, arrays) for x in ptrs)
+    elif et.kind == 'array':
+        width = 10 + 2 * et.ndim
+        recs = (ctypes.c_int64 * (width * n)).from_address(p)
+        for k in range(n):
+            value = ('array',) + tuple(recs[k * width:(k + 1) * width])
+            if value not in memo:                     # the same array put in twice: one object, as in Python
+                memo[value] = arrays(value[1:], et, blocks)
+            out.append(memo[value])
+    elif et.kind == 'tuple':                         # struct.iter_unpack reads the C struct, padding and all, in C
+        cls, fields = _gl_struct(et)
+        size = ctypes.sizeof(cls)
+        fmt = '@' + ''.join(_GL_CODES[x.ctype] for x in fields)
+        fmt += 'x' * (size - struct.calcsize(fmt))
+        rows = struct.iter_unpack(fmt, (ctypes.c_char * (size * n)).from_address(p))
+        plain = all(x.np is False and x.kind != 'bool' for x in fields) and len(fields) == len(et.elem)
+        if plain:
+            out.extend(rows)
+        else:
+            makes = [_gl_leaf(x)[1] for x in fields]
+            for row in rows:
+                vals = iter([make(v) for make, v in zip(makes, row)])
+
+                def build(tt):
+                    return tuple(build(x) if x.kind == 'tuple' else next(vals) for x in tt.elem)
+                out.append(build(et))
+    elif et is T.PENDING:
+        pass
+    else:                                            # numbers: one cast and tolist, in C
+        ct, make = _gl_leaf(et)
+        vals = memoryview((ctypes.c_char * (ctypes.sizeof(ct) * n)).from_address(p)).cast('B').cast(_GL_CODES[et.ctype]).tolist()
+        out.extend(map(make, vals) if (et.np is True or et.kind == 'bool') else vals)
+    return out

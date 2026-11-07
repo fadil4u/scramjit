@@ -9,8 +9,8 @@ At a glance:
 | | Compiles | Stays Python |
 |:---|:---|:---|
 | Tuples | numbers and tuples of them, to any depth; as locals, arguments, results and globals; constant indexes, unpacking, loops over them | an index in a variable, slices, `+`, comparing tuples, a tuple holding arrays except as a result |
-| Lists | lists of numbers made in the function, passed in, returned, and at module level (from 0.0.4) | `append` and every method that resizes, `in`, slices, aliases (`ys = xs`), mixed ints and floats |
-| Lists of lists | rectangular, passed in, made in the function and returned (from 0.0.4) | ragged, one row in two places, `m[i, j]`, slices, replacing a row, three levels made in the function |
+| Lists | lists of numbers made in the function, passed in, returned, and at module level (from 0.0.4); `append`, `pop`, `extend`, `insert`, `del` and aliases on lists made in the function, holding lists, tuples or arrays to any depth (from 0.0.4) | `in`, slices, `sort`, mixed ints and floats, growing a list passed in |
+| Lists of lists | rectangular, passed in, made in the function and returned (from 0.0.4); ragged, shared rows and any depth when made in the function (from 0.0.4) | ragged lists of lists passed in, `m[i, j]`, slices |
 | Dicts | passed in, reading and writing the keys the function names | building one, adding or deleting keys, `len`, `in`, `.get`, iterating, a key in a variable |
 | Instances (from 0.0.4) | passed in or at module level, made in the function, `@scram` methods; attributes read and written, objects in attributes; methods and operators (`a + b`), new instances from calls; one object under several names; passing them on, returning them, `isinstance`; lists of them; linked structures (`n = n.next`) and rebinding (`a.pos = b.pos`): plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | properties, static and class methods, adding an attribute, a list made in the function, keeping new instances in a linked structure |
 | Enums | `Enum` and `IntEnum` members with int values | `.name`, `Cell(1)`, iterating the class, `Flag` and string enums |
@@ -126,11 +126,31 @@ Their element type is fixed by what they're made with. Storing a numpy scalar in
 
 Still Python, each for that function or the loop it's in:
 
-- **Resizing:** `append`, `extend`, `insert`, `pop`, `remove`, `del xs[i]`, `xs += [..]`, slice assignment. A list that grows needs a runtime that compiled code doesn't have.
-- **Methods and operators:** `sort`, `index`, `count`, `copy`, `x in xs`, `xs + ys`, `xs * 2` after it's made, slices (`xs[1:]`), `sorted(xs)`.
-- **Aliases:** `ys = xs`, or putting a list in a tuple. Two names for one list must see each other's writes, which a C array assigned twice wouldn't give.
+- **Methods and operators:** `sort`, `index`, `count`, `copy`, `remove`, `x in xs`, `xs + ys`, `xs * 2` after it's made, slices (`xs[1:]`), slice assignment, `sorted(xs)`.
 - **Mixed element types:** `[1, 2.5]`, or `[1.0, n]` with an int `n`.
-- **Lists of tuples, lists of arrays,** and other lists that hold something other than numbers.
+
+### Lists that grow, nest and are shared (from 0.0.4)
+
+`append`, `pop`, `extend`, `insert`, `clear`, `del xs[i]` and `xs += [...]` compile, and lists can hold lists, tuples of numbers and numpy arrays, to any depth:
+
+```python
+@scram
+def close_pairs(pts, r):
+    out = []
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            if abs(pts[i] - pts[j]) < r:
+                out.append((i, j))
+    return out                       # a list of tuples, as Python's
+```
+
+Such a list is held by reference, as Python holds it: `ys = xs`, `rows.append(row)` and `[[0.0] * w] * h` (one row, `h` times) share the list, and a write through one name shows through the others. A returned list is converted into Python lists, and a list that was in two places is still one list in two places. Arrays in it come back as numpy arrays: the argument itself, a view of it, or a copy of what the function made, as numpy would give.
+
+`[]` takes its element type from what's appended to it. One list holds one element type: a list that would mix ints and floats, Python and numpy numbers, or arrays of different dtypes runs as Python, and so does reading a list before anything is appended to it. Python's `IndexError` comes with its own message (`pop from empty list`, `pop index out of range`, `list assignment index out of range`). A list whose elements a loop goes over can't be changed in that loop, since Python's loop would see the change: that loop stays Python.
+
+Memory is freed as the function runs: a list that nothing holds any more, and the lists and arrays in it, are freed at the next point where arrays are, so a loop making a new list each time doesn't build up memory.
+
+Converting a returned list costs about 30 ns per number (500,000 ints in about 15 ms) and more for numpy scalars and tuples holding them, which are made one by one, as Python makes them. Not yet: these lists passed in as arguments (a list of numbers passed in still compiles, as below, but appending to it runs as Python), a comprehension over a list of arrays (a `for` loop compiles), and a compiled function returning one of these lists to another.
 
 ### Lists passed in (from 0.0.4)
 

@@ -36,7 +36,7 @@ MAKE_DTYPES = ['float64', 'int64', 'float32', 'int32', 'int16', 'int8', 'uint32'
 RETURNS_INT = 2      # a returned float's flag, when the value is really a Python int
 NARROW_INT_DTYPES = ['int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8', 'int64', 'uint64']
 
-LIST_INDEX_MESSAGES = ['list index out of range', 'list assignment index out of range']
+LIST_INDEX_MESSAGES = ['list index out of range', 'list assignment index out of range', 'pop from empty list', 'pop index out of range']
 
 ZERO_DIVISION_MESSAGES = [
     'division by zero',                       # int / int

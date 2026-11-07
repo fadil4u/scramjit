@@ -173,16 +173,15 @@ def test_table_sizes(h, w):
     assert g.signatures, g._why
 
 
-def test_one_row_repeated_stays_python():
+def test_one_row_repeated_is_one_row():
+    """From 0.0.4 lists are held by reference (tests/test_glists.py), so [[0] * 3] * n compiles with its one row shared."""
     def f(n: int):
         m = [[0] * 3] * n                      # every row is the same list
         m[0][0] = 7
         return m[n - 1][0]
     g = scram(cache=False)(f)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', FallbackWarning)
-        assert g(3) == f(3) == 7
-    assert not g.signatures
+    assert g(3) == f(3) == 7
+    assert g.signatures
 
 
 def make_table(h: int, w: int):

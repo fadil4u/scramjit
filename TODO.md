@@ -66,6 +66,19 @@ Built 2026-11-05 and 2026-11-06 (see "Object model" in `requirements.md`); tests
      asset), then 3d, lenia, tracer. Each lands with its page, a preset test in `tests/`, and a line
      in the README.
 
+2. **A case study from a real application.** A private CAD-drawing cleanup app (ours, not open source: name no
+   product, client or code) moved its geometry from vectorized numpy to scramjit loops (2026-11-03, scramjit 0.0.3).
+   numpy tested every candidate pair and de-duplicated afterwards; the loops stop at the first hit, walk only the grid
+   cells a segment passes through and stamp what they've counted. Per kernel: a conflict graph 3.4 -> 0.8 s,
+   crossing counts 2.9 -> 0.2 s; with compiled code releasing the GIL, a thread pool replaced processes (peak memory
+   1.15 -> 0.63 GB, 1.7x the solver's repair windows in the same budget); the module halved (401 -> 187 lines, one
+   implementation per test instead of numpy plus Python); a whole run 17.4 -> 12.4 s, the rest being file I/O and a
+   CP-SAT solver. Write it up for the site and README as "already-vectorized code, made faster by un-vectorizing it",
+   with a small open stand-in for the kernels (segments against a grid, early exit, stamping) in `examples/` that
+   shows the same effect against its own numpy version. What it worked around goes in the items it points at:
+   outputs of unknown size (a preallocated array, counted past, the kernel rerun with more room: lists that grow
+   with `append`), text built digit by digit into a `uint8` array, a first call of about 4.5 s (#19 in "Next").
+
 ## Directions (priority order; each is weeks, not days, and has no oracle to diff against)
 
 1. **Autodiff: gradients of any `@scram` function.** Source-level differentiation on scramjit's own
@@ -230,6 +243,14 @@ after with `bench/`, and write the numbers into the item when done.
    - **The cost of starting the parts:** four tiny calls through a pool took 390 µs against 3.8 µs for one direct call
      (Linux, WSL). The hint is worth little more than the hand split while parts start from Python: threads started from
      the C would need cimo to offer them (not checked).
+
+7. **Arguments that need no wrapping.** The same app wraps every call's arguments: `float(pad)`, `int(n)`,
+   `np.ascontiguousarray(a, dtype=float)`. Find which are needed: numpy scalars (`np.float64`, `np.int64`) where
+   a Python number was seen before (a new signature, a second compile?), Python ints where floats were, arrays that
+   are views or of another dtype (the general path, a copy, or Python?). For each, make it unnecessary where it's cheap
+   (a numpy scalar taken as its Python number when that gives the same result, a strided 1-D view without a copy) or
+   say so in `docs/docs/content/` with what it costs. Oracle: the same call with and without the wrapping, same result
+   and same number of compiles (`f.signatures`).
 
 ## From cimo
 

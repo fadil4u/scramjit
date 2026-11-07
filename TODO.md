@@ -254,6 +254,13 @@ after with `bench/`, and write the numbers into the item when done.
 
 ## From cimo
 
+- **A module's WebAssembly is public (cimo 2026-11-07):** `module.wasm` (bytes, in Pyodide) and
+  `cimo.wat.disassemble(mod, {'sj_kernel'})` -> (text, sections, others); `docs/lab/lab.py`'s `wasm_text` can use
+  them instead of `cimo.wasm.build` and a copy of `wat.py`.
+- **arm64: an accumulator's chain is no longer fused (cimo 2026-11-07):** `s += a * b` with `fma=True` runs at the
+  unfused speed (dot 1.32x faster); its bits are now the uncontracted ones. scramjit's default (no contraction) is
+  unaffected.
+
 - **Kernel calls without ctypes (cimo 2026-11-07):** a kernel's `__call__` is now a CPython `METH_FASTCALL` builtin:
   exact floats, exact ints and writable buffers convert in C, anything else takes the old Python path with the same
   results and errors. A `double, double, long` call 661 to 92 ns on the Snapdragon X laptop. Kernels on threads still

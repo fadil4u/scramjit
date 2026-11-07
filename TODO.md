@@ -233,6 +233,11 @@ after with `bench/`, and write the numbers into the item when done.
 
 ## From cimo
 
+- **`#pragma omp simd reduction(+:s)` works (cimo 2026-11-07):** the float sums (`+`, `-`) and products (`*`) it names, in
+  the `for` on the next line, become unordered reductions with four vectors of accumulators (1M-double dot 1.30 to
+  0.22 ms on a laptop, unbenchmarked). Only the operation assigned to the named variable is reordered; no NaN or inf
+  assumptions. Ready for `reassoc=True`. `fmin`/`fmax` reductions now vectorize without the pragma (arm64).
+
 - **A kernel can call a host function through a pointer in Pyodide (cimo 2026-11-07):** cimo's pointers are i32 at a wasm
   function's boundary now, as Emscripten's, so Pyodide's libm `frexp(double, int *)` by address works; the bit-level
   `frexp` workaround can go if wanted. A host `long` parameter still differs (Emscripten's is 32-bit).

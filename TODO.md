@@ -416,7 +416,7 @@ Spills per line, once cimo can report them.
       `counts[k]` loses its wrap and bounds check (`tests/test_guards.py`). `+= 1` never checked overflow. What's left is
       that one test, which `int(nan)` raising needs.
     - **Float sums with fastmath, 3x** (dot: 0.34 against 1.02 ms): Numba reorders the sum to vectorize it. Plan
-      (2026-11-07): `reassociate=True`, separate from `parity` (reordering changes plain `+` everywhere, by more than
+      (2026-11-07): `reassoc=True`, separate from `parity` (reordering changes plain `+` everywhere, by more than
       a last bit under cancellation, and with the vector width; `parity=False` never reorders), emitting
       `#pragma omp simd reduction(+:s)` before a loop whose float sums (products, min, max) it lets go out of order,
       and nothing else. **Blocked on cimo:** it drops the pragma today (dot 1.36 ms with or without, same bits; in

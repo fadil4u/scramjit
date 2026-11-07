@@ -574,8 +574,9 @@ Spills per line, once cimo can report them.
       values keeping their identity; a list passed in and returned is itself.
     - **Calls** between compiled functions pass and return them; comprehensions over a list of arrays.
     - Filter 1M keeping 500k: Python 83 ms, compiled 20 ms; `examples/grow_lists.py` 5x. `tests/test_glists.py`.
-    - **Left:** methods called on instances held in these lists (the object pool's machinery), `sort`, slices of
-      lists, `in`, sets, and a run in Pyodide (the decoders read memory with ctypes, natively).
+    - **Methods** of instances held in them (`p.step(dt)`): the method compiled as a callee with `self` the record.
+    - **Left:** `sort`, slices of lists, `in`, sets (list features beyond composition), and a run in Pyodide (the
+      decoders read memory with ctypes, natively).
 24. **Preflight's advice: boxed data, and the flags that would help.** Two kinds of note:
     - **Converting costs more than computing.** `preflight --run` splits each function's time into native and
       Python; split off the seconds converting arguments and results too (copying lists in, writing back, boxing the

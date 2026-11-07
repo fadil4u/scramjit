@@ -3092,7 +3092,7 @@ class Function:
             if type(x) is not list:
                 continue
             if out[i] is None or i in self._gl_held or (shared and _reaches(x, shared)):
-                if i not in self._gl_held and x and _is_instance(x[0]) and not (shared and _reaches(x, shared)):
+                if i not in self._gl_held and x and _gl_is_object(x[0]) and not (shared and _reaches(x, shared)):
                     continue                     # a list of instances: the object path (no need to look at them all)
                 t = _glist_arg_type(x)
                 if t is not None and (i in self._gl_held or not _has_instances(t)):   # instances: the object path, unless grown
@@ -3429,11 +3429,11 @@ def _read_glist_values(addr, t, memo, blocks, arrays=None):
     return out
 
 
-def _is_instance(v):
+def _gl_is_object(v):
     """An object of a class of the user's (what a record with a class holds)."""
     t = type(v)
     return t not in (int, float, bool, tuple, list, dict, str, bytes) and hasattr(v, '__dict__') and t.__module__ != 'builtins' \
-        and not hasattr(v, '__array_interface__') and not callable(v)
+        and not hasattr(v, '__array_interface__') and not callable(v) and not isinstance(v, enum.Enum)
 
 
 def _has_instances(t):

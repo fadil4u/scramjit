@@ -334,6 +334,88 @@ class GList:
                 out[attr] = ('expr', e)
         return list(out.items())
 
+    def rc_method(self, e):
+        """For p.m(args), p an instance held in these lists: (the method compiled for these types, the argument nodes).
+        self is the instance's record, so what the method assigns lands in it."""
+        cache = self.__dict__.setdefault('rc_methods', {})
+        if id(e) in cache:
+            return cache[id(e)]
+        import types as pytypes
+        from ._dispatch import _method, _in_class
+        from ._errors import Unsupported
+        recv, name = e.func.value, e.func.attr
+        t = self.typeof(recv)
+        c = _in_class(t.cls, name)
+        if type(c) is not pytypes.FunctionType and type(c).__name__ != 'Function':
+            self.fail(e, f'{t.cls.__qualname__}.{name} called on an instance in a list (not a plain method)')
+        if e.keywords or any(isinstance(a, ast.Starred) for a in e.args):
+            self.fail(e, f'{t.cls.__qualname__}.{name}() with keyword arguments, on an instance in a list')
+        fn = _method(c)
+        try:
+            spec = fn._callee()
+        except Unsupported as u:
+            self.fail(e, f'{t.cls.__qualname__}.{name}(): {u.reason}')
+        if spec.hidden:
+            self.fail(e, f'{t.cls.__qualname__}.{name}() reads globals, called on an instance in a list')
+        nodes = [recv] + list(e.args)
+        types_ = [self.typeof(x) for x in nodes]
+        for x, xt in zip(nodes, types_):
+            if not (xt.is_number or held(xt)) or xt.np == 'dyn':
+                self.fail(x, f'passes {xt.name} to {t.cls.__qualname__}.{name}(), called on an instance in a list')
+        if len(nodes) != fn._npos:
+            self.fail(e, f'{t.cls.__qualname__}.{name}() with {len(nodes) - 1} arguments')
+        try:
+            callee = self.unit.callee(spec, types_)
+        except Unsupported as u:
+            self.fail(e, f'{t.cls.__qualname__}.{name}(): {u.reason}')
+        for p, xt in zip(callee.params, types_):
+            if held(xt) and callee.env[p] is not xt:
+                self.fail(e, f'{t.cls.__qualname__}.{name}() changes what an attribute holds')
+        if callee.ret.kind in ('array', 'tuple'):
+            self.fail(e, f'{t.cls.__qualname__}.{name}() returns {callee.ret.name}, called on an instance in a list')
+        self.makes = True
+        cache[id(e)] = (callee, nodes)
+        return cache[id(e)]
+
+    def rc_is_method(self, e):
+        return isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and self.rc_obj(e.func.value)
+
+    def rc_call(self, e):
+        """p.m(args): the arguments in order, the call, what it kept adopted; its result as (C value, flag)."""
+        c, nodes = self.rc_method(e)
+        if not c.lines:
+            self.unit.code.append(c.generate())
+        self.calls = True
+        self.uses_libm = self.uses_libm or c.uses_libm
+        self.uses_stop = self.uses_stop or c.uses_stop
+        vals = []
+        for x in nodes:
+            xt = self.typeof(x)
+            v, f = self.expr(x)
+            if held(xt):
+                tmp = self.temp()
+                self.emit(f'void *{tmp} = {v};')
+                vals.append((tmp, xt))
+            else:
+                vals.append((self.hold(v, xt), xt))
+        cargs = [v for v, _ in vals] + (['sj_m'] if c.uses_libm else []) + (['sj_stop'] if c.uses_stop else [])
+        io, st = self.temp(), self.temp()
+        self.emit(f'int64_t {io}[{c.record_slot(0)}];')
+        self.emit(f'int {st} = {c.cname}({", ".join(cargs + ["sj_tb", io])});')
+        for v, xt in vals:
+            if held(xt):
+                self.gl_adopt_after_call(v, xt)
+        self.emit(f'if ({st}) {{ sj_tb[++sj_tb[0]] = ((int64_t){c.frame} << 32) | {io}[1]; sj_io[0] = {io}[0]; sj_io[4] = {io}[4]; '
+                  f'SJ_FAIL({st}, {self.line(e)}, {io}[2], {io}[3]); }}')
+        if c.ret is T.NONE:
+            return '0', '0'
+        if held(c.ret):
+            v = self.temp()
+            self.emit(f'void *{v} = (void *)(uintptr_t){io}[0];')
+            self.gl_adopt_after_call(v, c.ret)
+            return v, '0'
+        return self.number_result(c.ret, io, 0, 2)
+
     def rc_obj_type(self, call, mt):
         fields = []
         for attr, (_, node) in self.rc_init(call, mt):

@@ -2332,6 +2332,8 @@ class Compiler(GList):
             pass
         elif isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and receiver(s.value) and self.gl_is(receiver(s.value)[0]):
             self.gl_infer_method(s.value)
+        elif isinstance(s, ast.Expr) and self.rc_is_method(s.value):
+            self.typeof(s.value)
         elif isinstance(s, ast.Expr) and self.calls_out(s.value):
             self.typeof(s.value)
         elif isinstance(s, ast.Expr):
@@ -3017,6 +3019,8 @@ class Compiler(GList):
             return T.tuple_of(ts)
         if isinstance(e, ast.Call) and receiver(e) and receiver(e)[1] == 'pop' and self.gl_is(receiver(e)[0]):
             return self.gl_infer_method(e)
+        if self.rc_is_method(e):                 # a method of an instance held in a list
+            return self.rc_method(e)[0].ret
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == 'len' and len(e.args) == 1 \
                 and self.is_builtin('len', 'len') and self.gl_is(e.args[0]):
             return T.INT
@@ -5249,6 +5253,10 @@ class Compiler(GList):
             self.emit(f'v_{name}__int = {1 if vt.kind == "int" else 0};')
 
     def stmt(self, s):
+        if isinstance(s, ast.Expr) and self.rc_is_method(s.value):
+            self.mark(s)
+            self.rc_call(s.value)
+            return
         if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and receiver(s.value) and self.gl_is(receiver(s.value)[0]):
             self.mark(s)
             if self.counts:
@@ -6743,6 +6751,10 @@ class Compiler(GList):
                 self.assign_tuple(x, v, et)
             elif isinstance(x, ast.Name):
                 self.assign(x.id, v, et)
+            elif isinstance(x, (ast.Subscript, ast.Attribute)) and et.kind != 'tuple' and self.rc_is(x.value):
+                self.rc_store(x, v, et)
+            elif isinstance(x, ast.Subscript) and et.kind != 'tuple' and self.gl_is(x.value):
+                self.gl_store(x, v, et)
             elif isinstance(x, ast.Subscript):
                 self.store_elem(x, v, et)
             else:
@@ -6791,6 +6803,8 @@ class Compiler(GList):
     def expr_now(self, e):
         if isinstance(e, ast.Attribute) and self.rc_obj(e.value):     # an attribute of an instance held in a list
             return self.rc_read(e)
+        if self.rc_is_method(e):
+            return self.rc_call(e)
         if self.callee_of(e) is not None:
             return self.call_number(e)
         if self.c_function_of(e) is not None:

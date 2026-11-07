@@ -170,11 +170,11 @@ def record(hits, xs, r):
 
 - **Passed in:** a list that the function grows, gives another name or puts into another list, a ragged list of lists, and a list of tuples, arrays, dicts or instances is held the same way. After the call, also when it raises, the caller's lists, dicts and instances are updated in place where they changed: the same objects, and the values that didn't change are the very objects they were. A list passed in and returned is that list.
 - **Dicts:** `{'i': i, 'd': d}` with constant string keys, `d['k']` read and written (`+=` too), holding numbers, tuples, lists, arrays and other such dicts. A dict that gains keys, a key in a variable, and `len`, `in`, `.get` and the other methods stay Python; so does a dict that is an object's own `__dict__`.
-- **Instances:** `Point(x, y)` of a class whose `__init__` only assigns its parameters, constants or expressions of plain values (dataclasses included), with their attributes read and written. Returned or written back as instances of their class. Methods called on them, `__post_init__` and computed attributes stay Python.
+- **Instances:** `Point(x, y)` of a class whose `__init__` only assigns its parameters, constants or expressions of plain values (dataclasses included), with their attributes read and written. Their plain methods can be called (`p.step(dt)`), compiled with `self` as that instance, so what they assign lands in it. Returned or written back as instances of their class. A method that reads globals or changes what an attribute holds, `__post_init__`, and an `__init__` computing an attribute from an argument that isn't a plain value stay Python.
 - **Calls:** a compiled function can pass these lists to another and get one back; what the callee made becomes the caller's.
 - **Comprehensions** over a list of arrays compile, as loops do.
 
-Not yet: methods called on instances held in these lists, sets, `sort`, slices of lists, and Pyodide, where these lists haven't been run.
+Not yet: sets, `sort`, `in`, slices of lists, and Pyodide, where these lists haven't been run.
 
 ### Lists passed in (from 0.0.4)
 

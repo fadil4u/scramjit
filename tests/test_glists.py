@@ -631,3 +631,48 @@ def test_instances():
     first = ps[0]
     same_passed(move, ps, 0.5)
     assert ps[0] is first
+
+
+@dataclass
+class Body:
+    x: float
+    v: float
+
+    def step(self, dt):
+        self.x += self.v * dt
+
+    def energy(self):
+        return 0.5 * self.v * self.v
+
+    def bounce(self, other):
+        self.v, other.v = other.v, self.v
+
+
+def simulate_bodies(n, steps):
+    bs = []
+    for i in range(n):
+        bs.append(Body(i * 1.0, 1.0 - i * 0.5))
+    for _ in range(steps):
+        for b in bs:
+            b.step(0.1)
+    bs[0].bounce(bs[1])
+    e = 0.0
+    for b in bs:
+        e += b.energy()
+    return bs, e
+
+
+def drive_bodies(bs, steps):
+    for _ in range(steps):
+        for b in bs:
+            b.step(0.01)
+    bs.append(Body(0.0, 0.0))
+    return bs[0].energy()
+
+
+def test_methods_of_instances_in_lists():
+    same_passed(simulate_bodies, 3, 5)
+    bs = [Body(1.0, 2.0), Body(0.0, -1.0)]
+    first = bs[0]
+    same_passed(drive_bodies, bs, 10)
+    assert bs[0] is first

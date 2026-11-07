@@ -291,8 +291,9 @@ static double sj_np_var_i(const int64_t *a, int64_t n, int64_t st, int64_t chunk
 }
 """),
     'np_make': ((), """
-typedef struct sj_block { struct sj_block *next; int64_t bytes; int64_t mark; int64_t ndim; int64_t shape[4]; } sj_block;
-typedef struct sj_heap { sj_block *all; int64_t since; int64_t limit; uint64_t most; } sj_heap;
+typedef struct sj_block { struct sj_block *next; int64_t bytes; int64_t mark; int64_t ndim; int64_t shape[4]; struct sj_heap *owner; } sj_block;
+typedef struct sj_heap { sj_block *all; int64_t since; int64_t limit; uint64_t most; int64_t sweeps; } sj_heap;
+#define SJ_ORPHAN ((sj_heap *)1)   /* kept at a function's exit for its caller (or Python), in no heap's list */
 static sj_block *sj_make(sj_heap *h, int ndim, const int64_t *shape, int64_t item, int zero) {
     uint64_t bytes = (uint64_t)item, limit = h->most - sizeof(sj_block);   /* numpy's own limit, too */
     int empty = 0;
@@ -306,7 +307,7 @@ static sj_block *sj_make(sj_heap *h, int ndim, const int64_t *shape, int64_t ite
     size_t total = (size_t)bytes + sizeof(sj_block);
     sj_block *b = zero ? calloc(1, total) : malloc(total);
     if (!b) return 0;
-    b->next = h->all; b->bytes = (int64_t)total; b->mark = 0; b->ndim = ndim;
+    b->next = h->all; b->bytes = (int64_t)total; b->mark = 0; b->ndim = ndim; b->owner = h;
     for (int i = 0; i < ndim; i++) b->shape[i] = shape[i];
     h->all = b;
     h->since += (int64_t)total + 64;
@@ -332,7 +333,10 @@ static void sj_free_blocks(sj_heap *h, int keep) {
     }
 }
 static void sj_adopt(sj_heap *h, sj_block *b) {      /* a block a called function returned: it's the caller's now */
-    if (b->mark == 2) { b->mark = 0; b->next = h->all; h->all = b; h->since += b->bytes + 64; }
+    if (b->mark == 2 && b->owner != h) { b->mark = 0; b->owner = h; b->next = h->all; h->all = b; h->since += b->bytes + 64; }
+}
+static int64_t sj_phase(sj_heap *h) {               /* a mark no other sweep, of this heap or another, uses */
+    return ((int64_t)(uintptr_t)h << 8) ^ ((++h->sweeps & 0x7f) << 1) | 1;
 }
 int sj_release(int64_t block) { free((void *)(uintptr_t)block); return 0; }
 """),

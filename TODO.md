@@ -553,57 +553,29 @@ Spills per line, once cimo can report them.
     silently changes semantics. Read `_compiler.py` by lowering (indexing and views first, then
     bounds-check versioning, then calls), and record what was checked and found here.
 22. **Value-range narrowing:** the rest of M2's loop work, using the range facts the compiler already has. Little to win: arrays already have the user's dtype, cimo has no byte or short lanes, and scalars gain nothing, which leaves temporary arrays.
-23. **Containers that compose: lists that grow, and any nesting of the types that compile. Next up.** Decided
-    2026-11-07: every combination of supported types compiles (lists of lists of lists, lists of tuples, lists of
-    dicts with fixed keys, dicts holding lists, lists of instances), with `append`, `pop`, `extend` and the other
-    methods that resize. Today each depth is its own case (tuples to any depth; lists one level; lists of lists two,
-    rectangular only; dicts of numbers), and `out = []`, a loop, `out.append(x)`, `return out` doesn't compile, so
-    callers preallocate, count past the end and call again with more room (the case study, Demos #2). Rules:
-    - **The type decides the C layout, recursively.** `list[T]` is a header (pointer, length, capacity, the capacity
-      only where something grows it) of `T`s; `T` a number, a tuple (its numbers in place), a list, a dict with fixed
-      keys (a struct) or an instance (the object pool). Copying in, writing back and boxing at the return follow the
-      same recursion, so a depth is never a special case again.
-    - **Nothing that compiles now gets slower.** Generality is resolved when the function compiles, or once per call
-      at the boundary, never per element in a loop: each level's C type is known statically, with no tags and no
-      indirection where the type is known. A rectangular list of lists keeps its one block: the copy already looks at
-      every row, and rows of one length take the block, others the ragged layout. Gate for each step:
-      `bench/compare.py`, `bench/kernels.py` and the examples at the same speed as before.
-    - **One element type per container that grows (decided 2026-11-07).** A list that's appended to holds only ints,
-      only floats or only bools; one that would mix them runs as Python, and preflight says why. Mixed lists that don't
-      grow keep their flags, as now. Tagged elements (the `dyn` scalars, per element) can come later if preflight
-      shows real code mixing; the layout leaves room for a tag beside `T`.
-    - **Python's semantics at the boundary:** an inner list in two places (`[r, r]`) is found when copying in (by
-      identity, as the object pool does for instances) and either kept shared or left to Python; after an exception
-      the caller's structure is what Python would have left, at every depth.
-    **Done (2026-11-07), made in the function:** `_glist.py`. A list that grows, nests, starts empty or holds
-    non-numbers is a header on the array heap (`sj_glist`: data, length, capacity, its block), its elements by value
-    (numbers, a struct per tuple type, an array's return record, a pointer per inner list), marked through by a
-    function per list type at each sweep. `append`, `pop`, `extend`, `insert`, `clear`, `del`, `+=`, aliases and
-    shared rows (`[[0.0] * w] * h`), lists of tuples, lists of lists to any depth, lists of arrays (views of the
-    arguments come back as views), returned alone or in a tuple, read back in bulk (`memoryview.cast`,
-    `struct.iter_unpack`), shared lists staying shared. `[]` typed by its appends (inference comes back to reads
-    before them, `Pending`). Filter 1M, 500k kept: Python 83 ms, compiled 20 ms (the preallocated array 4.6);
-    `examples/grow_lists.py` 5x. `tests/test_glists.py`. Left: steps 3 (dicts in it) to 6, passed-in lists of
-    these kinds, a callee returning one, comprehensions over a list of arrays.
-    Steps, each shippable, each with differential tests (results, the caller's structure afterwards, the same after
-    an exception midway):
-    1. **Local `list[number]` that grows.** A capacity (`v_x__c`) for each list the function appends to, found before
-       inference; `append` is grow-if-full then store (comprehensions with two loops already grow by doubling
-       `realloc`, `make_list`). `pop()` (IndexError "pop from empty list"), `pop(i)`, `extend` of a list, range or
-       comprehension, `+= [..]`, `clear()`, `del out[i]`, `insert`. `[]` typed by its appends, inferred like any
-       variable; one never appended to stays empty. Iterating over a list while appending to it stays Python
-       (Python's loop sees the new elements). Returned, `np.array(out)`, `len`, indexing, `sum` as for other lists.
-    2. **`list[T]` recursive:** lists of tuples (`pairs.append((u, v))`, returned as a list of tuples), then ragged
-       lists of lists to any depth, made in the function and returned.
-    3. **Dicts in it:** lists of fixed-key dicts (records), dicts whose values are lists or tuples.
-    4. **Passed in and grown:** appending to a structure passed in, at any depth. The kernel copies a level to its
-       own buffer on its first append; the dispatcher writes back the changed elements as now plus the new tail
-       (`lst.extend(...)`) or the cut (`del lst[n:]`), on the error path too. An empty list passed in (`fill(out)`)
-       is a signature of its own, typed by the appends.
-    5. **Several returned:** `return us, vs`, as arrays in a tuple are now.
-    6. **Lists of instances** grown in the function (`out.append(Point(x, y))`), through the object pool.
-    Measure each against Python and against the preallocate-and-rerun pattern; the boxing at the return is the cost to
-    watch (`array('d', ...).tolist()` is C).
+23. ~~**Containers that compose: lists that grow, and any nesting of the types that compile.**~~ **Done (2026-11-07),**
+    `_glist.py`. A list that grows, nests, starts empty, is shared or holds non-numbers, and a dict with constant
+    string keys or an instance made in the function or held in one (a record, with its class), is a block on the
+    array heap held by pointer, as Python holds them: `sj_glist` (data, length, capacity, its block) and a struct
+    per record type, elements by value (numbers, a struct per tuple type, an array's return record, a pointer per
+    list or record). Rules kept: the type decides the layout recursively; nothing that compiled before is slower
+    (rectangular lists keep their block, flat number lists their copy; `bench/compare.py` the same, particles
+    1.81 ms both); one element type per list (mixed ones run as Python).
+    - **Memory:** marked through at each sweep by a function per type; every block knows its heap (`owner`), a
+      sweep's mark is unique to its heap and pass (`sj_phase`), and at a function's exit only its own blocks are kept,
+      as orphans its caller adopts (`sjD*`) or Python frees. 20M list elements and 200,000 arrays made and dropped in
+      loops stay flat.
+    - **Made, returned:** methods (`append`, `pop`, `extend`, `insert`, `clear`, `del`, `+=`), aliases and shared
+      rows, lists of tuples, lists to any depth, lists of arrays (views of arguments come back as views), dicts
+      (`d['k']`, `+=`), instances (`Point(x, y)` from what `__init__` assigns, `p.x`), alone or in a tuple, read back in
+      bulk with sharing kept. `[]` typed by its appends (`Pending`).
+    - **Passed in:** lists the function grows or holds, ragged or of tuples, arrays, dicts or instances, and dicts
+      holding lists, built in memory Python owns (`_GLBuild`) and written back in place, on errors too, unchanged
+      values keeping their identity; a list passed in and returned is itself.
+    - **Calls** between compiled functions pass and return them; comprehensions over a list of arrays.
+    - Filter 1M keeping 500k: Python 83 ms, compiled 20 ms; `examples/grow_lists.py` 5x. `tests/test_glists.py`.
+    - **Left:** methods called on instances held in these lists (the object pool's machinery), `sort`, slices of
+      lists, `in`, sets, and a run in Pyodide (the decoders read memory with ctypes, natively).
 24. **Preflight's advice: boxed data, and the flags that would help.** Two kinds of note:
     - **Converting costs more than computing.** `preflight --run` splits each function's time into native and
       Python; split off the seconds converting arguments and results too (copying lists in, writing back, boxing the

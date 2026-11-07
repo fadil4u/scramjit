@@ -86,7 +86,14 @@ def test_index_errors_are_lists(i):
     strict(out_of_range, [[1, 2], [3, 4]], i)
 
 
-@pytest.mark.parametrize('m', [[[1.0], [2.0, 3.0]], [[]], [[1, 2.0]]])
+def test_ragged_is_held_by_reference():
+    """From 0.0.4 a ragged list of lists compiles, held by reference (tests/test_glists.py)."""
+    g = scram(cache=False)(total)
+    m = [[1.0], [2.0, 3.0]]
+    assert outcome(g, [m])[:3] == outcome(total, [m])[:3] and g.signatures
+
+
+@pytest.mark.parametrize('m', [[[]], [[1, 2.0]]])
 def test_other_shapes_stay_python(m):
     g = scram(cache=False)(total)
     with warnings.catch_warnings():
@@ -95,15 +102,14 @@ def test_other_shapes_stay_python(m):
     assert not g.signatures
 
 
-def test_one_row_twice_stays_python():
+def test_one_row_twice_is_one_row():
+    """From 0.0.4 one row in two places compiles, still one row (tests/test_glists.py)."""
     r = [1.0, 2.0]
     m = [r, r]                                   # writing m[0][0] changes m[1][0] in Python
     g = scram(cache=False)(through_a_row)
     m2 = [r2 := [1.0, 2.0], r2]
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', FallbackWarning)
-        assert g(m) == through_a_row(m2)
-    assert repr(m) == repr(m2) and not g.signatures
+    assert g(m) == through_a_row(m2)
+    assert repr(m) == repr(m2) and m[0] is m[1] and g.signatures
 
 
 @pytest.mark.parametrize('src', ['def f(m):\n    return m[0, 1]\n', 'def f(m):\n    return m[0][1:]\n', 'def f(m):\n    m[0] = [1.0, 2.0]\n    return 0\n',

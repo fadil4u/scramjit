@@ -172,7 +172,7 @@ def nothing(ps):
     (by_index, lambda: [[P(1), P(2.0)]], False),         # an int and a float
     (returns_element, lambda: [ps()], True),               # the element itself (test_instance_returns.py)
     (passes_list, lambda: [ps()], False),
-    (appends, lambda: [ps()], False),
+    (appends, lambda: [ps()], True),                       # grown: held by reference (tests/test_glists.py), from 0.0.4
     (nothing, lambda: [ps()], False),
 ])
 def test_lists_of_instances(f, make, compiled):
@@ -222,8 +222,6 @@ def test_writes_before_an_exception_and_the_traceback():
 def test_reasons():
     with pytest.raises(CompileError, match='only len'):
         scram(cache=False, fallback=False)(passes_list)(ps())
-    with pytest.raises(CompileError, match='never reads'):
-        scram(cache=False, fallback=False)(appends)(ps())
 
 
 def test_list_and_dict_in_one_call():

@@ -417,10 +417,29 @@ def glist_of(elem):
     return _GLISTS[elem.name]
 
 
+_RECORDS = {}
+
+
+def record_of(fields, cls=None):
+    """A dict with constant string keys, held by reference (see _glist): a struct on the heap, one field per key, in the
+    order the keys were written. With cls: an instance of that class, its attributes as the fields."""
+    key = (cls, tuple((k, t.name) for k, t in fields))
+    if key not in _RECORDS:
+        name = (f'{cls.__qualname__}(' + ', '.join(f'{k}: {t.name}' for k, t in fields) + ')') if cls is not None else \
+            'dict[' + ', '.join(f'{k!r}: {t.name}' for k, t in fields) + ']'
+        t = _RECORDS[key] = Type(name, 'void *', 'record', elem=list(fields))
+        t.cls = cls
+    return _RECORDS[key]
+
+
 def has_pending(t):
-    while t is not None and t.kind == 'glist':
-        t = t.elem
-    return t is PENDING
+    if t is PENDING:
+        return True
+    if t.kind == 'glist':
+        return has_pending(t.elem)
+    if t.kind == 'record':
+        return any(has_pending(x) for _, x in t.elem)
+    return False
 
 
 _ARRAYS = {}

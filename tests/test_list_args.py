@@ -97,13 +97,20 @@ def test_two_lists_and_one_twice():
     assert a == b
 
 
-@pytest.mark.parametrize('xs', [[], [1, 2.5], [1, True], [np.float64(1.0)], [2**70]])
+@pytest.mark.parametrize('xs', [[], [1, 2.5], [1, True], [2**70]])
 def test_other_lists_stay_python(xs):
     g = scram(cache=False)(total)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', FallbackWarning)
         assert outcome(g, [list(xs)])[:3] == outcome(total, [list(xs)])[:3]
     assert not g.signatures
+
+
+def test_numpy_scalars_in_a_list():
+    """From 0.0.4 a list of numpy scalars passed in is held by reference (tests/test_glists.py)."""
+    g = scram(cache=False)(total)
+    xs = [np.float64(1.0), np.float64(2.5)]
+    assert outcome(g, [list(xs)])[:3] == outcome(total, [list(xs)])[:3] and g.signatures
 
 
 def test_storing_another_type_stays_python():

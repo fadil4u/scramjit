@@ -24,7 +24,7 @@ import re
 from . import _types as T
 from . import _webs
 from ._errors import Unsupported
-from ._glist import GList, Pending, ArrayOf, grown_names, has_arrays, receiver, unify_lists, SNIPPET as GLIST_SNIPPET
+from ._glist import GList, Pending, ArrayOf, grown_names, has_arrays, held, receiver, unify_lists, SNIPPET as GLIST_SNIPPET
 import sys
 
 from ._mathlib import snippets
@@ -722,11 +722,24 @@ def flatten_dicts(fdef, arg_types):
             if spec is not None and spec[3] is not None:
                 return spec
         return None
-    # v = C(...), C a class it makes instances of: v's attributes become variables, assigned as C.__init__ assigns them
+    # v = C(...), C a class it makes instances of: v's attributes become variables, assigned as C.__init__ assigns them.
+    # Unless v goes into a list or a dict, or gets another name: then it's held by reference, as Python holds it (_glist)
+    from ._glist import held_names, receiver as gl_receiver
+    held = held_names(tree)
+    into = set()                                 # C(...) put straight into a list or a dict: made there, not hoisted
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and gl_receiver(n) and gl_receiver(n)[1] in ('append', 'insert'):
+            into |= {id(a) for a in n.args}
+        elif isinstance(n, ast.List):
+            into |= {id(x) for x in n.elts}
+        elif isinstance(n, ast.Dict):
+            into |= {id(x) for x in n.values}
+        elif isinstance(n, ast.Assign) and any(isinstance(t, (ast.Subscript, ast.Attribute)) for t in n.targets):
+            into.add(id(n.value))
     made_local = {}
     for n in ast.walk(tree):
         if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call) \
-                and isinstance(n.value.func, ast.Name) and n.value.func.id in made and not pool_made(n.value):
+                and isinstance(n.value.func, ast.Name) and n.value.func.id in made and not pool_made(n.value) and n.targets[0].id not in held:
             v = n.targets[0].id
             if made_local.get(v, n.value.func.id) != n.value.func.id or v in types_of:
                 raise Unsupported(n, f'{v} is an instance of two classes, or a parameter too')
@@ -747,7 +760,8 @@ def flatten_dicts(fdef, arg_types):
         register(v, c)
     for n in ast.walk(tree):
         if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) \
-                and n.value.func.id in made and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and not pool_made(n.value):
+                and n.value.func.id in made and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and not pool_made(n.value) \
+                and n.targets[0].id not in held:
             makers[id(n)] = 'make'
     first = {}                                   # a list's first attribute, for len() and an index's check
     for p, t in lists.items():
@@ -1540,7 +1554,7 @@ def flatten_dicts(fdef, arg_types):
                         setattr(e, field, [walk(x, cond or (later and (k > 0 or not isinstance(e, ast.BoolOp)))) if isinstance(x, ast.AST) else x
                                            for k, x in enumerate(v)])
                 if isinstance(e, ast.Call):
-                    c = makes_new(e)
+                    c = makes_new(e) if id(e) not in into else None
                     if c is not None:
                         if cond:
                             raise Unsupported(e, 'a new instance made only on one side of a condition: assign it to a name first')
@@ -2117,9 +2131,9 @@ class Compiler(GList):
             return self.env[v.id]          # handed back whole: copied into a new list, or the one passed in
         if isinstance(v, ast.Tuple) and self.has_views(v):        # only a return can hold arrays in a tuple
             return T.tuple_of([self.typeof(x) for x in v.elts])
-        if isinstance(v, ast.Tuple) and any(self.gl_is(x) for x in v.elts):   # lists in a returned tuple: a level deep
+        if isinstance(v, ast.Tuple) and any(self.gl_is(x) or self.rc_is(x) for x in v.elts):   # lists in a returned tuple: a level deep
             ts = [self.typeof(x) for x in v.elts]
-            if not all(t.kind == 'glist' or t.is_number for t in ts):
+            if not all(held(t) or t.is_number for t in ts):
                 self.fail(v, 'returns a tuple of lists and something other than numbers (an array, or a rectangular list of lists)')
             return T.tuple_of(ts)
         return self.typeof(v)
@@ -2147,13 +2161,13 @@ class Compiler(GList):
         if t is T.NONE:
             self.fail(node, f'{name} would be None')
         old = self.env.get(name)
-        if old is not None and old.kind == 'glist' and t.kind == 'glist':
+        if old is not None and old.kind in ('glist', 'record') and t.kind == old.kind:
             u = unify_lists(old, t)
             if u is None:
                 self.fail(node, f'{name} is {old.name} and later {t.name}; a variable must keep one type')
             self.env[name] = u
             return
-        if (old is not None and old.kind == 'glist') != (t.kind == 'glist') and old is not None:
+        if old is not None and held(old) != held(t):
             self.fail(node, f'{name} is {old.name} and later {t.name}; a variable must keep one type')
         if old is not None and old is not t and (old.kind == 'array' or t.kind == 'array') and self.split_done:
             self.fail(node, f'{name} is {old.name} and later {t.name}; a variable must keep one type')
@@ -2239,14 +2253,23 @@ class Compiler(GList):
                     self.makes = True
                     self.gl_store_type(s.targets[0], self.gl_ctor_type(s.value), s)
                     return
+                if len(s.targets) == 1 and isinstance(s.targets[0], (ast.Subscript, ast.Attribute)) and self.rc_is(s.targets[0].value):
+                    self.makes = True
+                    self.rc_store_type(s.targets[0], self.gl_ctor_type(s.value), s)
+                    return
                 if len(s.targets) != 1 or not isinstance(s.targets[0], ast.Name):
                     self.fail(s, 'a list assigned to something other than one name')
                 name = s.targets[0].id
-                if name in self.gl_names or self.gl_wants(s.value) or (self.env.get(name) is not None and self.env[name].kind == 'glist'):
+                flat = None
+                if not (name in self.gl_names or self.gl_wants(s.value) or (self.env.get(name) is not None and self.env[name].kind == 'glist')):
+                    flat = self.list_type(s.value)
+                    if flat.elem.np is True and name == 'sj_list':     # numpy scalars, returned: as these lists hold them
+                        flat = None
+                if flat is None:
                     self.makes = True
                     self.assign_type(s, name, self.gl_ctor_type(s.value))
                 else:
-                    self.assign_type(s, name, self.list_type(s.value))
+                    self.assign_type(s, name, flat)
                 return
             if self.has_views(s.value):
                 for target in s.targets:
@@ -2254,6 +2277,9 @@ class Compiler(GList):
                         self.fail(s, 'a tuple holding arrays assigned to something other than as many names')
                     for x, v in zip(target.elts, s.value.elts):
                         self.infer_target(x, self.typeof(v), s)
+                return
+            if self.rc_made_class(s.value) is not None and len(s.targets) == 1:   # an instance held by reference
+                self.infer_target(s.targets[0], self.rc_obj_type(s.value, self.rc_made_class(s.value)), s)
                 return
             vt = self.typeof(s.value)
             if ret_arrays(vt) and vt.kind == 'tuple' and not all(isinstance(t, (ast.Tuple, ast.List)) and len(t.elts) == len(vt.elem) for t in s.targets):
@@ -2266,6 +2292,12 @@ class Compiler(GList):
             self.infer_target(s.target, self.typeof(s.value), s)
         elif isinstance(s, ast.AugAssign) and isinstance(s.op, ast.Add) and self.gl_is(s.target):
             self.gl_infer_method(self.gl_extend_call(s))
+        elif isinstance(s, ast.AugAssign) and ((isinstance(s.target, ast.Subscript) and (self.rc_is(s.target.value) or self.gl_is(s.target.value)))
+                                               or (isinstance(s.target, ast.Attribute) and self.rc_obj(s.target.value))):
+            op = ARITH.get(type(s.op))
+            if op is None:
+                self.fail(s, OPERATOR_NAMES.get(type(s.op).__name__, f'the {type(s.op).__name__} operator'))
+            self.infer_target(s.target, self.binop_type(self.typeof(s.target), self.typeof(s.value), op, s), s)
         elif isinstance(s, ast.Delete):
             for t in s.targets:
                 if not (isinstance(t, ast.Subscript) and self.gl_is(t.value)):
@@ -2308,6 +2340,12 @@ class Compiler(GList):
             self.fail(s, f'the {type(s).__name__} statement')
 
     def infer_target(self, target, t, s):
+        if isinstance(target, ast.Attribute) and self.rc_obj(target.value):
+            self.rc_store_type(target, t, s)
+            return
+        if isinstance(target, ast.Subscript) and self.rc_is(target.value):
+            self.rc_store_type(target, t, s)
+            return
         if isinstance(target, ast.Subscript) and self.gl_is(target.value):
             self.gl_store_type(target, t, s)
             return
@@ -2878,6 +2916,8 @@ class Compiler(GList):
                               'len() (no aliases, returns or other uses yet)')
                 return self.env[e.id]
             self.fail(e, f'uses the global or undefined name {e.id!r}')
+        if isinstance(e, ast.Attribute) and self.rc_obj(e.value):
+            return self.rc_subscript_type(e)
         if isinstance(e, ast.Attribute):
             if e.attr == 'T' and self.is_view(e):
                 return self.transpose_type(e)
@@ -2956,8 +2996,12 @@ class Compiler(GList):
             if not t.is_number and t.kind != 'enum':
                 self.fail(e, f'a conditional expression of type {t.name}')
             return t
+        if isinstance(e, ast.Subscript) and self.rc_is(e.value):
+            return self.rc_subscript_type(e)
         if isinstance(e, ast.Subscript) and self.gl_is(e.value):
             return self.gl_subscript_type(e)
+        if isinstance(e, ast.Dict):
+            return self.rc_dict_type(e)
         if isinstance(e, ast.Subscript):
             if self.is_shape(e.value):
                 if self.shape_index(e) is None:
@@ -3300,7 +3344,7 @@ class Compiler(GList):
                 self.fail(e, f'passes a list of lists to {e.func.id}()')
             if t.kind == 'object' and any(i is not None for i, _ in same_targets(t)):
                 self.fail(e, f'passes {e.func.id}() an object holding another argument\'s object')
-            if not (t.is_number or t.kind in ('array', 'enum') or (t.kind in ('object', 'same', 'elemref') and isinstance(x, SelfArg))
+            if not (t.is_number or t.kind in ('array', 'enum', 'glist') or (t.kind in ('object', 'same', 'elemref') and isinstance(x, SelfArg))
                     or (t.kind == 'poolref' and isinstance(x, RefArg))
                     or (t.kind == 'tuple' and T.is_number_tree(t) and all(et.np != 'dyn' for et in T.leaves(t)))):
                 self.fail(e, f'passes {t.name} to {e.func.id}()')
@@ -3327,6 +3371,16 @@ class Compiler(GList):
         c = self.compiled_callee(e)
         if c.makes and ret_arrays(c.ret):
             self.makes = True
+        if c.ret.kind == 'glist' or any(c.env[p].kind == 'glist' for p in c.params):
+            self.makes = True
+            nodes, picked = self.call_args(e, c.spec, self.callee_of(e))
+            for j, k in enumerate(picked):                  # what its appends taught it about a list given empty
+                x, p = nodes[k], c.params[j]
+                if c.env[p].kind == 'glist' and self.gl_is(x) and self.typeof(x) is not c.env[p]:
+                    u = unify_lists(self.typeof(x), c.env[p])
+                    if u is None:
+                        self.fail(e, f'{e.func.id}() makes its list {c.env[p].name}, and here it is {self.typeof(x).name}')
+                    self.gl_retype(x, u)
         if c.ret.kind == 'array':
             self.env[self.view_name(e)] = c.ret
         elif c.ret.kind == 'tuple':
@@ -3418,6 +3472,9 @@ class Compiler(GList):
         for j, me in mes.items():
             self.take_writes(e, me, c, io, j)
 
+        for t, v in chosen:                       # lists given to it: what it kept growing them is this function's now
+            if t.kind == 'glist':
+                self.gl_adopt_after_call(v[0], t)
         self.emit(f'if ({st}) {{ sj_tb[++sj_tb[0]] = ((int64_t){c.frame} << 32) | {io}[1]; sj_io[0] = {io}[0]; sj_io[4] = {io}[4]; '
                   f'SJ_FAIL({st}, {self.line(e)}, {io}[2], {io}[3]); }}')
         return c, io, arrays
@@ -3541,6 +3598,12 @@ class Compiler(GList):
 
     def call_number(self, e):
         c, io, _ = self.emit_call(e)
+        if c.ret.kind == 'glist':                  # a list it made: what it kept of it is this function's now
+            if self.tracks and has_arrays(c.ret):
+                self.fail(e, f'returns arrays it got in a list from {e.func.id}()')
+            v = self.hold_ptr(f'(sj_glist *)(uintptr_t){io}[0]')
+            self.gl_adopt_after_call(v, c.ret)
+            return v, '0'
         return self.number_result(c.ret, io, 0, 2)
 
     def number_result(self, r, io, at, flag_at):
@@ -4815,7 +4878,12 @@ class Compiler(GList):
             struct = list(struct.elem)           # a tuple element, unpacked
         if isinstance(target, ast.Name) and isinstance(struct, T.Type) and struct.kind == 'tuple':
             self.fail(e, 'a comprehension variable that is a tuple (unpack it: for a, b in ...)')
-        if isinstance(target, ast.Name) and not isinstance(struct, list):
+        if isinstance(target, ast.Name) and isinstance(struct, T.Type) and struct.kind == 'array' and target.id not in saved:
+            old = self.env.get(target.id)              # an array from a list: a variable of its own, as a loop's is
+            if old is not None and old is not struct:
+                self.fail(e, f'{target.id} is {old.name} elsewhere and {struct.name} in a comprehension')
+            self.env[target.id] = struct
+        elif isinstance(target, ast.Name) and not isinstance(struct, list):
             if target.id not in saved:
                 saved[target.id] = self.env.get(target.id)
             self.env[target.id] = struct
@@ -4928,6 +4996,11 @@ class Compiler(GList):
     def generate(self):
         if not self.inferred:
             self.infer_with_webs()
+        self.gl_params = [p for p in self.params if held(self.env[p])]
+        if self.gl_params:                       # a list passed in grows on the heap of compiled arrays
+            self.makes = True
+        if self.gl_any():
+            self.helpers.add('glist')
         if self.makes:
             for n in ast.walk(self.f):
                 if isinstance(n, (ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)) \
@@ -5011,6 +5084,8 @@ class Compiler(GList):
             if t.np == 'dyn' and not (name in self.params and self.came_as(name).np == 'dyn'):
                 self.emit(f'int v_{name}__np = {1 if name in self.params and self.came_as(name).np is True else 0};')
         self.emit('int sj_st = 0; int64_t sj_ln = 0, sj_x = 0, sj_y = 0;')
+        for p in self.gl_params:                 # the lists passed in, whatever their names come to hold: written back
+            self.emit(f'{self.env[p].ctype} v_{p}__orig = v_{p};')
         decl_at = len(self.lines)
         if self.counts:
             self.plan_counts(self.f.body)
@@ -5023,10 +5098,13 @@ class Compiler(GList):
                 [f'free(v_{n}__np);' for n, t in self.env.items() if t.kind == 'list' and t.elem.np == 'dyn' and n not in self.params] + \
                 [f'free({o});' for o, _ in self.owned]
         self.lines[decl_at:decl_at] = ['    ' + f'{ct} *{o} = NULL;' for o, ct in self.owned]
+        keep_passed = ' '.join(f'{self.gl_mark(self.env[p])}(&sj_h, v_{p}__orig, 2);' for p in self.gl_params)
         self.lines.append('sj_done:')
         self.save_outs()
         if frees:
             self.emit(' '.join(frees))
+        if keep_passed:
+            self.emit(keep_passed)
         if self.makes:
             self.emit('sj_free_blocks(&sj_h, 1);')
         self.emit('return 0;')
@@ -5034,8 +5112,10 @@ class Compiler(GList):
         self.save_outs()
         if frees:
             self.emit(' '.join(frees))
+        if keep_passed:                          # what it did to them before the error is the caller's to see
+            self.emit(keep_passed)
         if self.makes:
-            self.emit('sj_free_blocks(&sj_h, 0);')
+            self.emit(f'sj_free_blocks(&sj_h, {1 if keep_passed else 0});')
         self.emit('sj_io[1] = sj_ln; sj_io[2] = sj_x; sj_io[3] = sj_y;')
         self.emit('return sj_st;')
         if self.uses_libm:
@@ -5184,6 +5264,11 @@ class Compiler(GList):
             self.mark(s)
             self.gl_method(self.gl_extend_call(s))
             return
+        if isinstance(s, ast.AugAssign) and ((isinstance(s.target, ast.Subscript) and (self.rc_is(s.target.value) or self.gl_is(s.target.value)))
+                                             or (isinstance(s.target, ast.Attribute) and self.rc_obj(s.target.value))):
+            self.mark(s)
+            self.gl_augassign(s)
+            return
         if isinstance(s, ast.Expr) and not self.calls_out(s.value):     # a docstring, or a place to free arrays
             if isinstance(s.value, Safepoint):
                 self.emit('if (sj_h.since > sj_h.limit) { /*sj_marks*/ sj_sweep(&sj_h); }')
@@ -5195,9 +5280,22 @@ class Compiler(GList):
         if isinstance(s, ast.Expr):
             self.call_statement(s.value)
             return
-        if isinstance(s, ast.Assign) and self.is_list_ctor(s.value) and isinstance(s.targets[0], ast.Subscript):
+        if isinstance(s, ast.Assign) and self.rc_made_class(s.value) is not None and len(s.targets) == 1:
+            v = self.rc_make_obj(s.value, self.rc_made_class(s.value))
+            t0 = s.targets[0]
+            if isinstance(t0, ast.Name):
+                self.emit(f'v_{t0.id} = {v};')
+            elif isinstance(t0, (ast.Subscript, ast.Attribute)) and self.rc_is(t0.value):
+                self.rc_store(t0, (v, '0'), self.typeof(t0))
+            else:
+                self.gl_store(t0, (v, '0'), self.typeof(t0.value).elem)
+            return
+        if isinstance(s, ast.Assign) and self.is_list_ctor(s.value) and isinstance(s.targets[0], (ast.Subscript, ast.Attribute)):
             v = self.gl_make_value(s.value, self.gl_ctor_type(s.value))
-            self.gl_store(s.targets[0], (v, '0'), self.typeof(s.targets[0].value).elem)
+            if self.rc_is(s.targets[0].value):
+                self.rc_store(s.targets[0], (v, '0'), self.typeof(s.targets[0]))
+            else:
+                self.gl_store(s.targets[0], (v, '0'), self.typeof(s.targets[0].value).elem)
             return
         if isinstance(s, ast.Assign) and self.is_list_ctor(s.value) and self.env[s.targets[0].id].kind == 'glist':
             v = self.gl_make_value(s.value, self.env[s.targets[0].id])
@@ -5222,7 +5320,9 @@ class Compiler(GList):
                 return
             if vt.kind == 'array':
                 for target in targets:
-                    if isinstance(target, ast.Subscript) and self.gl_is(target.value):
+                    if isinstance(target, (ast.Subscript, ast.Attribute)) and self.rc_is(target.value):
+                        self.rc_store(target, (self.gl_value(s.value, self.typeof(target)), '0'), self.typeof(target))
+                    elif isinstance(target, ast.Subscript) and self.gl_is(target.value):
                         self.gl_store(target, (self.gl_value(s.value, self.typeof(target.value).elem), '0'), self.typeof(target.value).elem)
                     elif isinstance(target, ast.Subscript):
                         self.store_slice_array(target, self.materialize(s.value))
@@ -5234,6 +5334,8 @@ class Compiler(GList):
             for target in targets:
                 if isinstance(target, ast.Name):
                     self.assign(target.id, v, vt)
+                elif isinstance(target, (ast.Subscript, ast.Attribute)) and self.rc_is(target.value):
+                    self.rc_store(target, v, vt)
                 elif isinstance(target, ast.Subscript) and self.gl_is(target.value):
                     self.gl_store(target, v, vt)
                 elif self.typeof(target).kind == 'array':
@@ -5301,12 +5403,12 @@ class Compiler(GList):
                 for b in s.orelse:
                     self.stmt(b)
                 self.close()
-        elif isinstance(s, ast.Return) and self.ret.kind == 'glist':
+        elif isinstance(s, ast.Return) and held(self.ret):
             self.gl_return(s.value)
             self.emit('goto sj_done;')
-        elif isinstance(s, ast.Return) and self.ret.kind == 'tuple' and any(t.kind == 'glist' for t in self.ret.elem):
+        elif isinstance(s, ast.Return) and self.ret.kind == 'tuple' and any(held(t) for t in self.ret.elem):
             for i, (x, rt) in enumerate(zip(s.value.elts, self.ret.elem)):
-                if rt.kind == 'glist':
+                if held(rt):
                     self.gl_return(x, slot=4 + 2 * i)
                 else:
                     c, f = self.expr(x)
@@ -6233,7 +6335,7 @@ class Compiler(GList):
         first, in order, as Python builds the index before numpy looks at it."""
         if isinstance(e, ast.Name):
             return e.id
-        if isinstance(e, ast.Subscript) and self.gl_is(e.value):
+        if isinstance(e, (ast.Subscript, ast.Attribute)) and (self.gl_is(e.value) or self.rc_is(e.value)):
             return self.gl_materialize(e)
         if self.callee_of(e) is not None:
             return self.call_array(e)
@@ -6612,7 +6714,7 @@ class Compiler(GList):
             def held(vals, ts):
                 return [held(v, et.elem) if et.kind == 'tuple' else (self.hold(v[0], et), self.hold_flag(v[1])) for v, et in zip(vals, ts)]
             return held(self.tuple_var(e.id), t.elem)
-        if (isinstance(e, ast.Subscript) and self.gl_is(e.value)) or (isinstance(e, ast.Call) and receiver(e) and self.gl_is(receiver(e)[0])):
+        if (isinstance(e, (ast.Subscript, ast.Attribute)) and (self.gl_is(e.value) or self.rc_is(e.value))) or (isinstance(e, ast.Call) and receiver(e) and self.gl_is(receiver(e)[0])):
             return self.gl_texpr(e)
         if isinstance(e, ast.Subscript) and self.tuple_typed(e.value):
             return self.texpr(e.value)[self.tuple_index(e)]
@@ -6687,6 +6789,8 @@ class Compiler(GList):
         return v
 
     def expr_now(self, e):
+        if isinstance(e, ast.Attribute) and self.rc_obj(e.value):     # an attribute of an instance held in a list
+            return self.rc_read(e)
         if self.callee_of(e) is not None:
             return self.call_number(e)
         if self.c_function_of(e) is not None:
@@ -6776,8 +6880,12 @@ class Compiler(GList):
             if isinstance(e.value, ast.Name):
                 return self.tuple_var(e.value.id)[self.tuple_index(e)]
             return self.texpr(e.value)[self.tuple_index(e)]
+        if isinstance(e, (ast.Subscript, ast.Attribute)) and self.rc_is(e.value) and not isinstance(e.value, ast.Dict):
+            return self.rc_read(e)
         if isinstance(e, ast.Subscript) and self.gl_is(e.value):
             return self.gl_read(e)
+        if isinstance(e, ast.Dict):
+            return self.rc_make(e), '0'
         if isinstance(e, ast.Subscript):
             e = self.named(e)
             name = e.value.id
@@ -7180,7 +7288,10 @@ class Compiler(GList):
 
     def comp_bind_values(self, target, v, saved, saved_c):
         if isinstance(v, ArrayOf):
-            raise Unsupported(target, 'a comprehension over a list of arrays (a for loop compiles)')
+            rec = self.temp()
+            self.emit(f'{self.gl_record(v.t.ndim)} {rec} = {v.record};')
+            self.gl_bind_array(target.id, rec)
+            return
         if isinstance(v, TupleOf):
             v = [TupleOf(val, et) if et.kind == 'tuple' else (val[0], et, val[1]) for val, et in zip(v.vals, v.t.elem)]
         if isinstance(target, ast.Name):

@@ -384,3 +384,250 @@ def test_arrays_in_lists_are_freed():
     before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     assert f(20_000) == churn_arrays(20_000)               # 200,000 arrays of 800 bytes: 160 MB if nothing were freed
     assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before < 60_000
+
+
+# ---- passed in, written back (on errors too), shared and returned as themselves
+import copy                                                       # noqa: E402
+from dataclasses import dataclass                                 # noqa: E402
+
+
+def deep_equal(a, b):
+    if isinstance(a, np.ndarray):
+        return isinstance(b, np.ndarray) and a.dtype == b.dtype and a.tobytes() == b.tobytes()
+    if isinstance(a, dict):
+        return type(b) is dict and list(a) == list(b) and all(deep_equal(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)):
+        return type(a) is type(b) and len(a) == len(b) and all(deep_equal(x, y) for x, y in zip(a, b))
+    if hasattr(a, '__dict__') and not isinstance(a, type):
+        return type(a) is type(b) and deep_equal(vars(a), vars(b))
+    return a == b and type(a) is type(b)
+
+
+def same_passed(f, *args):
+    """f compiled changes its arguments as Python's f does, and returns or raises the same."""
+    py_args = copy.deepcopy(args)
+    try:
+        want, werr = f(*py_args), None
+    except Exception as e:                                        # noqa: BLE001
+        want, werr = None, e
+    try:
+        got, gerr = scram(f, fallback=False, cache=False)(*args), None
+    except Exception as e:                                        # noqa: BLE001
+        got, gerr = None, e
+    assert type(werr) is type(gerr) and str(werr) == str(gerr), (werr, gerr)
+    assert deep_equal(list(py_args), list(args)), (py_args, args)
+    assert deep_equal(want, got), (want, got)
+    return got
+
+
+def fill(out, n):
+    for i in range(n):
+        out.append(i * 0.5)
+
+
+def grow_ragged(rows):
+    s = 0
+    for r in rows:
+        for v in r:
+            s += v
+    rows[0].append(s)
+    rows.append([len(rows)])
+    return s
+
+
+def write_shared(rows):
+    rows[0][0] = 9
+    return rows[1][0]
+
+
+def grow_arrays(parts):
+    parts.append(parts[0] * 2.0)
+    parts[1][0] = -1.0
+    return len(parts)
+
+
+def fail_midway(out, n):
+    for i in range(n):
+        out.append(i)
+    return out[n + 5]
+
+
+def give_back(out):
+    out.append(3)
+    return out
+
+
+def grow_tuples(ps):
+    s = 0.0
+    for a, b in ps:
+        s += a * b
+    ps.append((1, s))
+    return s
+
+
+def test_lists_passed_in():
+    same_passed(fill, [], 5)
+    same_passed(fill, [1.5], 3)
+    same_passed(grow_ragged, [[1, 2], [3], []])
+    r = [1, 2]
+    rows = [r, r]
+    same_passed(write_shared, rows)
+    assert rows[0] is rows[1]
+    same_passed(grow_arrays, [np.arange(3.0), np.zeros(2)])
+    same_passed(fail_midway, [], 3)                         # IndexError, after the appends Python made
+    x = []
+    assert scram(give_back, fallback=False, cache=False)(x) is x and x == [3]
+    same_passed(grow_tuples, [(1, 2.0), (3, 4.0)])
+
+
+@scram
+def evens_of(n):
+    out = []
+    for i in range(n):
+        if i % 2 == 0:
+            out.append(i)
+    return out
+
+
+@scram
+def fill_doubles(out, n):
+    for i in range(n):
+        out.append(i * 2)
+
+
+@scram
+def calls_them(n):
+    a = evens_of(n)
+    b = []
+    fill_doubles(b, 3)
+    s = 0
+    for v in a:
+        s += v
+    big = 0
+    for _ in range(200):                                    # sweeps while it holds what they made
+        big += len(evens_of(1000))
+    return a, b, s, big
+
+
+def test_calls_between_compiled_functions():
+    assert calls_them(10) == calls_them.__wrapped__(10)
+    assert calls_them.signatures
+
+
+def array_sums(parts):
+    return [p.sum() for p in parts]
+
+
+def test_comprehension_over_arrays():
+    got = same_passed(array_sums, [np.arange(3.0), np.ones(4)])
+    assert all(type(v) is np.float64 for v in got)
+
+
+def make_records(n):
+    out = []
+    for i in range(n):
+        out.append({'i': i, 'sq': i * i * 0.5})
+    out[0]['sq'] = -1.0
+    r = out[1]
+    r['i'] = 100
+    s = 0.0
+    for rec in out:
+        s += rec['sq']
+    return out, s
+
+
+def dict_of_list(n):
+    d = {'xs': [], 'n': 0}
+    for i in range(n):
+        d['xs'].append(i)
+        d['n'] += 1
+    return d
+
+
+def groups_of(n):
+    groups = []
+    for g in range(n):
+        groups.append({'id': g, 'members': [], 'pos': np.zeros(2)})
+        for k in range(g):
+            groups[g]['members'].append((k, k * 1.5))
+        groups[g]['pos'][0] = g
+    return groups
+
+
+def bump_records(rows):
+    for r in rows:
+        r['n'] += 1
+        r['hist'].append(r['n'] * 0.5)
+    rows.append({'n': 0, 'hist': []})
+
+
+def into_dict(d, k):
+    for i in range(k):
+        d['items'].append(i)
+    d['count'] = len(d['items'])
+    return d['count']
+
+
+def test_dicts():
+    same_passed(make_records, 4)
+    same_passed(dict_of_list, 5)
+    same_passed(groups_of, 3)
+    rows = [{'n': 1, 'hist': [0.5]}, {'n': 5, 'hist': []}]
+    inner, first = rows[0]['hist'], rows[0]
+    same_passed(bump_records, rows)
+    assert rows[0] is first and rows[0]['hist'] is inner
+    same_passed(into_dict, {'items': [], 'count': 0}, 4)
+
+
+@dataclass
+class Pt:
+    x: float
+    y: float
+    hits: int = 0
+
+
+class Bin:
+    def __init__(self, lo, hi):
+        self.lo = lo
+        self.hi = hi
+        self.items = []
+
+
+def spawn(n):
+    out = []
+    for i in range(n):
+        out.append(Pt(i * 0.5, i * 2.0))
+    out[0].hits += 3
+    q = out[1]
+    q.x = -1.0
+    s = 0.0
+    for p in out:
+        s += p.x + p.y
+    return out, s
+
+
+def bins(n):
+    bs = []
+    for i in range(n):
+        b = Bin(i, i + 1)
+        for k in range(i):
+            b.items.append(k)
+        bs.append(b)
+    return bs
+
+
+def move(ps, dx):
+    for p in ps:
+        p.x += dx
+        p.hits += 1
+    ps.append(Pt(0.0, 0.0))
+
+
+def test_instances():
+    got = same_passed(spawn, 4)
+    assert type(got[0][0]) is Pt
+    same_passed(bins, 3)
+    ps = [Pt(1.0, 2.0), Pt(3.0, 4.0)]
+    first = ps[0]
+    same_passed(move, ps, 0.5)
+    assert ps[0] is first

@@ -1792,7 +1792,7 @@ def _copy_back(lst, a, et, before):
 
 
 class Compiled:
-    __slots__ = ('kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun', 'outs', 'lists',
+    __slots__ = ('gl_types', 'kernel', 'ret', 'types', 'source', 'libm', 'locals', 'checks', 'hoisted', 'gotchas', 'stop', 'rerun', 'outs', 'lists',
                  'counts', 'count_lines', 'count_heads', 'count_rest', 'array_args', 'records', 'io_size', 'free', 'frames', 'columns', 'instance_ret', 'tb_at')
 
     def __init__(self, kernel, ret, types_, source, libm, locals_=None, checks=None, hoisted=(), gotchas=None, stop=False, rerun=False):
@@ -1985,7 +1985,7 @@ def _make_plan(f, entry, args):
     dtype, dimension or layout, an empty one) goes to f._slow, so plans change only speed."""
     if any(t.kind == 'pool' for t in entry.types) and entry.counts is None:
         return _pooled_plan(f, entry, args)
-    if entry.counts is not None or entry.ret.kind in ('list', 'glist') or (entry.ret.kind == 'tuple' and any(t.kind == 'glist' for t in entry.ret.elem)) or entry.instance_ret or any(t.kind in ('pool', 'ref') for t in entry.types):
+    if any(t.kind in ('glist', 'record') for t in entry.types) or entry.counts is not None or entry.ret.kind in ('list', 'glist', 'record') or (entry.ret.kind == 'tuple' and any(t.kind in ('glist', 'record') for t in entry.ret.elem)) or entry.instance_ret or any(t.kind in ('pool', 'ref') for t in entry.types):
         return f._slow_call
     env = {'kernel': entry.kernel, 'slow': f._slow, 'failed': f._failed, 'box': f._box, 'ret': entry.ret, 'pool': [], 'compiled': entry,
            'addressof': ctypes.addressof, 'from_buffer': ctypes.c_char.from_buffer, 'bytearray': bytearray, 'memoryview': memoryview}
@@ -2153,12 +2153,13 @@ def _make_plan(f, entry, args):
 class _Marshalled:
     """The C arguments of a call, and what the kernel may have written that goes back into the Python objects after it."""
     __slots__ = ('cargs', 'columns', 'refcols', 'copies', 'by_cls', 'where', 'made_k', 'room', 'pool_t', '_pool_cargs', '_pool_columns',
-                 'before')
+                 'before', 'gl')
 
     def __init__(self):
         self.cargs, self.columns, self.refcols, self.copies = [], [], [], []
         self.by_cls, self.where, self.made_k, self.room, self.pool_t = {}, None, {}, None, None
         self.before = {}          # id of a list the kernel may write -> its values as copied in (_snapshot)
+        self.gl = None            # lists held by reference (_GLBuild), built for the call and written back after it
 
 
 def _pack_pool(m, i, x, t, args):
@@ -2218,7 +2219,18 @@ def _pack_pylist(m, i, x, t, args):
         level = level[0]
 
 
-_PACKERS = {'pool': _pack_pool, 'reflist': _pack_reflist, 'inlist': _pack_inlist, 'objlist': _pack_objlist, 'list': _pack_list}
+def _pack_glist(m, i, x, t, args):
+    """A list held by reference (_glist): its header and elements built in memory Python owns, one header per list
+    object, so a list in two places is one list; written back after the call."""
+    if m.gl is None:
+        m.gl = _GLBuild()
+    h = m.gl.build(x, t) if t.kind == 'glist' else m.gl.build_record(x, t)
+    m.gl.top.append((i, h))
+    m.cargs.append(h)
+
+
+_PACKERS = {'pool': _pack_pool, 'reflist': _pack_reflist, 'inlist': _pack_inlist, 'objlist': _pack_objlist, 'list': _pack_list,
+            'glist': _pack_glist, 'record': _pack_glist}
 
 
 def _marshal(entry, args, room=None, prebuilt=None):
@@ -2262,6 +2274,8 @@ def _snapshot(entry, m):
 def _write_back(entry, m, args):
     """What the kernel wrote that Python would have, even before an exception: attributes' lists into their objects (the
     values that didn't change keep their identity), references as the objects at their indexes, lists copied back."""
+    if m.gl is not None:
+        m.gl.write_back(entry, args)
     before = m.before
     for i, key, a, ft, held, last in m.columns:
         if (i, key) in entry.columns:
@@ -2340,6 +2354,7 @@ class Function:
         self._cache = {}
         self._use_disk = cache
         self._plans = {}          # the arguments' Python types -> a function that makes the call (see _make_plan)
+        self._gl_held = None      # positions of the arguments a list passed in must be held by reference for (_glist_key)
         self._compile_s = {}      # signature -> seconds spent compiling it
         self._why = {}            # signature -> (line, reason) it runs as Python
         self._stats = {}          # signature -> [calls, native seconds, Python seconds], under preflight --run
@@ -2812,6 +2827,7 @@ class Function:
             entry.tb_at = entry.io_size
             entry.io_size += 8 * (1 + len(c.unit.frames))
         entry.free = getattr(module, 'sj_release', None) if c.makes or c.ret.kind == 'list' else None
+        entry.gl_types = {i: c.env[p] for i, p in enumerate(c.params) if c.env[p].kind in ('glist', 'record')}   # as appends made them
         if counts:
             entry.counts = bytearray(8 * max(len(c.count_lines), 1))
             entry.count_lines, entry.count_heads, entry.count_rest = c.count_lines, c.count_heads, c.count_rest
@@ -2820,12 +2836,14 @@ class Function:
     def _key(self, args):
         """The signature of a call. A dict's type is the keys this function uses: nothing else in it matters."""
         key = tuple(map(_arg_type, args))
+        if any(type(x) is list for x in args):
+            key = self._glist_key(args, key)
         lists = [id(y) for x in args if type(x) is list for y in [x] + [r for r in x if type(r) is list]]
         if len(set(lists)) != len(lists):        # one list under two names: one copy, the second name the first's
             first, rows = {}, [id(r) for x in args if type(x) is list for r in x if type(r) is list]
             out = list(key)
             for i, x in enumerate(args):
-                if type(x) is not list:
+                if type(x) is not list or (out[i] is not None and out[i].kind == 'glist'):   # held by reference: shared as it is
                     continue
                 if len(set(rows)) != len(rows) or id(x) in rows or (out[i] is not None and T.is_pylist(out[i])):
                     out[i] = None                # a row in two places, or a list that's a row too: not yet
@@ -2930,6 +2948,13 @@ class Function:
                 out[i] = _objlist_type(x, (sorted(uses[0]),) + tuple(uses[1:]), seen, dict in map(type, args), nested)
         for q, (k, _) in joined.items():
             out[q] = T.inlist_of(k) if out[k] is not None and out[k].kind == 'objlist' else None
+        for i, x in enumerate(args):                 # a dict holding lists, or held by reference: a record (_glist)
+            if type(x) is dict and (i in (self._gl_held or ()) or (out[i] is None and any(
+                    type(v) in (list, dict) or hasattr(v, '__array_interface__') for v in x.values()))) \
+                    and not any(getattr(a, '__dict__', None) is x for a in args):   # an object's own dict stays with it
+                t = _glist_elem_type(x, 0)
+                if t is not None and t.kind == 'record':
+                    out[i] = t
         return tuple(out)
 
     @staticmethod
@@ -2988,10 +3013,10 @@ class Function:
             return build(cls, attrs)
         if r is T.NONE:
             return None
-        if r.kind == 'glist':
-            return self._glist_result(entry, io, args)
-        if r.kind == 'tuple' and any(t.kind == 'glist' for t in r.elem):
-            return self._glist_tuple(entry, io, r, args)
+        if r.kind in ('glist', 'record'):
+            return self._glist_result(entry, io, args, m.gl)
+        if r.kind == 'tuple' and any(t.kind in ('glist', 'record') for t in r.elem):
+            return self._glist_tuple(entry, io, r, args, m.gl)
         if entry.records:
             return self._array_result(entry, io, args)
         if r.kind == 'tuple':
@@ -3049,30 +3074,55 @@ class Function:
             if k in new:
                 refcols[idx] = (i, slot, a, held[:new[k][0]], last, targets)
 
-    def _glist_result(self, entry, io, args):
-        """A returned list held by reference (_glist): read into Python lists, one list object per header so a list in two
-        places is one list in two places, then every block it used released."""
-        blocks = []
-        try:
-            return _read_glist(struct.unpack_from('<q', io, 0)[0], entry.ret, {}, blocks, self._array_reader(entry, args))
-        finally:
-            for b in set(blocks):
-                entry.free(b)
+    def _glist_key(self, args, key):
+        """Lists held by reference (_glist): those the other kinds can't hold (ragged, deeper, of tuples or arrays,
+        empty), those this function grows or gives another name, and lists shared between arguments."""
+        if self._gl_held is None:
+            from ._glist import held_names
+            code = self._fn.__code__
+            names = held_names(self._tree) if self._tree is not None else set()
+            self._gl_held = {i for i, n in enumerate(code.co_varnames[:code.co_argcount]) if n in names}
+        ids = collections.Counter()
+        for x in args:
+            if type(x) is list:
+                _count_lists(x, ids)
+        shared = {k for k, c in ids.items() if c > 1}
+        out = list(key)
+        for i, x in enumerate(args):
+            if type(x) is not list:
+                continue
+            if out[i] is None or i in self._gl_held or (shared and _reaches(x, shared)):
+                if i not in self._gl_held and x and _is_instance(x[0]) and not (shared and _reaches(x, shared)):
+                    continue                     # a list of instances: the object path (no need to look at them all)
+                t = _glist_arg_type(x)
+                if t is not None and (i in self._gl_held or not _has_instances(t)):   # instances: the object path, unless grown
+                    out[i] = t
+        return tuple(out)
 
-    def _glist_tuple(self, entry, io, r, args):
+    def _glist_result(self, entry, io, args, gl=None):
+        """A returned list held by reference (_glist): read into Python lists, one list object per header so a list in two
+        places is one list in two places (and a list passed in is itself), then every block it used released."""
+        blocks = []
+        gl = gl or _GLBuild()
+        try:
+            return _read_held(struct.unpack_from('<q', io, 0)[0], entry.ret, getattr(gl, 'memo', {}), blocks, _array_reader_for(entry, args, gl))
+        finally:
+            gl.release(entry, blocks)
+
+    def _glist_tuple(self, entry, io, r, args, gl=None):
         """A returned tuple holding lists: each read as _glist_result reads one, sharing kept across them."""
-        blocks, memo, out = [], {}, []
-        reader = self._array_reader(entry, args)
+        gl = gl or _GLBuild()
+        blocks, memo, out = [], getattr(gl, 'memo', {}), []
+        reader = _array_reader_for(entry, args, gl)
         try:
             for i, et in enumerate(r.elem):
-                if et.kind == 'glist':
-                    out.append(_read_glist(struct.unpack_from('<q', io, 32 + 16 * i)[0], et, memo, blocks, reader))
+                if et.kind in ('glist', 'record'):
+                    out.append(_read_held(struct.unpack_from('<q', io, 32 + 16 * i)[0], et, memo, blocks, reader))
                 else:
                     out.append(self._box(io, 32 + 16 * i, 40 + 16 * i, et))
             return tuple(out)
         finally:
-            for b in set(blocks):
-                entry.free(b)
+            gl.release(entry, blocks)
 
     def _array_reader(self, entry, args):
         """For arrays in a returned list: record values -> the numpy array, as _arrays makes one (a copy of what the kernel
@@ -3199,6 +3249,7 @@ class Function:
 
 
 _GL_CTYPES = None
+SJ_BLOCK = 72          # sizeof(sj_block) (_mathlib's np_make), native and on wasm32
 _GL_CODES = {'int64_t': 'q', 'double': 'd', 'int': 'i', 'float': 'f', 'int32_t': 'i', 'int16_t': 'h', 'int8_t': 'b',
              'uint64_t': 'Q', 'uint32_t': 'I', 'uint16_t': 'H', 'uint8_t': 'B'}
 
@@ -3221,6 +3272,12 @@ def _gl_leaf(t):
 
 
 def _gl_struct(t):
+    if ('t', t) not in _GL_STRUCTS:
+        _GL_STRUCTS['t', t] = _gl_struct_new(t)
+    return _GL_STRUCTS['t', t]
+
+
+def _gl_struct_new(t):
     import ctypes
     fields = []
 
@@ -3237,28 +3294,107 @@ def _numpy():
     return numpy
 
 
-def _read_glist(addr, t, memo, blocks, arrays=None):
-    """The Python list for the header at addr, of list type t; the blocks it used go in blocks. arrays: reads an array
-    element's record (_array_reader)."""
+def _read_held(addr, t, memo, blocks, arrays=None):
+    """A list or a dict the kernel holds by reference, as a Python object (None for a null pointer)."""
+    if not addr:
+        return None
+    return _read_glist(addr, t, memo, blocks, arrays) if t.kind == 'glist' else _read_record(addr, t, memo, blocks, arrays)
+
+
+_GL_STRUCTS = {}
+
+
+def _rc_struct(t):
+    """ctypes for a dict's C struct (_glist's rc_struct): a field per key. One class per type."""
+    if ('r', t) in _GL_STRUCTS:
+        return _GL_STRUCTS['r', t]
+    _GL_STRUCTS['r', t] = cls = _rc_struct_new(t)
+    return cls
+
+
+def _rc_struct_new(t):
     import ctypes
+    fields = []
+    for k, (_, x) in enumerate(t.elem):
+        if x.kind in ('glist', 'record'):
+            ct = ctypes.c_void_p
+        elif x.kind == 'array':
+            ct = ctypes.c_int64 * (10 + 2 * x.ndim)
+        elif x.kind == 'tuple':
+            ct = _gl_struct(x)[0]
+        elif x is T.PENDING:
+            ct = ctypes.c_int64
+        else:
+            ct = _gl_leaf(x)[0]
+        fields.append((f'f{k}', ct))
+    return type('sjR', (ctypes.Structure,), {'_fields_': fields})
+
+
+def _gl_value(v, x, memo, blocks, arrays):
+    """A C field or element of type x (as ctypes gives it) as a Python value."""
+    if x.kind in ('glist', 'record'):
+        return _read_held(v, x, memo, blocks, arrays)
+    if x.kind == 'array':
+        value = ('array',) + tuple(v)
+        if value not in memo:
+            memo[value] = arrays(value[1:], x, blocks)
+        return memo[value]
+    if x.kind == 'tuple':
+        _, fields = _gl_struct(x)
+        vals = iter([_gl_leaf(f)[1](getattr(v, f'f{k}')) for k, f in enumerate(fields)])
+
+        def build(tt):
+            return tuple(build(y) if y.kind == 'tuple' else next(vals) for y in tt.elem)
+        return build(x)
+    return _gl_leaf(x)[1](v)
+
+
+def _read_record(addr, t, memo, blocks, arrays=None):
+    """The Python dict for the record at addr: one dict per record, so a dict in two places is one dict."""
     if addr in memo:
         return memo[addr]
+    out = {} if t.cls is None else t.cls.__new__(t.cls)      # an instance: made as its class makes them, then filled
+    memo[addr] = out
+    blocks.append(addr - SJ_BLOCK)
+    rec = _rc_struct(t).from_address(addr)
+    for k, (key, x) in enumerate(t.elem):
+        v = _gl_value(getattr(rec, f'f{k}'), x, memo, blocks, arrays)
+        if t.cls is None:
+            out[key] = v
+        else:
+            object.__setattr__(out, key, v)
+    return out
+
+
+def _read_glist(addr, t, memo, blocks, arrays=None):
+    """The Python list for the header at addr, of list type t; the blocks it used go in blocks. arrays: reads an array
+    element's record (_array_reader). One list object per header: memo."""
+    if addr in memo:
+        return memo[addr]
+    out = []
+    memo[addr] = out
+    out.extend(_read_glist_values(addr, t, memo, blocks, arrays))
+    return out
+
+
+def _read_glist_values(addr, t, memo, blocks, arrays=None):
+    """The elements of the list whose header is at addr, as Python values."""
+    import ctypes
     ptr = ctypes.sizeof(ctypes.c_void_p)
     raw = ctypes.string_at(addr, 32)
     p = int.from_bytes(raw[:ptr], 'little')
     n, _cap = struct.unpack_from('<qq', raw, 8)
     db = int.from_bytes(raw[24:24 + ptr], 'little')
-    blocks.append(addr - 64)                          # its header's block: sizeof(sj_block) before it
+    blocks.append(addr - SJ_BLOCK)                    # its header's block: sizeof(sj_block) before it
     if db:
         blocks.append(db)
     out = []
-    memo[addr] = out
     et = t.elem
     if not n:
         return out
-    if et.kind == 'glist':
+    if et.kind in ('glist', 'record'):
         ptrs = (ctypes.c_void_p * n).from_address(p)
-        out.extend(_read_glist(x, et, memo, blocks, arrays) for x in ptrs)
+        out.extend(_read_held(x, et, memo, blocks, arrays) for x in ptrs)
     elif et.kind == 'array':
         width = 10 + 2 * et.ndim
         recs = (ctypes.c_int64 * (width * n)).from_address(p)
@@ -3291,3 +3427,327 @@ def _read_glist(addr, t, memo, blocks, arrays=None):
         vals = memoryview((ctypes.c_char * (ctypes.sizeof(ct) * n)).from_address(p)).cast('B').cast(_GL_CODES[et.ctype]).tolist()
         out.extend(map(make, vals) if (et.np is True or et.kind == 'bool') else vals)
     return out
+
+
+def _is_instance(v):
+    """An object of a class of the user's (what a record with a class holds)."""
+    t = type(v)
+    return t not in (int, float, bool, tuple, list, dict, str, bytes) and hasattr(v, '__dict__') and t.__module__ != 'builtins' \
+        and not hasattr(v, '__array_interface__') and not callable(v)
+
+
+def _has_instances(t):
+    """Does a list or dict type hold instances (records with a class), at any depth?"""
+    if t.kind == 'record':
+        return t.cls is not None or any(_has_instances(x) for _, x in t.elem)
+    if t.kind == 'glist':
+        return _has_instances(t.elem)
+    return False
+
+
+def _count_lists(x, ids, depth=0):
+    """How often each list object is reached, through lists, from the arguments."""
+    ids[id(x)] += 1
+    if ids[id(x)] == 1 and depth < 64:
+        for v in x:
+            if type(v) is list:
+                _count_lists(v, ids, depth + 1)
+
+
+def _reaches(x, targets, depth=0):
+    if id(x) in targets:
+        return True
+    return depth < 64 and any(type(v) is list and _reaches(v, targets, depth + 1) for v in x)
+
+
+def _glist_arg_type(x, depth=0):
+    """The type of a list passed in, held by reference: list[T] with T what every element is, or None."""
+    from ._glist import unify
+    if depth > 32:
+        return None
+    et = T.PENDING
+    for v in x:
+        vt = _glist_elem_type(v, depth)
+        if vt is None:
+            return None
+        u = unify(et, vt)
+        if u is None:
+            return None
+        et = u
+    return T.glist_of(et)
+
+
+def _glist_elem_type(v, depth):
+    t = type(v)
+    if t is list:
+        return _glist_arg_type(v, depth + 1)
+    if t is not dict and t not in (int, float, bool, tuple, str, bytes) and not hasattr(v, '__array_interface__') \
+            and not isinstance(v, enum.Enum) and hasattr(v, '__dict__') and type(v).__module__ != 'builtins' and not callable(v):
+        attrs = vars(v)                               # an instance: its attributes, as a record with its class
+        if depth > 32 or not attrs:
+            return None
+        fields = []
+        for k, x in attrs.items():
+            xt = _glist_elem_type(x, depth + 1)
+            if xt is None:
+                return None
+            fields.append((k, xt))
+        return T.record_of(fields, t)
+    if t is dict:                                     # a record: string keys, each value one of these
+        if depth > 32 or not v or not all(type(k) is str for k in v):
+            return None
+        fields = []
+        for k, x in v.items():
+            xt = _glist_elem_type(x, depth + 1)
+            if xt is None:
+                return None
+            fields.append((k, xt))
+        return T.record_of(fields)
+    a = _arg_type(v)
+    if a is None or a is T.U64 or a.np == 'dyn':
+        return None
+    if a.is_number or (a.kind == 'tuple' and all(x.is_number and x is not T.U64 for x in T.leaves(a))):
+        return a
+    if a.kind == 'array' and not T.is_pylist(a):
+        return a
+    return None
+
+
+class _GLBuild:
+    """Lists passed in, built as _glist's headers in memory Python owns (each with room for an sj_block before it, which
+    the kernel's marking writes), and what they became, written back."""
+
+    def __init__(self):
+        import ctypes
+        self.ctypes = ctypes
+        self.keep = []            # the buffers, alive for the call
+        self.headers = {}         # id(list) -> its header's address
+        self.objs = {}            # header address -> the list
+        self.types = {}           # header address -> its type
+        self.own = set()          # block addresses Python owns: never freed through the kernel
+        self.arrays = {}          # an array's record values -> the array
+        self.done = set()         # blocks already released
+        self.top = []             # (argument index, header) of each list passed in
+
+    def buffer(self, size):
+        b = (self.ctypes.c_char * (SJ_BLOCK + max(size, 8)))()
+        self.keep.append(b)
+        a = self.ctypes.addressof(b)
+        self.own.add(a)
+        return a + SJ_BLOCK
+
+    def build_record(self, x, t):
+        """A dict passed in, as its record: a struct of its values in key order."""
+        if id(x) in self.headers:
+            return self.headers[id(x)]
+        cls = _rc_struct(t)
+        h = self.buffer(self.ctypes.sizeof(cls))
+        self.headers[id(x)] = h
+        self.objs[h] = x
+        self.types[h] = t
+        rec = cls.from_address(h)
+        for k, (key, ft) in enumerate(t.elem):
+            setattr(rec, f'f{k}', self.field(x[key] if t.cls is None else getattr(x, key), ft))
+        return h
+
+    def field(self, v, ft):
+        """What a value of type ft is in C, for a struct's field."""
+        if ft.kind == 'glist':
+            return self.build(v, ft)
+        if ft.kind == 'record':
+            return self.build_record(v, ft)
+        if ft.kind == 'array':
+            rec = [v.__array_interface__['data'][0], -1, 0, 0, 0, 0, 0, 0, 0, 0]
+            for k in range(ft.ndim):
+                rec += [v.shape[k], v.strides[k] // v.itemsize]
+            self.arrays[tuple(rec)] = v
+            return (self.ctypes.c_int64 * len(rec))(*rec)
+        if ft.kind == 'tuple':
+            cls, _ = _gl_struct(ft)
+            flat = []
+
+            def walk(y):
+                for z in y:
+                    walk(z) if type(z) is tuple else flat.append(z)
+            walk(v)
+            return cls(*flat)
+        if ft is T.PENDING:
+            return 0
+        return v.item() if ft.np is True else v
+
+    def build(self, x, t):
+        if id(x) in self.headers:
+            return self.headers[id(x)]
+        ctypes = self.ctypes
+        h = self.buffer(32)
+        self.headers[id(x)] = h
+        self.objs[h] = x
+        self.types[h] = t
+        et = t.elem
+        n = len(x)
+        if et.kind in ('glist', 'record'):
+            esize = ctypes.sizeof(ctypes.c_void_p)
+        elif et.kind == 'array':
+            esize = 8 * (10 + 2 * et.ndim)
+        elif et.kind == 'tuple':
+            esize = ctypes.sizeof(_gl_struct(et)[0])
+        elif et is T.PENDING:
+            esize = 8
+        else:
+            esize = ctypes.sizeof(_gl_leaf(et)[0])
+        d = self.buffer(esize * n)
+        if n:
+            if et.kind == 'glist':
+                (ctypes.c_void_p * n).from_address(d)[:] = [self.build(v, et) for v in x]
+            elif et.kind == 'record':
+                (ctypes.c_void_p * n).from_address(d)[:] = [self.build_record(v, et) for v in x]
+            elif et.kind == 'array':
+                recs = (ctypes.c_int64 * ((10 + 2 * et.ndim) * n)).from_address(d)
+                at = 0
+                for v in x:
+                    info = v.__array_interface__
+                    address = info['data'][0]
+                    strides = v.strides
+                    rec = [address, -1, 0, 0, 0, 0, 0, 0, 0, 0]
+                    for k in range(et.ndim):
+                        rec += [v.shape[k], strides[k] // v.itemsize]
+                    recs[at:at + len(rec)] = rec
+                    at += len(rec)
+                    self.arrays[tuple(rec)] = v
+            elif et.kind == 'tuple':
+                cls, fields = _gl_struct(et)
+                arr = (cls * n).from_address(d)
+                for k, v in enumerate(x):
+                    flat = []
+
+                    def walk(y):
+                        for z in y:
+                            walk(z) if type(z) is tuple else flat.append(z)
+                    walk(v)
+                    arr[k] = cls(*flat)
+            elif et is not T.PENDING:
+                ct, _ = _gl_leaf(et)
+                vals = [v.item() for v in x] if et.np is True else x
+                (ct * n).from_address(d)[:] = vals
+        struct.pack_into('<qqqq', (ctypes.c_char * 32).from_address(h), 0, d, n, n, d - SJ_BLOCK)
+        return h
+
+    def write_back(self, entry, args):
+        """Each list passed in, as the kernel left it: elements that didn't change stay the very objects they were."""
+        reader = None
+        memo = dict(self.objs)
+        blocks = []
+        news = {}
+        refined = getattr(entry, 'gl_types', None) or {}
+
+        def retype(h, t, seen):                  # what appends taught the kernel about lists that came empty
+            if h in seen or h not in self.objs:
+                return
+            seen.add(h)
+            self.types[h] = t
+            if t.kind == 'record':
+                rec = _rc_struct(t).from_address(h)
+                for k, (_, ft) in enumerate(t.elem):
+                    if ft.kind in ('glist', 'record'):
+                        retype(getattr(rec, f'f{k}'), ft, seen)
+                return
+            if t.elem.kind in ('glist', 'record'):
+                n = struct.unpack_from('<q', (self.ctypes.c_char * 16).from_address(h), 8)[0]
+                p = struct.unpack_from('<q', (self.ctypes.c_char * 8).from_address(h), 0)[0]
+                if n and p:
+                    for x in (self.ctypes.c_void_p * n).from_address(p):
+                        retype(x, t.elem, seen)
+        seen = set()
+        for i, h in self.top:
+            if i in refined:
+                retype(h, refined[i], seen)
+        for h, x in self.objs.items():
+            if reader is None:
+                reader = _array_reader_for(entry, args, self)
+            t = self.types[h]
+            if t.kind == 'record':
+                rec = _rc_struct(t).from_address(h)
+                news[h] = {key: _gl_value(getattr(rec, f'f{k}'), ft, memo, blocks, reader) for k, (key, ft) in enumerate(t.elem)}
+            else:
+                news[h] = _read_glist_values(h, t, memo, blocks, reader)
+        for h, x in self.objs.items():
+            new = news[h]
+            if type(x) is dict:                  # its keys stay; the values that changed are assigned, in place
+                for key, v in new.items():
+                    if not _same_value(x[key], v):
+                        x[key] = v
+                continue
+            if self.types[h].cls is not None:    # an instance: the attributes that changed, set on it
+                for key, v in new.items():
+                    if not _same_value(getattr(x, key), v):
+                        setattr(x, key, v)
+                continue
+            if len(new) == len(x) and all(_same_value(a, b) for a, b in zip(x, new)):
+                continue
+            x[:] = [x[k] if k < len(x) and _same_value(x[k], a) else a for k, a in enumerate(new)]
+        self.release(entry, blocks)
+        self.memo = memo
+
+    def release(self, entry, blocks):
+        for b in blocks:
+            if b not in self.own and b not in self.done:
+                self.done.add(b)
+                entry.free(b)
+
+
+def _same_value(a, b):
+    """Is b what a was: the same object, or the same number of the same type (bit for bit)?"""
+    if a is b:
+        return True
+    if type(a) is not type(b) or type(a) in (list,) or hasattr(a, '__array_interface__'):
+        return False
+    if type(a) is float:
+        return struct.pack('<d', a) == struct.pack('<d', b)
+    try:
+        return a == b and not (a != a)
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def _array_reader_for(entry, args, gl):
+    """Records of arrays in lists, for lists passed in: the arrays they came as, views of those, or what the kernel made."""
+    made = {}
+
+    def read(value, et, blocks):
+        numpy = _numpy()
+        address, which, same, block, data, ndim = value[:6]
+        typestr = numpy.dtype(et.elem.name[3:]).str
+        if block:
+            blocks.append(block)
+            root = made.get(block)
+            if root is None:
+                root = made[block] = numpy.array(_Interface(None, data, value[6:6 + ndim], None, typestr))
+            if not same:
+                address += root.__array_interface__['data'][0] - data
+            else:
+                return root
+        else:
+            if gl is not None and tuple(value) in gl.arrays:
+                return gl.arrays[tuple(value)]
+            root = None
+            if which >= 0 and entry.array_args:
+                i, key = entry.array_args[which]
+                root = args[i] if key is None else _member(args[i], key)
+                if same:
+                    return root
+            if root is None:
+                root = _owner_of(address, gl, args)
+        return numpy.asarray(_Interface(root, address, value[10::2][:et.ndim], [x * root.itemsize for x in value[11::2][:et.ndim]]))
+    return read
+
+
+def _owner_of(address, gl, args):
+    """The array whose memory holds address: one passed in, or in a list passed in."""
+    cands = list(gl.arrays.values()) if gl is not None else []
+    cands += [a for a in args if hasattr(a, '__array_interface__')]
+    for a in cands:
+        lo = a.__array_interface__['data'][0]
+        span = sum((n - 1) * abs(st) for n, st in zip(a.shape, a.strides)) + a.itemsize
+        if lo - span <= address < lo + span:
+            return a.base if a.base is not None and hasattr(a.base, '__array_interface__') else a
+    raise RuntimeError('an array in a list points at memory scramjit did not give it')

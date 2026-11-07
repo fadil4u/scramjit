@@ -9,9 +9,9 @@ At a glance:
 | | Compiles | Stays Python |
 |:---|:---|:---|
 | Tuples | numbers and tuples of them, to any depth; as locals, arguments, results and globals; constant indexes, unpacking, loops over them | an index in a variable, slices, `+`, comparing tuples, a tuple holding arrays except as a result |
-| Lists | lists of numbers made in the function, passed in, returned, and at module level (from 0.0.4); `append`, `pop`, `extend`, `insert`, `del` and aliases on lists made in the function, holding lists, tuples or arrays to any depth (from 0.0.4) | `in`, slices, `sort`, mixed ints and floats, growing a list passed in |
-| Lists of lists | rectangular, passed in, made in the function and returned (from 0.0.4); ragged, shared rows and any depth when made in the function (from 0.0.4) | ragged lists of lists passed in, `m[i, j]`, slices |
-| Dicts | passed in, reading and writing the keys the function names | building one, adding or deleting keys, `len`, `in`, `.get`, iterating, a key in a variable |
+| Lists | lists of numbers made in the function, passed in, returned, and at module level (from 0.0.4); `append`, `pop`, `extend`, `insert`, `del` and aliases on lists made in the function, holding lists, tuples or arrays to any depth (from 0.0.4) | `in`, slices, `sort`, mixed ints and floats |
+| Lists of lists | rectangular, passed in, made in the function and returned (from 0.0.4); ragged, shared rows and any depth when made in the function (from 0.0.4) | `m[i, j]`, slices |
+| Dicts | passed in, reading and writing the keys the function names; made with constant string keys, in lists and holding lists (from 0.0.4) | adding or deleting keys, `len`, `in`, `.get`, iterating, a key in a variable |
 | Instances (from 0.0.4) | passed in or at module level, made in the function, `@scram` methods; attributes read and written, objects in attributes; methods and operators (`a + b`), new instances from calls; one object under several names; passing them on, returning them, `isinstance`; lists of them; linked structures (`n = n.next`) and rebinding (`a.pos = b.pos`): plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | properties, static and class methods, adding an attribute, a list made in the function, keeping new instances in a linked structure |
 | Enums | `Enum` and `IntEnum` members with int values | `.name`, `Cell(1)`, iterating the class, `Flag` and string enums |
 | Module-level constants | numbers, tuples, arrays, dicts, lists, enum classes, instances (from 0.0.4) | strings, `None`, assigning with `global` |
@@ -150,7 +150,31 @@ Such a list is held by reference, as Python holds it: `ys = xs`, `rows.append(ro
 
 Memory is freed as the function runs: a list that nothing holds any more, and the lists and arrays in it, are freed at the next point where arrays are, so a loop making a new list each time doesn't build up memory.
 
-Converting a returned list costs about 30 ns per number (500,000 ints in about 15 ms) and more for numpy scalars and tuples holding them, which are made one by one, as Python makes them. Not yet: these lists passed in as arguments (a list of numbers passed in still compiles, as below, but appending to it runs as Python), a comprehension over a list of arrays (a `for` loop compiles), and a compiled function returning one of these lists to another.
+Converting a returned list costs about 30 ns per number (500,000 ints in about 15 ms) and more for numpy scalars and tuples holding them, which are made one by one, as Python makes them.
+
+They can also hold **dicts** with constant string keys and **instances** of your classes, and be passed in:
+
+```python
+@dataclass
+class Hit:
+    i: int
+    d: float
+
+@scram
+def record(hits, xs, r):
+    for i in range(len(xs)):
+        if xs[i] < r:
+            hits.append(Hit(i, xs[i]))        # hits, passed in, grows: the caller sees it
+    return {'count': len(hits), 'last': hits[-1].d if hits else -1.0}
+```
+
+- **Passed in:** a list that the function grows, gives another name or puts into another list, a ragged list of lists, and a list of tuples, arrays, dicts or instances is held the same way. After the call, also when it raises, the caller's lists, dicts and instances are updated in place where they changed: the same objects, and the values that didn't change are the very objects they were. A list passed in and returned is that list.
+- **Dicts:** `{'i': i, 'd': d}` with constant string keys, `d['k']` read and written (`+=` too), holding numbers, tuples, lists, arrays and other such dicts. A dict that gains keys, a key in a variable, and `len`, `in`, `.get` and the other methods stay Python; so does a dict that is an object's own `__dict__`.
+- **Instances:** `Point(x, y)` of a class whose `__init__` only assigns its parameters, constants or expressions of plain values (dataclasses included), with their attributes read and written. Returned or written back as instances of their class. Methods called on them, `__post_init__` and computed attributes stay Python.
+- **Calls:** a compiled function can pass these lists to another and get one back; what the callee made becomes the caller's.
+- **Comprehensions** over a list of arrays compile, as loops do.
+
+Not yet: methods called on instances held in these lists, sets, `sort`, slices of lists, and Pyodide, where these lists haven't been run.
 
 ### Lists passed in (from 0.0.4)
 

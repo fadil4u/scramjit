@@ -233,6 +233,10 @@ after with `bench/`, and write the numbers into the item when done.
 
 ## From cimo
 
+- **A kernel can call a host function through a pointer in Pyodide (cimo 2026-11-07):** cimo's pointers are i32 at a wasm
+  function's boundary now, as Emscripten's, so Pyodide's libm `frexp(double, int *)` by address works; the bit-level
+  `frexp` workaround can go if wanted. A host `long` parameter still differs (Emscripten's is 32-bit).
+
 - **Large `malloc` in Pyodide returns NULL (cimo 2026-11-07),** where a 4 GiB request returned a small block and one just under
   2 GiB killed Pyodide; and `module.free`/`reset_heap`/`heap_bytes` work there, so `sj_release` can go.
 

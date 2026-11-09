@@ -4786,8 +4786,22 @@ class Compiler(GList, Compare, GSet):
         if not self.exact:
             return self.hold(f'{c}({args})', T.FLOAT), '1'
         self.uses_libm = True
+        slot = self.np_loop(name, 'd->d' if len(xs) == 1 else 'dd->d', c)
+        if slot is not None:                        # numpy computes it otherwise than the C library (SVML): numpy's loop
+            return self.hold(f'sj_np{len(xs)}(sj_m, {slot}, {args})', T.FLOAT), '1'
         macro = 'SJ_LIBM1' if len(xs) == 1 else 'SJ_LIBM2'
         return self.hold(f'{macro}({LIBM.index(c)})({args})', T.FLOAT), '1'
+
+    def np_loop(self, name, sig, libm_name):
+        """The sj_m slot of numpy's own loop for name, when the numpy present's results aren't the C library's
+        libm_name's (see _nploops); None otherwise, and the C library is called."""
+        from . import _nploops
+        from ._dispatch import libm_address
+        name = _nploops.CANONICAL.get(name, name)
+        if (name, sig) not in _nploops.LOOPS or not _nploops.differs(name, sig, libm_address(libm_name)):
+            return None
+        self.helpers.add('nploop')
+        return len(LIBM) + 2 * _nploops.LOOPS.index((name, sig))
 
     def numpy_minmax(self, name, a, b, dtype='float64'):
         op = '<' if name in ('minimum', 'fmin') else '>'
@@ -7043,10 +7057,12 @@ class Compiler(GList, Compare, GSet):
                 self.emit(f'if ((int64_t){b} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 15, 0);')
                 self.emit(f'{out} = ({rt.ctype})sj_ipow((int64_t){a}, (int64_t){b});')
             elif rt.ctype == 'float':                  # numpy calls powf
+                slot = self.np_loop('power', 'ff->f', 'powf') if self.exact else None
                 f = f'((float (*)(float, float))(uintptr_t)sj_m[{LIBM.index("powf")}])' if self.exact else 'powf'
-                self.emit(f'{out} = {f}({fa}, {fb});')
+                self.emit(f'{out} = {f}({fa}, {fb});' if slot is None else f'{out} = sj_np2f(sj_m, {slot}, {fa}, {fb});')
             elif self.exact:
-                self.emit(f'{out} = {table}({fa}, {fb});')
+                slot = self.np_loop('power', 'dd->d', 'pow')
+                self.emit(f'{out} = {table}({fa}, {fb});' if slot is None else f'{out} = sj_np2(sj_m, {slot}, {fa}, {fb});')
             else:
                 fast()
 

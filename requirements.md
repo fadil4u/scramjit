@@ -300,6 +300,11 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   passed in or out is read and written slot for slot through CPython's `PySetObject` (layout checked at import against
   a set made then; `Py_IncRef` and `PyMem_Calloc` through `ctypes.pythonapi`), so Python goes on with the very table it
   would have had. NaN hashes are addresses in CPython, so a set holding one passed in runs as Python (gotchas).
+- **numpy's own loops (built 2026-11-09, 0.0.5; `_nploops.py`).** numpy on x86-64 Linux with AVX-512 computes exp, log, sin,
+  power and more with SVML, 1-2 ulp from the C library. Where a probe of a few thousand values finds the numpy present
+  differs from the C library for a function, compiled code calls numpy's own loop for it (read from the ufunc's C struct,
+  checked against `ufunc.nin`, `.ntypes` and its name), one element per call: about 3 ns more per element.
+  `SCRAMJIT_NUMPY_LOOPS=1` forces it, for tests on machines that never need it.
 - **Comparisons (built 2026-11-09, 0.0.4)** of tuples, lists, dicts, instances and sets, nested: a C function per
   pair of list types per operator, tuples inlined, pointer identity as Python's identity check. NaN identity can't be.
 - **Later:** dicts that gain keys, and strings, as typed C containers: each needs a runtime.

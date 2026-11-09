@@ -17,6 +17,25 @@ def _f2(name):
 
 # Each returns 0, or 1 for a domain error and 2 for a range error, with the result in *r.
 SNIPPETS = {
+    # numpy's own loop for one element (see _nploops): its address and data pointer in sj_m[i] and sj_m[i + 1]
+    'nploop': ((), """
+typedef void (*sj_uloop)(char **, const int64_t *, const int64_t *, void *);
+static double sj_np1(const uint64_t *sj_m, int i, double x) {
+    double o; char *a[2] = {(char *)&x, (char *)&o}; int64_t n = 1, s[2] = {8, 8};
+    ((sj_uloop)(uintptr_t)sj_m[i])(a, &n, s, (void *)(uintptr_t)sj_m[i + 1]);
+    return o;
+}
+static double sj_np2(const uint64_t *sj_m, int i, double x, double y) {
+    double o; char *a[3] = {(char *)&x, (char *)&y, (char *)&o}; int64_t n = 1, s[3] = {8, 8, 8};
+    ((sj_uloop)(uintptr_t)sj_m[i])(a, &n, s, (void *)(uintptr_t)sj_m[i + 1]);
+    return o;
+}
+static float sj_np2f(const uint64_t *sj_m, int i, float x, float y) {
+    float o; char *a[3] = {(char *)&x, (char *)&y, (char *)&o}; int64_t n = 1, s[3] = {4, 4, 4};
+    ((sj_uloop)(uintptr_t)sj_m[i])(a, &n, s, (void *)(uintptr_t)sj_m[i + 1]);
+    return o;
+}
+"""),
     'sinpi': ((), f"""
 static double sj_m_sinpi(const uint64_t *sj_m, double x) {{
     const double pi = 3.141592653589793238462643383279502884197;

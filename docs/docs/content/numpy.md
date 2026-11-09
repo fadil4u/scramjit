@@ -119,6 +119,8 @@ These compile on a single number, such as `np.sqrt(x[i])`, and give numpy's resu
 - on floats only: `np.round(x)`, `np.clip(x, lo, hi)`, `np.degrees`, `np.radians`, `np.rad2deg`, `np.deg2rad`
 - the constants `np.pi`, `np.e`, `np.inf`, `np.nan`
 
+Their results are numpy's, bit for bit, on every machine. numpy usually computes these with the C library, as compiled code does. On x86-64 with AVX-512, numpy on Linux uses Intel's SVML for `exp`, `log`, `sin`, `power` and others, whose last bits differ. There, from 0.0.5, compiled code calls numpy's own loop for each such function, one element at a time: about 3 ns more per call (`np.exp(x[i])` over a million elements, 5.9 ns each against 2.7). Which functions need it is asked of the numpy present, once.
+
 Arguments can be Python ints and floats, `np.int64` and `np.float64`. A few combinations run as Python, because what numpy returns for them depends on the platform or the numpy version:
 
 - `np.abs`, `np.sign`, `np.square`, `np.minimum` and `np.maximum` of Python ints: `np.abs(4)` is `int64` on most platforms and `int32` in Pyodide

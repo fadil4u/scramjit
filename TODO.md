@@ -300,6 +300,13 @@ after with `bench/`, and write the numbers into the item when done.
   by runtime calls (hardware conversions and vectorized loads still open, cimo's `TODO.md` Adoption #6). Enough
   to start Directions #6's types; not yet fast.
 
+- **max, min, argmax vectorize (cimo 2026-11-09):** cimo now vectorizes float maximum/minimum and argmax exactly (the
+  scalar loop's ties, zeros and NaNs) and int ones at numpy's speed. `sj_np_max_f`, `min_f`, `argmax_f`, `argmin_f` are
+  now a strict loop beside a NaN detector (`z += e - e` under `#pragma omp simd reduction(+:z)`), the loop that stops
+  at a NaN only when z is NaN or a zero needs rule 1 or 2: 1M float64, Snapdragon X: `max` 1016 to 171 us (numpy 113),
+  `argmax` 1366 to 258 (numpy 314); `max_i` 122 (116) and `argmax_i` 177 (174) unchanged C. Same bits (4000 random
+  arrays of zeros, NaNs and infinities, strides 1, 2, 3, -1, every rule, against the old code).
+
 ## Workarounds waiting on cimo
 
 Each has a matching entry in cimo's `TODO.md`, which asks for a note here when it lands.

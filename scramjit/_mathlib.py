@@ -357,8 +357,11 @@ static double sj_np_prod_f(const double *a, int64_t n, int64_t st) {
     for (int64_t i = 1; i < n; i++) r *= a[i * st];
     return r;
 }
-/* A NaN wins. Of 0.0 and -0.0: rule 0 keeps the first seen, 1 prefers the sign max or min would, 2 takes the last seen */
-static double sj_np_max_f(const double *a, int64_t n, int64_t st, int rule) {
+/* A NaN wins. Of 0.0 and -0.0: rule 0 keeps the first seen, 1 prefers the sign max or min would, 2 takes the last seen.
+   The fast loop is the strict maximum (the first of equal values, NaNs never taken: rule 0) beside z, +0 unless an
+   element is a NaN or an infinity, summed in any order: cimo vectorizes both exactly; the loop that stops at the first
+   NaN runs only when z says one may be there, or when a zero result needs another rule. */
+static double sj_np_max_slow(const double *a, int64_t n, int64_t st, int rule) {
     double r = a[0];
     for (int64_t i = 0; i < n && r == r; i++) {
         double e = a[i * st];
@@ -367,13 +370,35 @@ static double sj_np_max_f(const double *a, int64_t n, int64_t st, int rule) {
     }
     return r;
 }
-static double sj_np_min_f(const double *a, int64_t n, int64_t st, int rule) {
+static double sj_np_max_f(const double *a, int64_t n, int64_t st, int rule) {
+    double r = a[0], z = 0.0;
+#pragma omp simd reduction(+:z)
+    for (int64_t i = 0; i < n; i++) {
+        double e = a[i * st];
+        if (e > r) r = e;
+        z += e - e;
+    }
+    if (z != z || (r == 0.0 && rule != 0)) return sj_np_max_slow(a, n, st, rule);
+    return r;
+}
+static double sj_np_min_slow(const double *a, int64_t n, int64_t st, int rule) {
     double r = a[0];
     for (int64_t i = 0; i < n && r == r; i++) {
         double e = a[i * st];
         if (e != e || e < r) r = e;
         else if (e == 0.0 && r == 0.0 && (rule == 2 || (rule == 1 && signbit(e)))) r = e;
     }
+    return r;
+}
+static double sj_np_min_f(const double *a, int64_t n, int64_t st, int rule) {
+    double r = a[0], z = 0.0;
+#pragma omp simd reduction(+:z)
+    for (int64_t i = 0; i < n; i++) {
+        double e = a[i * st];
+        if (e < r) r = e;
+        z += e - e;
+    }
+    if (z != z || (r == 0.0 && rule != 0)) return sj_np_min_slow(a, n, st, rule);
     return r;
 }
 static int64_t sj_np_max_i(const int64_t *a, int64_t n, int64_t st) {
@@ -386,8 +411,9 @@ static int64_t sj_np_min_i(const int64_t *a, int64_t n, int64_t st) {
     for (int64_t i = 1; i < n; i++) if (a[i * st] < r) r = a[i * st];
     return r;
 }
-/* The first of the largest, or the first NaN */
-static int64_t sj_np_argmax_f(const double *a, int64_t n, int64_t st) {
+/* The first of the largest, or the first NaN: the fast loop as for sj_np_max_f, the one that stops at a NaN when z
+   says there may be one */
+static int64_t sj_np_argmax_slow(const double *a, int64_t n, int64_t st) {
     int64_t at = 0;
     double r = a[0];
     for (int64_t i = 0; i < n; i++) {
@@ -397,7 +423,19 @@ static int64_t sj_np_argmax_f(const double *a, int64_t n, int64_t st) {
     }
     return at;
 }
-static int64_t sj_np_argmin_f(const double *a, int64_t n, int64_t st) {
+static int64_t sj_np_argmax_f(const double *a, int64_t n, int64_t st) {
+    int64_t at = 0;
+    double r = a[0], z = 0.0;
+#pragma omp simd reduction(+:z)
+    for (int64_t i = 0; i < n; i++) {
+        double e = a[i * st];
+        if (e > r) { r = e; at = i; }
+        z += e - e;
+    }
+    if (z != z) return sj_np_argmax_slow(a, n, st);
+    return at;
+}
+static int64_t sj_np_argmin_slow(const double *a, int64_t n, int64_t st) {
     int64_t at = 0;
     double r = a[0];
     for (int64_t i = 0; i < n; i++) {
@@ -405,6 +443,18 @@ static int64_t sj_np_argmin_f(const double *a, int64_t n, int64_t st) {
         if (e != e) return i;
         if (e < r) { r = e; at = i; }
     }
+    return at;
+}
+static int64_t sj_np_argmin_f(const double *a, int64_t n, int64_t st) {
+    int64_t at = 0;
+    double r = a[0], z = 0.0;
+#pragma omp simd reduction(+:z)
+    for (int64_t i = 0; i < n; i++) {
+        double e = a[i * st];
+        if (e < r) { r = e; at = i; }
+        z += e - e;
+    }
+    if (z != z) return sj_np_argmin_slow(a, n, st);
     return at;
 }
 static int64_t sj_np_argmax_i(const int64_t *a, int64_t n, int64_t st) {

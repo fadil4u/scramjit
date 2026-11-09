@@ -12,7 +12,7 @@ import pytest
 from scramjit import FallbackWarning, scram
 from scramjit._dispatch import Function
 
-from util import outcome, zero_ties
+from util import outcome
 
 np.seterr(all='ignore')
 warnings.filterwarnings('ignore', category=RuntimeWarning)
@@ -46,12 +46,10 @@ def make(src, **space):
     return space['f'], g
 
 
-def agree(f, g, args, compiled=True, ties=False):
+def agree(f, g, args, compiled=True):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         want, got = outcome(f, list(args)), outcome(g, list(args))
-    if ties:                                    # min and max of two zeros: see util.zero_ties
-        want, got = zero_ties(want), zero_ties(got)
     assert want[:3] == got[:3], (args, want, got)
     if compiled is not None:
         assert bool(g.signatures) == compiled, (args, g._why)
@@ -353,10 +351,10 @@ def test_numpy_functions_of_two(name):
         if name == 'copysign' and 'float' not in da + db:
             continue
         for x, y in itertools.product(EDGE[da], EDGE[db]):
-            agree(f, g, [np.array([x], da), np.array([y], db)], compiled=None, ties=name != 'copysign')
+            agree(f, g, [np.array([x], da), np.array([y], db)], compiled=None)
     for d in NARROW:
         for x, y in itertools.product(EDGE[d], [0, 1, -1, 300, 0.5, -0.0, math.nan]):
-            agree(h, k, [np.array([x], d), y], compiled=None, ties=name != 'copysign')
+            agree(h, k, [np.array([x], d), y], compiled=None)
     assert g.signatures and k.signatures
 
 

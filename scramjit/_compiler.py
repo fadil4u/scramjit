@@ -410,14 +410,16 @@ def is_numpy(obj):
     return isinstance(obj, StaticNumpy) and obj.name is None or (obj is not None and obj is sys.modules.get('numpy'))
 
 
-def zero_rule(name):
-    """Which zero np.minimum gives for 0.0 and -0.0 depends on the platform: always 'negative', always 'positive', or by
-    position, 'first' or 'second'. The compiled code must agree with the numpy it stands in for."""
+def zero_rule(name, dtype='float64'):
+    """Which zero np.minimum gives for 0.0 and -0.0 depends on the platform, and on the dtype (numpy's float32 kernels
+    aren't its float64 ones): always 'negative', always 'positive', or by position, 'first' or 'second'. The compiled
+    code must agree with the numpy it stands in for."""
     np = sys.modules.get('numpy')
     if np is None:
         return 'negative' if name in ('minimum', 'fmin') else 'positive'
-    one = math.copysign(1.0, float(getattr(np, name)(0.0, -0.0))) < 0
-    two = math.copysign(1.0, float(getattr(np, name)(-0.0, 0.0))) < 0
+    z = getattr(np, dtype)
+    one = math.copysign(1.0, float(getattr(np, name)(z(0.0), z(-0.0)))) < 0
+    two = math.copysign(1.0, float(getattr(np, name)(z(-0.0), z(0.0)))) < 0
     return {(True, True): 'negative', (False, False): 'positive', (False, True): 'first', (True, False): 'second'}[one, two]
 
 
@@ -4778,7 +4780,7 @@ class Compiler(GList, Compare, GSet):
         if name == 'copysign':
             return self.hold(f'copysign({x}, {xs[1]})', T.FLOAT), '1'
         if name in NP_MINMAX:
-            return self.numpy_minmax(name, x, xs[1]), '1'
+            return self.numpy_minmax(name, x, xs[1], 'float32' if rt is T.NARROW['float32'] else 'float64'), '1'
         c = NP_LIBM1.get(name) or NP_LIBM2[name]
         args = ', '.join(xs)
         if not self.exact:
@@ -4787,16 +4789,16 @@ class Compiler(GList, Compare, GSet):
         macro = 'SJ_LIBM1' if len(xs) == 1 else 'SJ_LIBM2'
         return self.hold(f'{macro}({LIBM.index(c)})({args})', T.FLOAT), '1'
 
-    def numpy_minmax(self, name, a, b):
+    def numpy_minmax(self, name, a, b, dtype='float64'):
         op = '<' if name in ('minimum', 'fmin') else '>'
-        rule = zero_rule(name)
+        rule = zero_rule(name, dtype)
         equal = {'negative': f'(signbit({a}) ? {a} : {b})', 'positive': f'(signbit({a}) ? {b} : {a})', 'first': a, 'second': b}[rule]
         pick = f'({a} {op} {b} ? {a} : {b} {op} {a} ? {b} : {equal})'
         if name in ('minimum', 'maximum'):       # a NaN wins
             return self.hold(f'({a} != {a} ? {a} : {b} != {b} ? {b} : {pick})', T.FLOAT)
         # a NaN loses, and which of two NaNs comes back depends on the platform
         np = sys.modules.get('numpy')
-        second = np is not None and math.copysign(1.0, float(getattr(np, name)(math.nan, -math.nan))) < 0
+        second = np is not None and math.copysign(1.0, float(getattr(np, name)(getattr(np, dtype)(math.nan), getattr(np, dtype)(-math.nan)))) < 0
         return self.hold(f'({a} != {a} ? ({b} != {b} ? {b if second else a} : {b}) : {b} != {b} ? {a} : {pick})', T.FLOAT)
 
     def isinstance_of(self, e):

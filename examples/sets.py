@@ -1,4 +1,4 @@
-"""Sets (from 0.0.4): islands on a sparse map, the land a set of (x, y) cells. Each island is found by a flood fill
+"""Sets: islands on a sparse map, the land a set of (x, y) cells. Each island is found by a flood fill
 that pops a cell from the land, then keeps popping cells from a frontier set and moving the neighbours that are
 land into it. Sets are kept as CPython keeps them, so they pop in the order Python's do, and the islands come out
 in the order Python finds them."""

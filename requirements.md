@@ -160,7 +160,7 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
 - **Lists that never change size** become fixed-size C arrays: no `append`, `pop`, `extend`,
   `insert`, `del` or slice assignment on them, and no escape into code that might. Stack-allocated
   when small, constant-sized and not returned; heap otherwise.
-- **Lists passed in from Python (built 2026-11-03, from 0.0.4):** a list of only ints, floats or bools is copied into an
+- **Lists passed in from Python (built 2026-11-03, 0.0.4):** a list of only ints, floats or bools is copied into an
   `array.array` at the call, and if the function stores into it, the elements whose value changed are copied back at
   every exit, so the others keep their identity. The same list twice runs as Python. A returned local list's memory is
   handed to the caller, copied into a list in C (`memoryview.cast().tolist()`) and released; returning the argument
@@ -194,22 +194,22 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   only through a call plan that checks those keys; the general path takes 9). A write goes back at both of the kernel's exits, so
   stores before an exception survive. The kernel's written variables are kept out of web splitting, since every exit reads them.
   Exact `dict` only, since a subclass can run code on a read, and one dict passed twice runs as Python.
-- **Instances (built 2026-11-05, from 0.0.4).** Flattened as dicts are, `p.a` becoming a variable. Python's lookup is what must be kept: at every call, walking the class's `__mro__`, an attribute compiles only if
+- **Instances (built 2026-11-05, 0.0.4).** Flattened as dicts are, `p.a` becoming a variable. Python's lookup is what must be kept: at every call, walking the class's `__mro__`, an attribute compiles only if
   no code of the class would run: `__getattribute__` the default one, no `__getattr__`, nothing on the class under that name but a plain value, a slot or a namedtuple's field, and for a write the default `__setattr__` and the
   attribute on the instance already, since writing back one only on the class would add it even where no assignment ran. A call plan checks the same thing for 2.0 µs a call (10 without one; a dict takes 1.7) by comparing what each Python-made class holds
   under those names with what it held: built-in classes can't change. `self.__x` stays Python, as the source doesn't show the name Python gives it. An object and its own `__dict__` count as one object passed twice.
-- **Methods (built 2026-11-05, from 0.0.4).** `p.m(...)` is a callee call: the function on the class (a plain one gets a `Function` of its own) takes
+- **Methods (built 2026-11-05, 0.0.4).** `p.m(...)` is a callee call: the function on the class (a plain one gets a `Function` of its own) takes
   the attributes it uses, through what it calls, as self, never the rest, which may have changed type in the caller. Its writes come back from its `sj_io`
   before its status is checked, so an exception keeps them. A writing call stays out of tests, loop headers and comprehensions, and `p__a = p__a` after its
   statement shows the write to every analysis that looks for assignments. Which function runs is the class's at each call, as for attributes; one on the
   instance runs Python. A call costs 5 to 6 ns more than inline code, as every call between compiled functions does: cimo keeps the result array in memory.
-- **Lists of instances, passing instances (built 2026-11-05, from 0.0.4).** A list of one class's instances is a list of numbers per attribute used,
+- **Lists of instances, passing instances (built 2026-11-05, 0.0.4).** A list of one class's instances is a list of numbers per attribute used,
   copied in at the call and written back where a value changed (identity kept for the rest); `for p in ps`, `enumerate`, `p = ps[i]` make `p` an index,
   checked where Python would raise. An instance or element passed to a function or method goes as the attributes the callee uses (`_param_uses`, through
   what it passes it to), narrowed at compile time. Two elements of one list may be one instance, so a call given two compiles only if what it assigns
   through one it doesn't use through the other. Only real assignments count there: the `p__a = p__a` markers say a call may write, not that it does.
   A method's globals join the caller's when a call's types name the method (`_add_method_globals`), so the caller's globals can grow after its first call.
-- **Making instances, inner objects, the rest (built 2026-11-05, from 0.0.4).** `v = C(...)` compiles when C's construction only stores: a
+- **Making instances, inner objects, the rest (built 2026-11-05, 0.0.4).** `v = C(...)` compiles when C's construction only stores: a
   dataclass's own `__init__` (recognized by its code having no file), an `__init__` of `self.a = expression of its parameters`, or none; and
   `type.__call__`, `object.__new__`, default lookups. The class is a hidden argument (`madeclass`), checked like an instance's class by a plan. `v`'s
   attributes are variables assigned in `__init__`'s order; a returned `v` is `cls.__new__(cls)` given them in that order with `object.__setattr__`,
@@ -291,7 +291,7 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   `[]` is typed by its appends (`Pending`). Pointers inside cimo's wasm structs are 8 bytes, so decoders read them so.
   Sorting is a stable merge sort per element type (Python's order without NaNs), `key=` rewritten to a comprehension of
   keys over the list being sorted.
-- **Sets (built 2026-11-09, from 0.0.4).** Iteration order is observable, so a set is CPython's own table in C:
+- **Sets (built 2026-11-09, 0.0.4).** Iteration order is observable, so a set is CPython's own table in C:
   the same hashes (ints modulo 2**61 - 1, `_Py_HashDouble`, xxHash for tuples; 31 bits and 32-bit primes on a 32-bit
   CPython such as Pyodide's), linear probes then perturbation, the resize policy, dummies, and each operation's own
   path (`set_merge`'s copies, intersection iterating the smaller set, difference copying when the other is small, and
@@ -300,7 +300,7 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   passed in or out is read and written slot for slot through CPython's `PySetObject` (layout checked at import against
   a set made then; `Py_IncRef` and `PyMem_Calloc` through `ctypes.pythonapi`), so Python goes on with the very table it
   would have had. NaN hashes are addresses in CPython, so a set holding one passed in runs as Python (gotchas).
-- **Comparisons (built 2026-11-09, from 0.0.4)** of tuples, lists, dicts, instances and sets, nested: a C function per
+- **Comparisons (built 2026-11-09, 0.0.4)** of tuples, lists, dicts, instances and sets, nested: a C function per
   pair of list types per operator, tuples inlined, pointer identity as Python's identity check. NaN identity can't be.
 - **Later:** dicts that gain keys, and strings, as typed C containers: each needs a runtime.
 

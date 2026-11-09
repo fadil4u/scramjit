@@ -1,4 +1,4 @@
-"""Lists that grow (from 0.0.4): the pairs of points closer than a radius, found cell by cell on a grid and returned as
+"""Lists that grow: the pairs of points closer than a radius, found cell by cell on a grid and returned as
 a list of (i, j) tuples, with the cells themselves a list of lists built by appending. Points come in as numpy arrays (a
 list of 200,000 floats costs about 15 ms to check and copy at each call); the pairs go out as Python's own list."""
 

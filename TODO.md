@@ -5,9 +5,9 @@ Biggest first. `requirements.md` is the spec; this is the work queue. Smaller it
 
 ## Release
 
-0. **0.0.3 released (2026-11-03),** with cimo 0.0.3, which it needs for calling C. The rule stays: the README, site and
+0. **0.0.4 released (2026-11-09),** with cimo 0.0.4. The rule stays: the README, site and
    docs describe the released version, and a feature on `main` but not on PyPI is released the same day or marked
-   "from 0.0.4" wherever it's mentioned (`AGENTS.md`). `tests/test_version.py` checks the version agrees everywhere it's written.
+   "from 0.0.5" wherever it's mentioned (`AGENTS.md`). `tests/test_version.py` checks the version agrees everywhere it's written.
 
 ## Object model: what's left
 
@@ -380,8 +380,8 @@ Spills per line, once cimo can report them.
      plain numbers (names, constants, `w[k]`), with broadcasting (`OPERANDS_ERROR`, numpy's message). One pass per
      expression: each operand's element goes in a name (`cnames`) and the scalar rules, which are numpy's, compute it;
      a flat loop when every operand has the result's shape. `tests/test_elementwise.py`, `examples/whole_array.py`.
-     Faster than numpy up to tens of thousands of elements; a big new array each pass of a loop was 4x slower, until cimo
-     began reusing freed large blocks (2026-11-07): re-measure. Not yet: `//`, `%`, comparisons (bool arrays), more than 2
+     Faster than numpy up to tens of thousands of elements; a big new array each pass of a loop too, since cimo
+     reuses freed large blocks (1,000,000 elements: 6.0 ms against 6.9). Not yet: `//`, `%`, comparisons (bool arrays), more than 2
      dimensions, `x[1:] += y`, writing straight into the target of `y[:] = ...` when they don't overlap (it makes the
      right side first), and reusing a dead array's block for `y = y * 0.5 + b`.
    - **Not `np.dot`, and no MKL or BLAS:** they would break "standard library plus cimo", and their results depend on the library, CPU and thread count.
@@ -391,15 +391,15 @@ Spills per line, once cimo can report them.
    that containers don't hide speedups we can still get from loops, each step must leave `bench/` unchanged.
    Dicts, lists, tuples, classes and enums that don't resize at runtime and whose element types don't change. See "Containers" in
    `requirements.md`; lists, dicts, instances and sets that grow and nest are #23. What's left, by kind:
-   - **Module-level constants: built** (lists too, from 0.0.4): hidden arguments, read at each call, about 0.2 µs each.
+   - **Module-level constants: built** (lists too): hidden arguments, read at each call, about 0.2 µs each.
    - **Enums: built.** See "Enums" in `data-structures.md`. Not yet: `.name`, `Cell(1)`, iterating over the class, storing a member into an array, `Flag` and string enums.
    - **Nested tuples: built,** as locals, arguments, results and globals, and loops over tuples. Not yet: a tuple holding arrays as a local or an argument, a tuple holding lists, and a tuple indexed with a variable.
-   - **Lists as arguments, returned, and at module level: built, from 0.0.4** (see `data-structures.md`). Lists of lists passed in
+   - **Lists as arguments, returned, and at module level: built** (see `data-structures.md`). Lists of lists passed in
      too: one array, rows as views, so a row is a reference as in Python. Lists of lists made in the
      function too, from `[[c] * w for _ in range(h)]` and its comprehension form (`[[c] * w] * h`, one row repeated, stays Python).
      Returned too. Not yet: returning a row of a rectangular list, numpy scalars mixed with Python numbers in one list, and a call
      plan for list arguments (each call takes the general path).
-   - **Instances: built, from 0.0.4** (see "Instances" in `data-structures.md`, and "Object model: what's left" above). A list's copy is
+   - **Instances: built** (see "Instances" in `data-structures.md`, and "Object model: what's left" above). A list's copy is
      about 0.15 µs per instance and attribute, checked and built in Python twice (`_key`, `_run`): once would halve it. A call plan for an
      array among the attributes: about 12 µs per call now, against 2 for numbers and 2.8 for the array passed separately.
    - **Dicts, what's left:** passed in, nested, made with constant keys and returned all compile (#23). Not yet: `len(d)`,

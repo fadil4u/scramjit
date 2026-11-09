@@ -102,8 +102,8 @@ except where marked ≈ (fastmath may round differently).
 | Dot product, 1M | 150 ms | 1.0 ms | 1.0 ms | 0.34 ms ≈ | 1.0 ms | 1.0 ms |
 | axpy, 1M | 186 ms | 0.38 ms | 0.32 ms | 0.41 ms ≈ | 0.28 ms | 0.32 ms |
 | Histogram, 1M | 289 ms | 0.73 ms | 0.69 ms | 0.69 ms | 0.63 ms | 0.62 ms |
-| A dict of settings (from 0.0.4) | 80 ms | 4.2 ms | doesn't compile | doesn't compile | 70 ms | |
-| A list of dataclasses (from 0.0.4) | 87 ms | 1.8 ms | doesn't compile | doesn't compile | 106 ms | |
+| A dict of settings | 80 ms | 4.2 ms | doesn't compile | doesn't compile | 70 ms | |
+| A list of dataclasses | 87 ms | 1.8 ms | doesn't compile | doesn't compile | 106 ms | |
 
 Where scramjit is behind: viewshed, against Numba (2.5 ms with `parity=False`, as gcc), float sums,
 which keep Python's order, and calling overhead: one call of a tiny function costs 0.8 µs (1.8 µs with a numpy array),
@@ -128,8 +128,8 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | Compiled | Runs as Python |
 |:---|:---|
 | `for`, `while`, `break`, `continue`, `if`, conditional expressions | Masks and index arrays: `x[x > 0]` |
-| Lists of numbers and rectangular lists of lists, passed in, made in the function and returned (from 0.0.4) | Dicts that gain keys |
-| Lists that grow (`append`, `pop`, `extend`, `insert`, `del`), sliced, searched with `in` and sorted (`sort`, `sorted`, with `key=`), shared and nested, holding lists, tuples, arrays, dicts or instances, made or passed in; sets, kept as CPython keeps them, in its order; `==` and `<` on tuples, lists, dicts, instances and sets, nested (from 0.0.4) | `frozenset` |
+| Lists of numbers and rectangular lists of lists, passed in, made in the function and returned | Dicts that gain keys |
+| Lists that grow (`append`, `pop`, `extend`, `insert`, `del`), sliced, searched with `in` and sorted (`sort`, `sorted`, with `key=`), shared and nested, holding lists, tuples, arrays, dicts or instances, made or passed in; sets, kept as CPython keeps them, in its order; `==` and `<` on tuples, lists, dicts, instances and sets, nested | `frozenset` |
 | Views: `m[i]`, `x[a:b]`, `x[::-1]`, `m[:, j]`, `.T`, `for row in m`, as arguments and results | `x.reshape(...)`, `np.eye(n)` |
 | Making arrays: `np.zeros(n)`, `x.copy()`, `np.arange`, `np.linspace`, as locals and results | `np.where`, `np.concatenate` |
 | Assigning to a slice: `x[1:3] = 0.0`, `m[i] = row`, overlap included | `//`, `%` and comparisons on whole arrays |
@@ -140,9 +140,9 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | Numbers and n-D numpy arrays, including dtypes like `uint8`; `Enum` and `IntEnum` members | Making instances; properties |
 | All of `math`, natively and in Pyodide (float `sumprod` excepted) | `str` |
 | Dicts passed in, reading and writing keys it names | Dicts that gain keys, or built in the function |
-| Instances and dataclasses (from 0.0.4): attributes, objects in attributes, methods, making them, passing and returning them, `isinstance`, lists of them | Properties, `hasattr`, `vars()` |
+| Instances and dataclasses: attributes, objects in attributes, methods, making them, passing and returning them, `isinstance`, lists of them | Properties, `hasattr`, `vars()` |
 | numpy functions on single numbers: `np.sqrt(x[i])`, `np.sin`, `np.minimum` | `x.sum(axis=0)` and other reductions to arrays |
-| Whole-array arithmetic (from 0.0.4): `a * 2 + b`, `np.sqrt(a)`, `m + row`, one pass per expression | `x[1:] += y` |
+| Whole-array arithmetic: `a * 2 + b`, `np.sqrt(a)`, `m + row`, one pass per expression | `x[1:] += y` |
 | numpy reductions to one number: `x.sum()`, `np.max(m[i])`, `x.std()`, `x.argmax()` | `np.dot`, `np.linalg` |
 
 `**` compiles. Where Python's result would change type, a negative `k` in `n ** k` (Python gives a
@@ -232,21 +232,20 @@ is no sandbox.
 
 Pre-release: the API may still change.
 
-- **Releases.** 0.0.3 is on PyPI. New since 0.0.2: calls between `@scram` functions, default parameter values, enums,
-  nested tuples, calling C from `cimo.compile`, arrays made inside a function, module-level constants, arithmetic on
-  `float32`, `uint8`, `uint64` and the other narrow dtypes, `<<` and `>>`, exact 64-bit hashes, and int sums that vectorize.
+- **Releases.** 0.0.4 is on PyPI. New since 0.0.3: lists that grow, nest and are shared, sets, sorting, comparisons of
+  containers, instances and dataclasses, lists passed in and returned, and whole-array arithmetic.
 - **Tests.** About 2,800 differential tests compare each compiled function with CPython and numpy, bit for bit. Developed and
   benchmarked on arm64 Linux and in Pyodide. Run by hand on arm64 Windows and x86-64 Windows (emulated), where a NaN's sign can
   differ. cimo also targets x86-64 Linux and macOS, where scramjit's tests haven't been run yet, and nothing runs in CI yet.
 - A function that doesn't compile whole has its loops compiled on their own, where they fit.
-- On `main`, from 0.0.4: lists that grow, nest and are shared, as Python's (`out.append((i, j))`, lists of lists of arrays, lists
+- Lists that grow, nest and are shared, as Python's (`out.append((i, j))`, lists of lists of arrays, lists
   of dicts and of dataclass instances), made in the function, passed in and written back, and returned; slices, `in`, and
   `sort` and `sorted` with `key=` and `reverse=`; comparisons of tuples, lists, dicts and instances, nested; and sets,
   which iterate and pop in CPython's own order.
-- On `main`, from 0.0.4: whole-array arithmetic (`a * 2 + b`, `np.sqrt(a)`, broadcasting) compiles, one pass per
+- Whole-array arithmetic (`a * 2 + b`, `np.sqrt(a)`, broadcasting) compiles, one pass per
   expression, with numpy's results bit for bit.
 - Data structures: dicts passed in with keys that don't change, tuples to any depth, enums, local lists, and module-level
-  numbers, tuples, arrays and dicts compile. On `main`, from 0.0.4: lists passed in, lists of lists, and attributes of
+  numbers, tuples, arrays and dicts compile; so do lists passed in, lists of lists, and attributes of
   classes: instances and dataclasses passed in or made in the function, their methods, objects in attributes, lists of them,
   one object reached under several names (`f(p, p)`, `b.pos is b.vel`), methods and operators returning new
   instances (`a + b`), and linked structures and rebinding (`n = n.next`, `a.pos = b.pos`).

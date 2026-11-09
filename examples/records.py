@@ -1,4 +1,4 @@
-"""Dicts and instances in lists (from 0.0.4): a list of dataclass instances passed in and grown, a list of dicts
+"""Dicts and instances in lists: a list of dataclass instances passed in and grown, a list of dicts
 made and returned, and the caller's own objects updated in place."""
 
 import time

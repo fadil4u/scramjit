@@ -1,4 +1,4 @@
-"""Whole-array arithmetic (from 0.0.4): 1,000 damped oscillators under one drive, stepped with numpy expressions on
+"""Whole-array arithmetic: 1,000 damped oscillators under one drive, stepped with numpy expressions on
 whole arrays. In Python each `*` and `+` is a numpy call making a temporary array; compiled, each line is one pass over the
 elements, with numpy's results bit for bit."""
 

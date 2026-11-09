@@ -1,4 +1,4 @@
-"""Sorting (from 0.0.4): the busiest hour of a day of requests to a server, by merging overlapping intervals. Each
+"""Sorting: the busiest hour of a day of requests to a server, by merging overlapping intervals. Each
 hour's requests are sorted by start time with `key=`, merged into the stretches when at least one was being served, and
 the hours ranked with `sorted(..., reverse=True)`. Requests come in as numpy arrays; the ranking goes out as Python's
 own list of tuples."""

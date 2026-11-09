@@ -1,6 +1,6 @@
 # Python data structures
 
-scramjit compiles Python's own data structures where it can hold them in plain C memory: tuples, lists, lists of lists, dicts with fixed keys, attributes of instances and sets (from 0.0.4), enums, and constants at module level. This page lists exactly what works for each, how it's held, what is copied and when, and what keeps a function in Python. Anything that doesn't compile runs as Python with the same result and a `FallbackWarning` that says why, and the loops around it that do compile still do (see [Fallback and errors](errors.md)).
+scramjit compiles Python's own data structures where it can hold them in plain C memory: tuples, lists, lists of lists, dicts with fixed keys, attributes of instances and sets, enums, and constants at module level. This page lists exactly what works for each, how it's held, what is copied and when, and what keeps a function in Python. Anything that doesn't compile runs as Python with the same result and a `FallbackWarning` that says why, and the loops around it that do compile still do (see [Fallback and errors](errors.md)).
 
 The rule behind all of it: a structure compiles when it is **statically sized** (nothing resizes it at run time) and **statically typed** (the types of what it holds don't change). numpy arrays have their own page, [Working with numpy](numpy.md).
 
@@ -9,13 +9,13 @@ At a glance:
 | | Compiles | Stays Python |
 |:---|:---|:---|
 | Tuples | numbers and tuples of them, to any depth; as locals, arguments, results and globals; constant indexes, unpacking, loops over them | an index in a variable, slices, `+`, a tuple holding arrays except as a result |
-| Lists | lists of numbers made in the function, passed in, returned, and at module level (from 0.0.4); `append`, `pop`, `extend`, `insert`, `del` and aliases on lists made in the function, holding lists, tuples or arrays to any depth (from 0.0.4) | mixed ints and floats |
-| Lists of lists | rectangular, passed in, made in the function and returned (from 0.0.4); ragged, shared rows and any depth when made in the function (from 0.0.4) | `m[i, j]`, slices |
-| Dicts | passed in, reading and writing the keys the function names; made with constant string keys, in lists and holding lists (from 0.0.4) | adding or deleting keys, `len`, `in`, `.get`, iterating, a key in a variable |
-| Instances (from 0.0.4) | passed in or at module level, made in the function, `@scram` methods; attributes read and written, objects in attributes; methods and operators (`a + b`), new instances from calls; one object under several names; passing them on, returning them, `isinstance`; lists of them; linked structures (`n = n.next`) and rebinding (`a.pos = b.pos`): plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | properties, static and class methods, adding an attribute, a list made in the function, keeping new instances in a linked structure |
+| Lists | lists of numbers made in the function, passed in, returned, and at module level; `append`, `pop`, `extend`, `insert`, `del` and aliases on lists made in the function, holding lists, tuples or arrays to any depth | mixed ints and floats |
+| Lists of lists | rectangular, passed in, made in the function and returned; ragged, shared rows and any depth when made in the function | `m[i, j]`, slices |
+| Dicts | passed in, reading and writing the keys the function names; made with constant string keys, in lists and holding lists | adding or deleting keys, `len`, `in`, `.get`, iterating, a key in a variable |
+| Instances | passed in or at module level, made in the function, `@scram` methods; attributes read and written, objects in attributes; methods and operators (`a + b`), new instances from calls; one object under several names; passing them on, returning them, `isinstance`; lists of them; linked structures (`n = n.next`) and rebinding (`a.pos = b.pos`): plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | properties, static and class methods, adding an attribute, a list made in the function, keeping new instances in a linked structure |
 | Enums | `Enum` and `IntEnum` members with int values | `.name`, `Cell(1)`, iterating the class, `Flag` and string enums |
-| Module-level constants | numbers, tuples, arrays, dicts, lists, enum classes, instances (from 0.0.4) | strings, `None`, assigning with `global` |
-| Sets (from 0.0.4) | ints, floats, bools and tuples of these, made, passed in and returned, in lists and dicts; `add`, `discard`, `remove`, `pop`, `update`, `|`, `&`, `-`, `^` and the rest; iterating in Python's order | sets of other things, `frozenset`, mixed ints and floats |
+| Module-level constants | numbers, tuples, arrays, dicts, lists, enum classes, instances | strings, `None`, assigning with `global` |
+| Sets | ints, floats, bools and tuples of these, made, passed in and returned, in lists and dicts; `add`, `discard`, `remove`, `pop`, `update`, `|`, `&`, `-`, `^` and the rest; iterating in Python's order | sets of other things, `frozenset`, mixed ints and floats |
 | Strings | | all of them |
 
 ## Tuples
@@ -105,7 +105,7 @@ What works:
 - **Tuples passed to and returned from other compiled functions.**
 - **Returning arrays in a tuple:** `return a, b`, where each is an array.
 
-Still Python: an index in a variable (`t[i]`), slices (`t[1:]`), `t + u` and `t * 2`, `in` (comparing tuples compiles from 0.0.4, see [Comparing](#comparing-tuples-lists-dicts-and-instances-from-004)), a tuple holding arrays as a local or an argument (`p = (a, b)`), a tuple holding lists, and a loop over a tuple whose elements differ in type (`for v in (1, x)` with a float `x`). A comprehension variable that is a whole tuple compiles from 0.0.4.
+Still Python: an index in a variable (`t[i]`), slices (`t[1:]`), `t + u` and `t * 2`, `in` (comparing tuples compiles, see [Comparing](#comparing-tuples-lists-dicts-and-instances)), a tuple holding arrays as a local or an argument (`p = (a, b)`), a tuple holding lists, and a loop over a tuple whose elements differ in type (`for v in (1, x)` with a float `x`). A comprehension variable that is a whole tuple compiles.
 
 ## Lists
 
@@ -121,16 +121,16 @@ def blur3(src, dst):
         dst[i] = w[0] * src[i - 1] + w[1] * src[i] + w[2] * src[i + 1]
 ```
 
-They can be made as a literal (`[1.0, 2.0]`), repeated (`[0.0] * n`, with `n` known only at run time), or by a comprehension, with conditions and several `for`s (`[i * j for i in range(n) for j in range(n) if i != j]`). They can be indexed, with negative indexes and Python's `IndexError` when out of range, written, iterated over, passed to `len`, `sum`, `min`, `max`, `enumerate`, `zip` and `reversed`, reassigned to a new list, and returned (from 0.0.4).
+They can be made as a literal (`[1.0, 2.0]`), repeated (`[0.0] * n`, with `n` known only at run time), or by a comprehension, with conditions and several `for`s (`[i * j for i in range(n) for j in range(n) if i != j]`). They can be indexed, with negative indexes and Python's `IndexError` when out of range, written, iterated over, passed to `len`, `sum`, `min`, `max`, `enumerate`, `zip` and `reversed`, reassigned to a new list, and returned.
 
 Their element type is fixed by what they're made with. Storing a numpy scalar into a list of floats is fine: the list then holds both, as Python's would, and a flag per element says which. Storing a float into a list of ints keeps the function in Python, since the list's type would change.
 
 Still Python, each for that function or the loop it's in:
 
-- **Methods and operators:** `index`, `count`, `copy`, `remove`, `xs + ys`, `xs * 2` after it's made. (`sort`, `sorted(xs)`, slices and `in` compile from 0.0.4, the list then being held as in the next section.)
+- **Methods and operators:** `index`, `count`, `copy`, `remove`, `xs + ys`, `xs * 2` after it's made. (`sort`, `sorted(xs)`, slices and `in` compile, the list then being held as in the next section.)
 - **Mixed element types:** `[1, 2.5]`, or `[1.0, n]` with an int `n`.
 
-### Lists that grow, nest and are shared (from 0.0.4)
+### Lists that grow, nest and are shared
 
 `append`, `pop`, `extend`, `insert`, `clear`, `del xs[i]` and `xs += [...]` compile, and lists can hold lists, tuples of numbers and numpy arrays, to any depth:
 
@@ -175,13 +175,13 @@ def record(hits, xs, r):
 - **Calls:** a compiled function can pass these lists to another and get one back; what the callee made becomes the caller's.
 - **Comprehensions** over a list of arrays compile, as loops do.
 
-- **Slices** (from 0.0.4): `xs[a:b:c]` is a new list, a shallow copy, as Python's; `xs[a:b] = ys` and `del xs[a:b]` resize the list, and an extended slice (`xs[::2] = ys`) must be as long, with Python's `ValueError` otherwise. A list sliced anywhere in a function is held this way.
-- **`in`** (from 0.0.4): `x in xs` and `not in` on a list of numbers or of tuples of numbers compare with `==`, in order, and `x in [a, b]` or `x in (1, 2, 3)` compares with each; `'k' in d` asks a dict whether it has that key. One difference: Python finds a NaN in a list when it is the very object there (`x in [x]` is true even for `x = nan`), while compiled code compares values, so it never finds a NaN.
-- **Sorting** (from 0.0.4): `xs.sort()` and `sorted(xs)`, with `reverse=` and `key=` (a lambda or a compiled function), on lists of anything that compares (numbers, tuples, lists, `order=True` dataclasses; see [Comparing](#comparing-tuples-lists-dicts-and-instances-from-004)), or with a key giving such values: `pts.sort(key=lambda p: (p.y, -p.x))`. The sort is stable, as Python's, so equal elements keep their order and the result is Python's. `sorted` takes anything a loop can go over (`sorted(range(n, 0, -2))`, `sorted(x * 2 for x in xs)`, an array). The keys are made first, one per element, in order, as Python makes them. A key reading the list being sorted (Python's list is empty meanwhile) stays Python. A list of NaN-holding floats is sorted in an order of its own, see [Gotchas](gotchas.md).
+- **Slices**: `xs[a:b:c]` is a new list, a shallow copy, as Python's; `xs[a:b] = ys` and `del xs[a:b]` resize the list, and an extended slice (`xs[::2] = ys`) must be as long, with Python's `ValueError` otherwise. A list sliced anywhere in a function is held this way.
+- **`in`**: `x in xs` and `not in` on a list of numbers or of tuples of numbers compare with `==`, in order, and `x in [a, b]` or `x in (1, 2, 3)` compares with each; `'k' in d` asks a dict whether it has that key. One difference: Python finds a NaN in a list when it is the very object there (`x in [x]` is true even for `x = nan`), while compiled code compares values, so it never finds a NaN.
+- **Sorting**: `xs.sort()` and `sorted(xs)`, with `reverse=` and `key=` (a lambda or a compiled function), on lists of anything that compares (numbers, tuples, lists, `order=True` dataclasses; see [Comparing](#comparing-tuples-lists-dicts-and-instances)), or with a key giving such values: `pts.sort(key=lambda p: (p.y, -p.x))`. The sort is stable, as Python's, so equal elements keep their order and the result is Python's. `sorted` takes anything a loop can go over (`sorted(range(n, 0, -2))`, `sorted(x * 2 for x in xs)`, an array). The keys are made first, one per element, in order, as Python makes them. A key reading the list being sorted (Python's list is empty meanwhile) stays Python. A list of NaN-holding floats is sorted in an order of its own, see [Gotchas](gotchas.md).
 - **Pyodide:** all of this runs there too (`tools/run_pyodide_tests.mjs tests/test_glists.py`).
 
 
-### Lists passed in (from 0.0.4)
+### Lists passed in
 
 A list argument whose elements are all ints, all floats or all bools is copied into C memory at the call. If the function stores into it, the elements whose value changed are copied back, at every exit, also when it raises, so the caller sees what Python would have left. The elements that didn't change stay the very objects they were.
 
@@ -306,7 +306,7 @@ And these keep the function in Python: storing a float into a list of ints that 
 
 **Cost:** copying is O(n) per call: about 10 ms for 200,000 floats in and out, and 2 ms to check their types. A loop that only adds numbers up gains about 2x; a rolling maximum over 200,000 prices is 13x Python, copies included. Large data that's already in numpy arrays is passed without any copy, so prefer arrays where you have them.
 
-### Lists of lists (from 0.0.4)
+### Lists of lists
 
 A **rectangular** list of lists of numbers passed in is copied into one block, row after row. A row is a view of that block, so it behaves as Python's row does, a reference: writing `row[j]` after `row = m[i]` changes `m`.
 
@@ -436,7 +436,7 @@ Each of these makes that call run as Python, with the same result:
 
 And each of these keeps the function, or the loop it's in, in Python: adding or deleting a key, a key in a variable (`p[k]`), `len(p)`, `'a' in p`, `p.get()`, `p.items()` and other methods, iterating over `p`, returning `p`, a dict inside a dict (`p['a']['b']`), and building a dict inside the function. Loops that don't touch the dict that way can still be [lifted out](errors.md#loops-are-lifted-out).
 
-## Instances (from 0.0.4)
+## Instances
 
 An object **passed in** compiles when the function only reads and writes attributes it names, and calls its methods. So does `self`, with `@scram` on a method. Nothing about the class has to change:
 
@@ -1164,7 +1164,7 @@ Still Python: storing a member into an array or a list (store `.value`), `.name`
 
 ## Constants at module level
 
-A function can read numbers, tuples of numbers, arrays, dicts, enum classes and (from 0.0.4) lists from module level:
+A function can read numbers, tuples of numbers, arrays, dicts, enum classes and lists from module level:
 
 ```python
 RATE = 0.25
@@ -1256,9 +1256,9 @@ sj_fail:
 
 They behave like arguments, read at each call: a new value needs no recompile, a new type compiles for that type, and writes to a global array, list or dict reach it. Each costs about what an argument does, around 0.2 µs per call. A constant expression made only of literals, such as `MASK = (1 << 64) - 1`, keeps Python's value. A global that isn't there raises `NameError`, as usual.
 
-Still Python: strings, `None`, functions that aren't `@scram`, objects other than [instances that compile](#instances-from-004), and assigning to a global with `global`.
+Still Python: strings, `None`, functions that aren't `@scram`, objects other than [instances that compile](#instances), and assigning to a global with `global`.
 
-## Comparing tuples, lists, dicts and instances (from 0.0.4)
+## Comparing tuples, lists, dicts and instances
 
 `==`, `!=`, `<`, `<=`, `>` and `>=` compile between tuples, lists (held by reference, see above), dicts, instances and sets, nested to any depth, chained (`a < b <= c`) or not. They compare as Python compares:
 
@@ -1272,7 +1272,7 @@ Still Python: strings, `None`, functions that aren't `@scram`, objects other tha
 
 What Python refuses stays Python, and raises there: `<` between dicts, between a tuple and a number, or between instances of a class without ordering. So does an instance of a class with an `__eq__` of its own.
 
-## Sets (from 0.0.4)
+## Sets
 
 A set of ints, floats, bools or tuples of these compiles, made in the function, passed in, returned, and in lists and dicts:
 

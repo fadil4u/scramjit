@@ -48,7 +48,7 @@ def flood_fill(grid, stack, y0: int, x0: int, new: int):
 def flood_fill_list(grid, y0: int, x0: int, new: int):
     """The same fill written the usual way, with a list as the stack.
 
-    The list grows (append) and shrinks (pop): from 0.0.4 it is held by reference, as Python holds
+    The list grows (append) and shrinks (pop): it is held by reference, as Python holds
     it, and the whole function compiles.
     """
     h, w = grid.shape

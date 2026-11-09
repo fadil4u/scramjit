@@ -113,52 +113,61 @@ def pow_needs_loop(ka, kb, sig, libm_address):
 
 
 def _probe_pow(ka, kb, sig, libm_address):
+    """(numpy's a ** b is the C library's pow, numpy's power loop's) on these kinds. Their differences are rare (SVML's
+    power is within an ulp), so they are found first, with numpy's loop over many inputs at once, and numpy's own a ** b
+    is then asked on those. If the two never differ, there is nothing to tell apart: (True, True)."""
     import ctypes
     import random
     np = sys.modules['numpy']
     f32 = sig == 'ff->f'
     ct = ctypes.c_float if f32 else ctypes.c_double
     lib = ctypes.CFUNCTYPE(ct, ct, ct)(libm_address)
-    f, d = loop('power', sig)
-    uloop = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(f)
     dt = np.float32 if f32 else np.float64
+    ints = {'int': (-(1 << 40), 1 << 40), 'bool': (0, 1)}
 
-    def via_loop(x, y):
-        a, b, o = (ct(x), ct(y), ct())
-        args = (ctypes.c_void_p * 3)(ctypes.addressof(a), ctypes.addressof(b), ctypes.addressof(o))
-        n, st = (ctypes.c_int64 * 1)(1), (ctypes.c_int64 * 3)(*([ctypes.sizeof(ct)] * 3))
-        uloop(args, n, st, d)
-        return o.value
+    def is_int(k):
+        return k in ints or np.dtype(k).kind in 'iu' if k not in ('float',) else False
+
+    def bounds(k):
+        if k in ints:
+            return ints[k]
+        info = np.iinfo(k)
+        return int(info.min), int(info.max)
 
     def make(k, v):
-        if k in ('int', 'float', 'bool'):
-            return {'int': int, 'float': float, 'bool': bool}[k](v)
-        return getattr(np, k)(v)
+        return {'int': int, 'float': float, 'bool': bool}[k](v) if k in ('int', 'float', 'bool') else getattr(np, k)(v)
     rnd = random.Random(11)
-    libm_ok = loop_ok = True
+    xs, ys = [], []
+    for n in range(20000):
+        if is_int(ka):
+            lo, hi = bounds(ka)
+            x = rnd.choice([hi, max(lo, 1), rnd.randint(max(lo, 1), max(1, min(hi, 100))), rnd.randint(max(lo, 1), hi)])
+        else:
+            x = rnd.uniform(0.01, 60) if n % 2 else 10.0 ** rnd.uniform(-35 if f32 else -300, 35 if f32 else 300)
+        if is_int(kb):
+            y = rnd.randint(0, 9)
+        else:
+            y = rnd.uniform(-4, 6) if n % 3 else rnd.choice([-1.0, 0.5, -0.5, 2.0, 1.5, -2.5, 2.5, 0.25])
+        xs.append(x)
+        ys.append(y)
     with np.errstate(all='ignore'):
-        for _ in range(3000):
-            wide = _ % 2                                # half ordinary, half huge and tiny
-            if ka in ('int', 'bool') or ka[:3] in ('int', 'uin'):
-                x = rnd.randrange(1, 100) if not wide else rnd.randrange(1, 32767)
-            else:
-                x = rnd.uniform(0.01, 60) if not wide else 10.0 ** rnd.uniform(-35 if f32 else -300, 35 if f32 else 300)
-            if kb in ('int', 'bool') or kb[:3] in ('int', 'uin'):
-                y = rnd.randrange(-6, 9)
-            else:
-                y = rnd.uniform(-4, 6) if not wide else rnd.choice([-1.0, 0.5, -0.5, 2.0, 1.5, -2.5, rnd.uniform(-3, 3)])
-            if ka == 'bool':
-                x = x & 1
+        a = np.array([float(dt(make(ka, x))) for x in xs], dt)
+        b = np.array([float(dt(make(kb, y))) for y in ys], dt)
+        by_loop = np.power(a, b)                         # numpy's loop for sig, on contiguous arrays
+        apart = [k for k in range(len(xs)) if struct.pack('<d', float(by_loop[k])) != struct.pack('<d', float(dt(lib(float(a[k]), float(b[k])))))]
+        if not apart:
+            return True, True
+        libm_ok = loop_ok = True
+        for k in apart[:200]:
             try:
-                want = make(ka, x) ** make(kb, y)
+                want = make(ka, xs[k]) ** make(kb, ys[k])
             except Exception:                           # noqa: BLE001  (ints to negative powers and the like)
                 continue
             if not isinstance(want, (float, np.floating)):
                 return False, False
             w = struct.pack('<d', float(want))
-            xa, yb = float(dt(make(ka, x))), float(dt(make(kb, y)))
-            libm_ok = libm_ok and struct.pack('<d', float(dt(lib(xa, yb)))) == w
-            loop_ok = loop_ok and struct.pack('<d', float(dt(via_loop(xa, yb)))) == w
+            libm_ok = libm_ok and struct.pack('<d', float(dt(lib(float(a[k]), float(b[k]))))) == w
+            loop_ok = loop_ok and struct.pack('<d', float(by_loop[k])) == w
     return libm_ok, loop_ok
 
 

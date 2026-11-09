@@ -4,7 +4,21 @@ Portions copyright Python Software Foundation, under the PSF License Agreement. 
 the helpers it uses (SNIPPETS, with their dependencies), so these add nothing to other compiles.
 """
 
+import platform
+
 from ._runtime import LIBM
+
+# CPython's own math functions, ported here, give the bits CPython's compiler gave them: GCC fuses a * b + c across
+# statements on arm64 (cimo's default does the same), clang only within one expression, as the C standard's
+# FP_CONTRACT ON says. A clang-built CPython (python.org's macOS build, uv's) gets these compiled that way too.
+_PORTED = {'sinpi', 'lanczos', 'gamma', 'lgamma'}
+_CLANG = platform.python_compiler().lower().startswith('clang')
+
+
+def _contracted(name, text):
+    if name in _PORTED and _CLANG:
+        return '#pragma STDC FP_CONTRACT ON\n' + text + '#pragma STDC FP_CONTRACT DEFAULT\n'
+    return text
 
 
 def _f1(name):
@@ -667,7 +681,7 @@ def snippets(names):
             seen.add(n)
             for d in SNIPPETS[n][0]:
                 add(d)
-            out.append(SNIPPETS[n][1])
+            out.append(_contracted(n, SNIPPETS[n][1]))
     for n in sorted(names):
         add(n)
     return ''.join(out)

@@ -1305,6 +1305,8 @@ A set is kept exactly as CPython keeps it: the same hashes, the same hash table,
 - **Operators:** `|`, `&`, `-`, `^` and `|=`, `&=`, `-=`, `^=` between sets; `in`, `not in`, `len`, comparisons, and `if s:` and `while s:`.
 - **Loops** over a set, comprehensions and `sorted(s)`. A loop over a set can't change a set of that type, since Python's loop would see the change or raise: that loop stays Python.
 
+On free-threaded CPython (3.13t), writing a set's table from outside isn't safe, so a set passed in or returned is rebuilt from its elements instead: the same elements, but perhaps in another order once it's back in Python. Inside the function the order is still CPython's.
+
 One element type per set: `{1, 2.5}` runs as Python. A NaN's hash in CPython is its object's address, so a set of floats behaves differently with NaNs in it ([Gotchas](gotchas.md)); a set passed in that holds a NaN runs as Python. Building a 200,000-element set costs about a sixth of Python's time, since Python's sets are C already; the gain is in the loop around them.
 
 ## Strings

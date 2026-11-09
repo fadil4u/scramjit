@@ -1,6 +1,7 @@
 """Arrays made inside a function: np.zeros(n), x.copy() and friends compile, and what comes back is what numpy
 would have made. Memory a loop stops using is freed as it goes, and memory still in use is not."""
 
+import sys
 import warnings
 
 import numpy as np
@@ -240,7 +241,7 @@ def test_linspace(args):
     check(f, *args)
 
 
-@pytest.mark.parametrize('n', [2 ** 40, 2 ** 62, 2 ** 63 - 1])
+@pytest.mark.parametrize('n', [pytest.param(2 ** 40, marks=pytest.mark.skipif(sys.platform == 'darwin', reason='macOS hands out 8 TB lazily and kills the process filling it, numpy or not')), 2 ** 62, 2 ** 63 - 1])
 def test_linspace_of_too_many(n):
     def f(n):
         return np.linspace(0.0, 1.0, n)

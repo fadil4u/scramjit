@@ -15,9 +15,10 @@ from scramjit._errors import CompileError
 
 
 def ordered(v):
-    """A value with every set in it as the list of its elements, in order."""
+    """A value with every set in it as the list of its elements, in order. Without CPython's set layout (free-threaded
+    builds: _pysets.exact is False) a set handed back is rebuilt from its elements, in an order of its own: its elements."""
     if isinstance(v, set):
-        return ('set', [ordered(x) for x in v])
+        return ('set', [ordered(x) for x in v] if _pysets.exact else sorted((ordered(x) for x in v), key=repr))
     if isinstance(v, (list, tuple)):
         return (type(v).__name__, [ordered(x) for x in v])
     if isinstance(v, dict):
@@ -175,6 +176,7 @@ def test_iterables_lists_and_errors():
     same(empty_pop, 3)
 
 
+@pytest.mark.skipif(not _pysets.exact, reason="no CPython set layout here (free-threaded): sets are rebuilt, in their own order")
 def test_passed_in_and_written_back():
     for start in (set(), {1, 2, 3}, set(range(0, 200, 7)), {5, 13, 21, 29}):
         s = set(start)

@@ -94,6 +94,74 @@ def differs(name, sig, libm_address):
     return _differs[key]
 
 
+_pow = {}
+
+
+def pow_needs_loop(ka, kb, sig, libm_address):
+    """For a ** b with a and b of these kinds ('float32', 'int32', ... for numpy scalars, 'int' or 'float' for Python
+    numbers), does numpy give what its power loop for sig gives, and not what the C library's pow does? Asked of numpy
+    itself, as the very operation: its scalar math computes some combinations with the C library, others not."""
+    key = (ka, kb, sig)
+    if key not in _pow:
+        if loop('power', sig) is None:
+            _pow[key] = False
+        else:
+            libm_ok, loop_ok = _probe_pow(ka, kb, sig, libm_address)
+            forced = os.environ.get('SCRAMJIT_NUMPY_LOOPS') == '1'
+            _pow[key] = loop_ok and (forced or not libm_ok)
+    return _pow[key]
+
+
+def _probe_pow(ka, kb, sig, libm_address):
+    import ctypes
+    import random
+    np = sys.modules['numpy']
+    f32 = sig == 'ff->f'
+    ct = ctypes.c_float if f32 else ctypes.c_double
+    lib = ctypes.CFUNCTYPE(ct, ct, ct)(libm_address)
+    f, d = loop('power', sig)
+    uloop = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(f)
+    dt = np.float32 if f32 else np.float64
+
+    def via_loop(x, y):
+        a, b, o = (ct(x), ct(y), ct())
+        args = (ctypes.c_void_p * 3)(ctypes.addressof(a), ctypes.addressof(b), ctypes.addressof(o))
+        n, st = (ctypes.c_int64 * 1)(1), (ctypes.c_int64 * 3)(*([ctypes.sizeof(ct)] * 3))
+        uloop(args, n, st, d)
+        return o.value
+
+    def make(k, v):
+        if k in ('int', 'float', 'bool'):
+            return {'int': int, 'float': float, 'bool': bool}[k](v)
+        return getattr(np, k)(v)
+    rnd = random.Random(11)
+    libm_ok = loop_ok = True
+    with np.errstate(all='ignore'):
+        for _ in range(3000):
+            wide = _ % 2                                # half ordinary, half huge and tiny
+            if ka in ('int', 'bool') or ka[:3] in ('int', 'uin'):
+                x = rnd.randrange(1, 100) if not wide else rnd.randrange(1, 32767)
+            else:
+                x = rnd.uniform(0.01, 60) if not wide else 10.0 ** rnd.uniform(-35 if f32 else -300, 35 if f32 else 300)
+            if kb in ('int', 'bool') or kb[:3] in ('int', 'uin'):
+                y = rnd.randrange(-6, 9)
+            else:
+                y = rnd.uniform(-4, 6) if not wide else rnd.choice([-1.0, 0.5, -0.5, 2.0, 1.5, -2.5, rnd.uniform(-3, 3)])
+            if ka == 'bool':
+                x = x & 1
+            try:
+                want = make(ka, x) ** make(kb, y)
+            except Exception:                           # noqa: BLE001  (ints to negative powers and the like)
+                continue
+            if not isinstance(want, (float, np.floating)):
+                return False, False
+            w = struct.pack('<d', float(want))
+            xa, yb = float(dt(make(ka, x))), float(dt(make(kb, y)))
+            libm_ok = libm_ok and struct.pack('<d', float(dt(lib(xa, yb)))) == w
+            loop_ok = loop_ok and struct.pack('<d', float(dt(via_loop(xa, yb)))) == w
+    return libm_ok, loop_ok
+
+
 def _probe(name, sig, libm_address):
     import ctypes
     np = sys.modules['numpy']

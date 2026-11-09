@@ -423,6 +423,29 @@ def zero_rule(name, dtype='float64'):
     return {(True, True): 'negative', (False, False): 'positive', (False, True): 'first', (True, False): 'second'}[one, two]
 
 
+_ARANGE_FUSED = []
+
+
+def arange_fused():
+    """Does the numpy present fill np.arange(start, stop, step) with fma(i, delta, start), one rounding, rather than
+    start + i * delta? It's how its C was compiled: MSVC fuses it on Windows arm64."""
+    np = sys.modules.get('numpy')
+    if np is None:
+        return False
+    if not _ARANGE_FUSED:
+        from fractions import Fraction
+        fused = plain = True
+        for a, c in ((0.1, 0.05), (-1.3, 0.33), (0.0, 0.1), (1.0, 0.1), (3.7, -0.019)):
+            got = np.arange(a, a + 40 * c, c)
+            d = (a + c) - a
+            for i in range(2, len(got)):
+                g = float(got[i])
+                fused = fused and g == float(Fraction(i) * Fraction(d) + Fraction(a))
+                plain = plain and g == a + i * d
+        _ARANGE_FUSED.append(fused and not plain)
+    return _ARANGE_FUSED[0]
+
+
 _SUM_CHUNK = []
 
 
@@ -4299,7 +4322,7 @@ class Compiler(GList, Compare, GSet):
             self.emit(f'if ({length} > 0) v_{name}[0] = {i}_f;')    # as numpy: the first two, then those give the rest
             self.emit(f'if ({length} > 1) v_{name}[1] = (double){a} + (double){c};')
             self.open(f'for (int64_t {i} = 2; {i} < {length}; {i}++)')
-            self.emit(f'v_{name}[{i}] = {i}_f + (double){i} * {i}_d;')
+            self.emit(f'v_{name}[{i}] = fma((double){i}, {i}_d, {i}_f);' if arange_fused() else f'v_{name}[{i}] = {i}_f + (double){i} * {i}_d;')
         else:
             self.open(f'for (int64_t {i} = 0; {i} < {length}; {i}++)')
             self.emit(f'v_{name}[{i}] = ({ctype})((uint64_t){a} + (uint64_t){i} * (uint64_t){c});')
@@ -4732,11 +4755,12 @@ class Compiler(GList, Compare, GSet):
             if T.is_narrow(rt):                        # the same function on doubles, then rounded once to the narrow type
                 wide = T.NP_FLOAT64 if rt.kind == 'float' else T.NP_INT64
                 ts = [wide if T.is_narrow(t) or t.np is False else t for t in ts]
-                c, f = self.numpy_on(name, vals, ts, wide)
+                c, f = self.numpy_on(name, vals, ts, wide, dtype=rt.name[3:])
                 return f'(({rt.ctype})({c}))', f
         return self.numpy_on(name, vals, ts, rt)
 
-    def numpy_on(self, name, vals, ts, rt):
+    def numpy_on(self, name, vals, ts, rt, dtype='float64'):
+        """dtype: the numpy dtype the result is rounded to, when it's computed in double for a narrow one."""
         xs = [self.hold(self.coerce(c, t, T.FLOAT), T.FLOAT) for c, t in zip(vals, ts)]
         x = xs[0]
         if name == 'int64':
@@ -4780,7 +4804,7 @@ class Compiler(GList, Compare, GSet):
         if name == 'copysign':
             return self.hold(f'copysign({x}, {xs[1]})', T.FLOAT), '1'
         if name in NP_MINMAX:
-            return self.numpy_minmax(name, x, xs[1], 'float32' if rt is T.NARROW['float32'] else 'float64'), '1'
+            return self.numpy_minmax(name, x, xs[1], dtype if dtype in ('float32', 'float64') else 'float64'), '1'
         c = NP_LIBM1.get(name) or NP_LIBM2[name]
         args = ', '.join(xs)
         if not self.exact:
@@ -4802,6 +4826,24 @@ class Compiler(GList, Compare, GSet):
             return None
         self.helpers.add('nploop')
         return len(LIBM) + 2 * _nploops.LOOPS.index((name, sig))
+
+    def np_pow_loop(self, at, bt, sig, libm_name):
+        """The sj_m slot of numpy's power loop for a ** b on these types, when that's what numpy computes it with and
+        not the C library: numpy's scalar math calls pow itself for two scalars of the result's type, and its ufunc,
+        which may be SVML's, otherwise. None: the C library."""
+        from . import _nploops
+        from ._dispatch import libm_address
+
+        def kind(t):
+            t = T.as_narrow(t) if t is not None else None
+            if t is None:
+                return None
+            return t.name[3:] if t.np is True else {'int': 'int', 'float': 'float', 'bool': 'bool'}.get(t.kind)
+        ka, kb = kind(at), kind(bt)
+        if ka is None or kb is None or not _nploops.pow_needs_loop(ka, kb, sig, libm_address(libm_name)):
+            return None
+        self.helpers.add('nploop')
+        return len(LIBM) + 2 * _nploops.LOOPS.index(('power', sig))
 
     def numpy_minmax(self, name, a, b, dtype='float64'):
         op = '<' if name in ('minimum', 'fmin') else '>'
@@ -7044,7 +7086,7 @@ class Compiler(GList, Compare, GSet):
             return self.call(e)
         raise AssertionError(e)
 
-    def power(self, a, b, fa, fb, rt, npf, line, right):
+    def power(self, a, b, fa, fb, rt, npf, line, right, at=None, bt=None):
         """The value of a ** b. npf: 1 when numpy's rules apply."""
         out = self.temp()
         self.emit(f'{rt.ctype} {out} = 0;')
@@ -7057,11 +7099,11 @@ class Compiler(GList, Compare, GSet):
                 self.emit(f'if ((int64_t){b} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 15, 0);')
                 self.emit(f'{out} = ({rt.ctype})sj_ipow((int64_t){a}, (int64_t){b});')
             elif rt.ctype == 'float':                  # numpy calls powf
-                slot = self.np_loop('power', 'ff->f', 'powf') if self.exact else None
+                slot = self.np_pow_loop(at, bt, 'ff->f', 'powf') if self.exact else None
                 f = f'((float (*)(float, float))(uintptr_t)sj_m[{LIBM.index("powf")}])' if self.exact else 'powf'
                 self.emit(f'{out} = {f}({fa}, {fb});' if slot is None else f'{out} = sj_np2f(sj_m, {slot}, {fa}, {fb});')
             elif self.exact:
-                slot = self.np_loop('power', 'dd->d', 'pow')
+                slot = self.np_pow_loop(at, bt, 'dd->d', 'pow')
                 self.emit(f'{out} = {table}({fa}, {fb});' if slot is None else f'{out} = sj_np2(sj_m, {slot}, {fa}, {fb});')
             else:
                 fast()
@@ -7198,7 +7240,7 @@ class Compiler(GList, Compare, GSet):
         isfloat = rt.kind == 'float'
         fa, fb = self.coerce(a, at, rt if isfloat else T.FLOAT), self.coerce(b, bt, rt if isfloat else T.FLOAT)
         if op == 'Pow':
-            return self.power(a, b, fa, fb, rt, npf, line, right)
+            return self.power(a, b, fa, fb, rt, npf, line, right, at, bt)
         if op in ('Add', 'Sub', 'Mult'):
             if op == 'Mult' and self.exact and at.kind == 'float' and bt.kind == 'int' and npf != '1':
                 # CPython computes float * int(-1) as a negation, so a NaN's sign bit flips

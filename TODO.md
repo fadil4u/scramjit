@@ -345,7 +345,8 @@ Spills per line, once cimo can report them.
    Not yet: `np.sin`, `np.exp` and the like on float32 (numpy's own SIMD versions: check them against numpy per CPU first), float functions of narrow ints (float16 results),
    `.std()` and `.var()` on float32 (numpy computes them in float32), `.sum()` of signed ints on wasm32 (numpy totals in int32 there), and `np.int8(x)` of a float.
    A literal becoming narrow must fit exactly: not `s = 0.1` on float32, nor a parameter, and such a variable can't meet a Python number afterwards, since the type depends on its flag.
-   Speed, all in cimo's `TODO.md`: byte and short lanes (`uint8` brighten 0.24 ns per element against int32's 0.12).
+   Speed: byte and short lanes **done in cimo** (2026-11-09): `uint8` brighten 0.24 to 0.018 ns per element (int32 0.071, numpy
+   0.022), its per-iteration `amount` check unswitched out of the loop by cimo; widening (`uint8` to `int32`, byte sums) is still in cimo's `TODO.md`.
    `bench/llm.py` still runs on float64 weights, from before float32 compiled: measure float32 (half the memory the matrix products read), with `bench/gcc.py` on `float` alongside.
 3. **64-bit ints, what's left:** hashes masked with `& 0xFFFFFFFFFFFFFFFF` compile (`examples/hash64.py`). `np.uint64`
    elements compile with numpy's rules (`tests/test_uint64.py`). Not yet: unsigned 64-bit Python ints in tuples, dicts, as `/`, passed to

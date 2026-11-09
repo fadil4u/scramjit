@@ -10,7 +10,7 @@ import pytest
 from scramjit import FallbackWarning, scram
 from scramjit._dispatch import Function
 
-from util import _value, outcome
+from util import _value, outcome, zero_ties
 
 np.seterr(all='ignore')
 warnings.filterwarnings('ignore', category=RuntimeWarning)
@@ -116,7 +116,7 @@ def test_signed_zeros_at_every_length(op, n):
     f, g = make(f'x.{op}()', 'x')
     for _ in range(25):
         a = RNG.choice([0.0, -0.0, 0.0, 1.0, -1.0] if _ % 2 else [0.0, -0.0], n)
-        assert _value(f(a)) == _value(g(a)), a
+        assert zero_ties(_value(f(a))) == zero_ties(_value(g(a))), a
 
 
 @pytest.mark.parametrize('op', ['max', 'min'])

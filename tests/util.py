@@ -66,3 +66,26 @@ def maxrss_kb():
     import sys
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak // 1024 if sys.platform == 'darwin' else peak
+
+
+def _numpy_orders_zeros():
+    """Does this numpy order zeros as IEEE 754-2019 does, min(-0.0, 0.0) -0.0 and max 0.0 whichever comes first, as
+    compiled code does? numpy on arm64 Linux does; its x86-64 SIMD returns the second operand on a tie, as minps does,
+    and other builds have their own rules, so there a zero's sign from min and max is the numpy build's choice."""
+    ties = ((0.0, -0.0), (-0.0, 0.0))
+    return all(np.signbit(lo(a, b)) and not np.signbit(hi(a, b)) for a, b in ties
+               for lo, hi in ((np.minimum, np.maximum), (np.fmin, np.fmax)))
+
+
+NUMPY_ORDERS_ZEROS = _numpy_orders_zeros()
+
+
+def zero_ties(v):
+    """v with a zero's sign dropped where this numpy's min and max don't order zeros (see _numpy_orders_zeros)."""
+    if NUMPY_ORDERS_ZEROS:
+        return v
+    if isinstance(v, tuple):
+        return tuple(zero_ties(x) for x in v)
+    if isinstance(v, bytes) and len(v) == 8 and v in (struct.pack('<d', 0.0), struct.pack('<d', -0.0)):
+        return 'zero'
+    return v

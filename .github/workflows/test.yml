@@ -1,0 +1,96 @@
+# The test suite on every push and pull request, against cimo's main branch checked out next to this repository
+# (as tests/conftest.py expects): Linux, macOS and Windows on x86-64 and arm64, every supported CPython on Linux
+# x86-64, free-threaded CPython, and Pyodide under Node. One more job runs it against the cimo on PyPI that
+# pyproject.toml pins, as a user's `pip install scramjit` gets.
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.name }} (${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64, os: ubuntu-24.04, python: "3.13" }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, python: "3.13" }
+          - { name: macos-arm64, os: macos-15, python: "3.13" }
+          - { name: macos-x64, os: macos-15-intel, python: "3.13" }
+          - { name: windows-x64, os: windows-2025, python: "3.13" }
+          - { name: windows-arm64, os: windows-11-arm, python: "3.13" }
+          - { name: linux-x64, os: ubuntu-24.04, python: "3.9" }
+          - { name: linux-x64, os: ubuntu-24.04, python: "3.10" }
+          - { name: linux-x64, os: ubuntu-24.04, python: "3.11" }
+          - { name: linux-x64, os: ubuntu-24.04, python: "3.12" }
+          - { name: linux-x64, os: ubuntu-24.04, python: "3.14" }
+          - { name: linux-arm64-free-threaded, os: ubuntu-24.04-arm, python: "3.13t" }
+    defaults:
+      run:
+        shell: bash
+        working-directory: scramjit
+    env:
+      CIMO_DEV: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: scramjit
+      - uses: actions/checkout@v4
+        with:
+          repository: farizrahman4u/cimo
+          path: cimo
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install pytest numpy
+      - run: python -c "import sys; sys.path.insert(0, '../cimo/python'); import cimo, numpy; print(sys.version); print('cimo', cimo.__version__, 'numpy', numpy.__version__)"
+      - run: python tools/run_tests.py
+
+  released-cimo:
+    name: linux-x64, cimo from PyPI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install . pytest numpy
+      - run: python -c "import cimo; print('cimo', cimo.__version__, cimo.__file__)"
+      - run: python tools/run_tests.py
+
+  pyodide:
+    name: pyodide (node)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: scramjit
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: scramjit
+      - uses: actions/checkout@v4
+        with:
+          repository: farizrahman4u/cimo
+          path: cimo
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: a one-file cimo from cimo's main (tools/sync_site.py)
+        run: python tools/sync_site.py
+      - run: npm i pyodide@0.27.7
+      - name: tests in Pyodide
+        run: |
+          node tools/run_pyodide_tests.mjs tests/test_sets.py tests/test_compare.py tests/test_glists.py tests/test_elementwise.py | tee out.txt
+          grep -q "EXIT ExitCode.OK\|EXIT 0" out.txt

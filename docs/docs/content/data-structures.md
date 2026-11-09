@@ -921,8 +921,8 @@ static int sj_call_0(double v_self__x, double v_self__y, int64_t *sj_tb, int64_t
     double t7 = (t3 + t6);
     double t8 = t7;
     double t9 = sqrt(t8);
-    if (t9 != t9 && t8 == t8) SJ_FAIL(3, 2, 4, 0);
-    if (isinf(t9) && isfinite(t8)) SJ_FAIL(3, 2, 4, 0);
+    if (t9 != t9 && t8 == t8) SJ_MATH_FAIL(2, 0, 1, sj_dbits(t7), 0);
+    if (isinf(t9) && isfinite(t8)) SJ_MATH_FAIL(2, 0, 1, sj_dbits(t7), 0);
     { double t10 = t9; memcpy(&sj_io[0], &t10, 8); }
     goto sj_done;
 sj_done:
@@ -952,14 +952,14 @@ int sj_kernel(int64_t v_n, const uint64_t *sj_m, volatile int *sj_stop, int64_t 
             int64_t t6 = v_i;
             double t7 = (double)(t6);
             double t8 = SJ_LIBM1(1)(t7);
-            if (t8 != t8 && t7 == t7) SJ_FAIL(3, 5, 4, 0);
-            if (isinf(t8) && isfinite(t7)) SJ_FAIL(3, 5, 4, 0);
+            if (t8 != t8 && t7 == t7) SJ_MATH_FAIL(5, 9, 1, sj_dbits((double)(t6)), 0);
+            if (isinf(t8) && isfinite(t7)) SJ_MATH_FAIL(5, 9, 1, sj_dbits((double)(t6)), 0);
             v_sjc__v__x = t8;
             int64_t t9 = v_i;
             double t10 = (double)(t9);
             double t11 = SJ_LIBM1(0)(t10);
-            if (t11 != t11 && t10 == t10) SJ_FAIL(3, 5, 4, 0);
-            if (isinf(t11) && isfinite(t10)) SJ_FAIL(3, 5, 4, 0);
+            if (t11 != t11 && t10 == t10) SJ_MATH_FAIL(5, 8, 1, sj_dbits((double)(t9)), 0);
+            if (isinf(t11) && isfinite(t10)) SJ_MATH_FAIL(5, 8, 1, sj_dbits((double)(t9)), 0);
             double t12 = t11;
             double t13 = 0x1.0000000000000p+1;
             v_sjc__v__y = (t12 * t13);

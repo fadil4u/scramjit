@@ -31,7 +31,7 @@ import sys
 
 from ._mathlib import snippets
 from . import _mathlib
-from ._runtime import (ATTRIBUTE_NONE, POOL_FULL, attribute_number, ARANGE_ERROR, BROADCAST_ERROR, OPERANDS_ERROR, INDEX_ERROR, INTERRUPTED, LINSPACE_ERROR, MAKE_DTYPES, MAKE_ERROR, NO_AXIS, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
+from ._runtime import (MATH_ERROR_FUNCS, ATTRIBUTE_NONE, POOL_FULL, attribute_number, ARANGE_ERROR, BROADCAST_ERROR, OPERANDS_ERROR, INDEX_ERROR, INTERRUPTED, LINSPACE_ERROR, MAKE_DTYPES, MAKE_ERROR, NO_AXIS, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
                        OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION)
 
 BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'round', 'sum', 'any', 'all')
@@ -7632,11 +7632,18 @@ class Compiler(GList, Compare, GSet):
         self.emit(f'double {ip} = trunc({x}), {fr} = isinf({x}) ? copysign(0.0, {x}) : copysign({x} - {ip}, {x});')
         return [(fr, '0'), (ip, '0')]
 
+    def math_fail(self, name, line, args):
+        """A statement raising what math.<name>(*args) raises, for Python to word: args are (C value, 'f' or 'i')."""
+        bits = [f'(int64_t)({c})' if how == 'i' else f'sj_dbits({c})' for c, how in args] + ['0', '0']
+        kinds = len(args) | sum(4 << k for k, (_, how) in enumerate(args) if how == 'i')
+        return f'SJ_MATH_FAIL({line}, {MATH_ERROR_FUNCS.index(name)}, {kinds}, {bits[0]}, {bits[1]})'
+
     def math_ported(self, e, name, kind, ts, vals, xs):
         """The functions ported from mathmodule.c that take numbers."""
         line = self.line(e)
-        dom = f'SJ_FAIL({VALUE_ERROR}, {line}, 4, 0)'
-        rng = f'SJ_FAIL({OVERFLOW_ERROR}, {line}, 1, 0)'
+        dom = rng = self.math_fail(name, line, [(x, 'f') for x in xs]) if name in MATH_ERROR_FUNCS else None
+        if kind == 'ldexp':
+            rng = f'SJ_FAIL({OVERFLOW_ERROR}, {line}, 1, 0)'
         kws = {k.arg: k.value for k in e.keywords}
         if kind == 'gamma':
             self.uses_libm = True
@@ -7740,8 +7747,9 @@ class Compiler(GList, Compare, GSet):
         xs = [self.coerce(c, t, T.FLOAT) for (c, _), t in zip(vals, ts)]
         if kind in ('gamma', 'remainder', 'nextafter', 'ulp', 'fma', 'ldexp', 'isclose'):
             return self.math_ported(e, name, kind, ts, vals, xs)
-        dom = f'SJ_FAIL({VALUE_ERROR}, {line}, 4, 0)'
-        rng = f'SJ_FAIL({OVERFLOW_ERROR}, {line}, 1, 0)'
+        # A domain or range error is raised by calling math.<name> on the same arguments, so it's worded as this Python
+        # words it (xs are values already held, so reading them again is free)
+        dom = rng = self.math_fail(name, line, [(x, 'f') for x in xs]) if name in MATH_ERROR_FUNCS else None
 
         def libm(n):
             self.uses_libm = True
@@ -7767,9 +7775,11 @@ class Compiler(GList, Compare, GSet):
                 self.emit(f'if (isinf({r}) && isfinite({x})) {rng if can_overflow else dom};')
             return r, '0'
         if kind == 'log':
+            ints = [t.kind in ('int', 'bool') and t.np is False for t in ts]
+            dom = self.math_fail(name, line, [(v[0], 'i') if i else (x, 'f') for v, x, i in zip(vals, xs, ints)])
+
             def loghelper(i, fn):
-                t = ts[i]
-                if t.kind in ('int', 'bool') and t.np is False:     # a Python int: checked directly
+                if ints[i]:                                 # a Python int: checked directly
                     self.emit(f'if ((int64_t){vals[i][0]} <= 0) {dom};')
                     return self.hold(f'sj_m_log(SJ_LIBM1({libm(fn)}), (double){vals[i][0]})', T.FLOAT)
                 x = self.hold(xs[i], T.FLOAT)
@@ -7781,7 +7791,7 @@ class Compiler(GList, Compare, GSet):
             if len(e.args) == 1:
                 return num, '0'
             den = loghelper(1, 'log')
-            self.emit(f'if ({den} == 0.0) SJ_FAIL({ZERO_DIVISION}, {line}, 1, 0);')
+            self.emit(f'if ({den} == 0.0) {dom};')         # Python's ZeroDivisionError, worded as this Python words it
             return f'({num} / {den})', '0'
         if kind == 'atan2':
             y, x = self.hold(xs[0], T.FLOAT), self.hold(xs[1], T.FLOAT)

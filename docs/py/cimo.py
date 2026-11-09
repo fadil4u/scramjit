@@ -40635,7 +40635,7 @@ def transform(fn, lp):
     c, hoist = c
     g = shape(lp)
     if g is None:
-        return False
+        return _leaving(fn, lp, c, hoist, n)
     P, E, exits = g
     H = lp.header
     copy = clone(fn, lp, E, exits)
@@ -40650,6 +40650,97 @@ def transform(fn, lp):
     _count[fn.name] = n + 1
     M.count('unswitch')
     return True
+def _invcond(fn, lp, b):
+    ids = {x.id for x in lp.blocks}
+    if b.jmp.type != D.Jjnz or b.s1 is b.s2 or not ir.istmp(b.jmp.arg):
+        return None
+    t = fn.tmp[rval(b.jmp.arg)]
+    if t.def_ is None:
+        return None
+    if t.bid not in ids:
+        return b.jmp.arg, None
+    d = t.def_
+    if d.op in ir.PURE_SAFE and all(not ir.istmp(a) or fn.tmp[rval(a)].bid not in ids for a in d.arg):
+        return b.jmp.arg, d
+    return None
+def _leaving(fn, lp, c, hoist, n):
+    X = c.s1 if c.s1 not in lp.blocks else c.s2 if c.s2 not in lp.blocks else None
+    if X is None:
+        return False
+    checks = []
+    for p in X.pred[:X.npred]:
+        if p not in lp.blocks:
+            return False
+        ic = _invcond(fn, lp, p)
+        if ic is None or (p.s1 is X) == (p.s2 is X):
+            return False
+        checks.append((p, ic, p.s1 is X))
+    exits = [(b, e) for b, e in lp.exits() if e is not X]
+    targets = list(dict.fromkeys(e for _, e in exits))
+    if len(targets) != 1:
+        return False
+    E = targets[0]
+    if any(p not in lp.blocks for p in E.pred[:E.npred]):
+        return False
+    outs = lp.outside_preds()
+    if len(outs) != 1:
+        return False
+    defined = set()
+    for b in lp.blocks:
+        defined.update(rval(p.to) for p in ir.phis(b))
+        defined.update(rval(i.to) for i in ir.ins(b) if ir.istmp(i.to))
+    for b in ir.blocks(fn):
+        if b in lp.blocks:
+            continue
+        refs = [b.jmp.arg] + [a for i in ir.ins(b) for a in i.arg[:2]]
+        if any(ir.istmp(r) and rval(r) in defined for r in refs) and not _dominates(E, b):
+            return False
+        for p in ir.phis(b):
+            for x, a in zip(p.blk[:p.narg], p.arg[:p.narg]):
+                if ir.istmp(a) and rval(a) in defined and x not in lp.blocks and not _dominates(E, x):
+                    return False
+    H = lp.header
+    P = outs[0]
+    if P.jmp.type != D.Jjmp:
+        Pn = ir.newblock(fn, P, 'us')
+        ir.setjmp(Pn, H)
+        if P.s1 is H:
+            P.s1 = Pn
+        if P.s2 is H:
+            P.s2 = Pn
+        for p in ir.phis(H):
+            p.blk[:p.narg] = [Pn if x is P else x for x in p.blk[:p.narg]]
+        P = Pn
+    copy = clone(fn, lp, E, exits)
+    new = []
+    leave = None
+    for b, (cond, h), tl in checks:
+        if h is not None:
+            cond = ir.newtmp('us', h.cls, fn)
+            new.append(Ins(h.op, h.cls, cond, h.arg[0], h.arg[1]))
+        if not tl:
+            x = ir.newtmp('us', D.Kw, fn)
+            new.append(Ins(D.Oceqw, D.Kw, x, cond, D.CON_Z))
+            cond = x
+        if leave is None:
+            leave = cond
+        else:
+            x = ir.newtmp('us', D.Kw, fn)
+            new.append(Ins(D.Oor, D.Kw, x, leave, cond))
+            leave = x
+    ir.setins(P, ir.ins(P) + new)
+    ir.setjnz(P, leave, H, copy[H])
+    for b, _, tl in checks:
+        ir.setjmp(copy[b], copy[b.s2 if tl else b.s1])
+    _count[fn.name] = n + 1
+    M.count('unswitch')
+    return True
+def _dominates(a, b):
+    while b is not None:
+        if b is a:
+            return True
+        b = b.idom
+    return False
 def shape(lp, many=False, fn=None):
     exits = lp.exits()
     targets = list(dict.fromkeys(e for _, e in exits))
@@ -41051,6 +41142,140 @@ def _widening(fast, r, cloned):
             if sum(1 for y in cloned for a in y.arg[:2] if a == r.v) == 1:
                 return x
     return None
+_LOWBITS = {D.Oadd: 'qadd', D.Osub: 'qsub', D.Omul: 'qmul', D.Oand: 'qand', D.Oor: 'qor', D.Oxor: 'qxor', D.Oshl: 'qshl',
+            D.Oneg: 'qneg'}
+_IDENT = (D.Ocopy, D.Oextub, D.Oextsb, D.Oextuh, D.Oextsh, D.Oextuw, D.Oextsw)
+_NARROWLD = {1: (D.Oloadub, D.Oloadsb), 2: (D.Oloaduh, D.Oloadsh)}
+_NARROWST = {1: D.Ostoreb, 2: D.Ostoreh}
+def _bytes(fast, rts):
+    if _ext.qbytes() == 32 or D.T.name.startswith('amd64'):
+        if 'avx' not in _ext.x86 and _ext.qbytes() == 32:
+            return 0
+    elif not D.T.name.startswith('arm64'):
+        return 0
+    if fast.vreds or any(rval(p.to) not in fast.A.biv for p in ir.phis(fast.sh.H)):
+        return 0
+    A = fast.A
+    fn = fast.fn
+    width = None
+    made = set()
+    mem = []
+    x86 = D.T.name.startswith('amd64')
+    for n, i in enumerate(fast.cloned):
+        if i.op in (D.Onop, D.Odbgloc):
+            continue
+        w = next((w for w, ops in _NARROWLD.items() if i.op in ops), None)
+        st = next((w for w, op in _NARROWST.items() if i.op == op), None)
+        if w or st:
+            w = w or st
+            if width not in (None, w):
+                return 0
+            width = w
+            f = A.form(i.arg[1] if st else i.arg[0], 64)
+            if f is None or not f.S.isconst() or f.S.c != w or A.avlevel(f) == 'X':
+                return 0
+            if st and not _operand(fast, i.arg[0], made):
+                return 0
+            mem.append((i, f, n, bool(st)))
+            if not st:
+                made.add(rval(i.to))
+            continue
+        if not ir.istmp(i.to) or i.cls not in (Kw, Kl):
+            return 0
+        if i.op in _IDENT:
+            if not _operand(fast, i.arg[0], made):
+                return 0
+            made.add(rval(i.to))
+            continue
+        name = _LOWBITS.get(i.op)
+        if name is None:
+            return 0
+        if i.op == D.Oshl:
+            c = ir.conval(fn, i.arg[1])
+            if c is None or not 0 <= c < 16:
+                return 0
+            args = [i.arg[0]]
+        else:
+            args = [i.arg[0]] if i.arg[1] == R else i.arg[:2]
+        for a in args:
+            if not _operand(fast, a, made):
+                return 0
+        made.add(rval(i.to))
+    if width is None or not any(st for _, _, _, st in mem):
+        return 0
+    if x86 and any(i.op == D.Omul or i.op == D.Oshl for i in fast.cloned) and width == 1:
+        return 0
+    vf = _ext.qbytes() // width
+    far = set()
+    for i, f, n, isstore in mem:
+        if not isstore:
+            continue
+        for j, g, m, other in mem:
+            if j is i or (other and m < n):
+                continue
+            if not rts.may_alias(i.arg[1], j.arg[1] if other else j.arg[0]):
+                continue
+            if f.L.noconst().ident() != g.L.noconst().ident():
+                far.add(tuple(sorted((f.L.noconst().ident(), g.L.noconst().ident()), key=str)))
+            elif other:
+                d = f.L.c - g.L.c
+                if d != 0 and abs(d) < vf * f.S.c:
+                    return 0
+            elif not _distance(f, g, vf, n, m):
+                return 0
+    if len(far) > MAXCHECKS:
+        return 0
+    fast.vchecks = _checks(mem, far)
+    fast.vmem = mem
+    fast.vnarrow = ('bytes', width)
+    return vf
+def _bytes_body(fast, em, state, copy):
+    fn = fast.fn
+    k0 = copy * fast.vf
+    w = fast.vnarrow[1]
+    x = 'b' if w == 1 else 'h'
+    dup = D.Oqdupb if w == 1 else D.Oqduph
+    env = {}
+    def vec(a):
+        if ir.istmp(a) and rval(a) in env:
+            return env[rval(a)]
+        key = ('lowdup', w, a)
+        if key not in fast.memo:
+            c = ir.conval(fn, a)
+            if c is not None:
+                s = fast.fp.con(c & (0xff if w == 1 else 0xffff))
+            else:
+                em0, fast.em = fast.em, fast.fp
+                s = fast.opmap(a, 0, {}, state, None)
+                fast.em = em0
+            fast.memo[key] = fast.fp.raw(dup, Kq, s)
+        return fast.memo[key]
+    for i in fast.cloned:
+        if i.op in (D.Onop, D.Odbgloc):
+            continue
+        if i.op in _NARROWLD[w]:
+            env[rval(i.to)] = em.raw(D.Oqload, Kq, fast.opmap(i.arg[0], k0, env, state, None))
+            continue
+        if i.op == _NARROWST[w]:
+            em.ins(Ins(D.Oqstore, Kq, R, vec(i.arg[0]), fast.opmap(i.arg[1], k0, env, state, None)))
+            continue
+        if i.op in _IDENT:
+            env[rval(i.to)] = vec(i.arg[0])
+            continue
+        name = _LOWBITS[i.op]
+        if i.op == D.Oneg:
+            env[rval(i.to)] = em.raw(getattr(D, 'Oqsub' + x), Kq, _zero(fast, dup), vec(i.arg[0]))
+        elif i.op == D.Oshl:
+            env[rval(i.to)] = em.raw(getattr(D, 'Oqshl' + x), Kq, vec(i.arg[0]), i.arg[1])
+        elif i.op in (D.Oand, D.Oor, D.Oxor):
+            env[rval(i.to)] = em.raw(getattr(D, 'O' + name), Kq, vec(i.arg[0]), vec(i.arg[1]))
+        else:
+            env[rval(i.to)] = em.raw(getattr(D, 'O' + name + x), Kq, vec(i.arg[0]), vec(i.arg[1]))
+    return dict(state)
+def _zero(fast, dup):
+    if ('zero', dup) not in fast.memo:
+        fast.memo[('zero', dup)] = fast.fp.raw(dup, Kq, fast.fp.con(0))
+    return fast.memo[('zero', dup)]
 def _narrow(fast, rts):
     if _ext.qbytes() == 32 or D.T.name.startswith('amd64'):
         if 'avx' not in _ext.x86:
@@ -41138,8 +41363,13 @@ def plan(fast, rts):
     A = fast.A
     sh = fast.sh
     fast.vnarrow = None
-    if any(i.op in (D.Oloadub, D.Ostoreb) for i in fast.cloned):
-        return _narrow(fast, rts)
+    if any(i.op in (D.Oloadub, D.Oloadsb, D.Ostoreb, D.Oloaduh, D.Oloadsh, D.Ostoreh) for i in fast.cloned):
+        vf = _bytes(fast, rts)
+        if vf:
+            return vf
+        fast.vnarrow = None
+        if any(i.op in (D.Oloadub, D.Ostoreb) for i in fast.cloned):
+            return _narrow(fast, rts)
     fast.vreds = []
     skip = set()
     rest = []
@@ -41498,6 +41728,8 @@ def body(fast, em, state, copy=0):
                 em.ins(Ins(D.Oqstore, Kq, R, fast.memo[('dupb', c)],
                            fast.opmap(i.arg[1], copy * fast.vf, {}, state, None)))
         return dict(state)
+    if isinstance(fast.vnarrow, tuple) and fast.vnarrow[0] == 'bytes':
+        return _bytes_body(fast, em, state, copy)
     if fast.vnarrow is not None:
         return _narrow_body(fast, em, state, copy)
     fn = fast.fn
@@ -41768,12 +42000,12 @@ def closeloop(fast, em, MB, FP, state):
 ''',
 'onefile-keys.json': '''\
 {
-"compiler": "6fdb60756ab7c435ef73",
-"runtime-amd64_sysv": "d86608d6be78c3088069",
-"runtime-amd64_windows": "efbfd8102c51e77dfbd9",
-"runtime-arm64": "f289b14ec00d37a69ccf",
-"runtime-arm64_apple": "67777fa09a885d99a0ab",
-"runtime-arm64_win": "232a6fe59ff2d19d792d"
+"compiler": "fb6c8cab0976bc45e61b",
+"runtime-amd64_sysv": "22e82cc91f81768edc5f",
+"runtime-amd64_windows": "ee19d4939cd17417e2dd",
+"runtime-arm64": "4b3b260ca09852902906",
+"runtime-arm64_apple": "7c070ae1ce6e922f9837",
+"runtime-arm64_win": "0fc55d688427edf6d3d5"
 }
 ''',
 'onefile.py': '''\

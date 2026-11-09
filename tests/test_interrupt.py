@@ -238,6 +238,7 @@ import numpy as np
 from scramjit import scram
 import kernels
 print = __import__('functools').partial(print, flush=True)
+ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)    # Ctrl-C on, as in a console: CI starts processes with it ignored
 sent = []
 def fire(after):
     time.sleep(after)

@@ -122,9 +122,13 @@ Comparing lists and tuples has the same root: Python finds the very same NaN obj
 
 Every comparison with a NaN is false, so a list holding one has no sorted order, and where its elements end up depends on the algorithm: CPython's own result changed between versions. Compiled code sorts it in an order of its own, also differing from CPython's. Without NaNs the result is Python's exactly, `-0.0` and `0.0` keeping their order as Python's stable sort keeps it. Drop the NaNs first, or sort with `key=` mapping them to a number, if they may be there.
 
-### On Windows, a NaN's sign can differ
+### A NaN's sign can differ
 
-A few operations give a NaN with the opposite sign bit from CPython's on Windows: `inf % 1.0`, `inf // 1.0`, `math.atan2(0.0, nan)` and `nan * -1`. Both are NaN and compare the same; only `math.copysign` or the raw bytes can tell. Seen on Windows arm64; Linux matches exactly.
+Arithmetic that gives a NaN may give it with the opposite sign bit from CPython's: `nan * -1`, `0.0 - nan`, `inf % 1.0`, `math.atan2(0.0, nan)`. Both are NaN and compare the same; only `math.copysign` or the raw bytes can tell. CPython itself doesn't agree with itself here: on one arm64 Linux machine, Ubuntu's CPython 3.12 gives `nan * -1` the sign bit and a python.org build doesn't, because the sign follows the C compiler CPython was built with and the CPU (x86-64's NaN from an invalid operation is negative).
+
+### `max()` of an array of zeros of both signs
+
+`x.max()` and `x.min()` on an array whose largest (or smallest) value is a zero, with both `0.0` and `-0.0` in it, give numpy's zero where numpy's rule is fixed: on arm64 `max` gives `0.0` and `min` `-0.0`, wherever they are. On x86-64, numpy's vector code keeps whichever zero its vector lanes meet last, so which zero comes back depends on the array's length and where the zeros are; compiled code may return the other one. The value compares equal either way. `np.maximum`, `np.minimum`, `np.fmax` and `np.fmin` of two numbers follow the numpy present exactly, on every platform.
 
 ## Things that work differently around a compiled call
 

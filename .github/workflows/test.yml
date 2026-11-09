@@ -9,6 +9,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# a newer push to the same branch cancels the run it supersedes
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: ${{ matrix.name }} (${{ matrix.python }})
@@ -20,8 +25,8 @@ jobs:
         include:
           - { name: linux-x64, os: ubuntu-24.04, python: "3.13" }
           - { name: linux-arm64, os: ubuntu-24.04-arm, python: "3.13" }
-          - { name: macos-arm64, os: macos-15, python: "3.13" }
-          - { name: macos-x64, os: macos-15-intel, python: "3.13" }
+          - { name: macos-arm64, os: macos-15, python: "3.13", step: 4 }        # 7 GB: fewer test files per process
+          - { name: macos-x64, os: macos-15-intel, python: "3.13", step: 4 }
           - { name: windows-x64, os: windows-2025, python: "3.13" }
           - { name: windows-arm64, os: windows-11-arm, python: "3.13" }
           - { name: linux-x64, os: ubuntu-24.04, python: "3.12" }
@@ -47,7 +52,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install pytest numpy -e ../cimo/python -e .    # importable from every subprocess a test starts
       - run: python -c "import sys; import cimo, numpy; print(sys.version); print('cimo', cimo.__version__, 'numpy', numpy.__version__)"
-      - run: python tools/run_tests.py
+      - run: python tools/run_tests.py --step ${{ matrix.step || 12 }}
 
   released-cimo:
     name: linux-x64, cimo from PyPI

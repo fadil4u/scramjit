@@ -57,7 +57,8 @@ LOOPS = {
     'while_cond': ('def f(n: int):\n    s = 0\n    i = 0\n    while i < n:\n        s = (s + i) % 1000003\n        i += 1\n    return s\n', '(1 << 62)'),
     'generator': ('def f(n: int):\n    return sum(i % 7 for i in range(n))\n', '(1 << 62)'),
     'any_gen': ('def f(n: int):\n    return any(i < 0 for i in range(n))\n', '(1 << 62)'),
-    'list_comp': ('def f(n: int):\n    a = [i % 7 for i in range(n)]\n    return a[0]\n', '(1 << 27)'),
+    # seconds of work in 128 MB: a list of 2 ** 27 filled in under the 0.3 s before Ctrl-C on a fast machine, in 1 GB
+    'list_comp': ('def f(n: int):\n    a = [sum(j % 7 for j in range(i % 1000)) for i in range(n)]\n    return a[0]\n', '(1 << 24)'),
 }
 
 

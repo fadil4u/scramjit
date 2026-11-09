@@ -278,6 +278,19 @@ Iterator protocols (`__iter__`, `__next__`) never appear in generated code.
   what Python raises for, or treats oddly (`np.int64` to a 64-bit parameter is taken as an address, cimo `TODO.md`), stays Python. The module has a type of its own, like a function, so rebinding the name is a new signature.
 - **Module-level constants (built 2026-11-02).** Hidden parameters, read at each call, not embedded literals: a new value needs no recompile, and arrays and dicts get them for free. Passing one costs about what an
   argument does, 0.2 µs, more than the 21-25 ns measured for only checking one. A literal gains only on `%`: `x[i % K]` 1.25 against 1.06 ns; `x[i] * R` and `range(K)` nothing measurable.
+- **Lists that grow, and containers that nest (built 2026-11-07, from 0.0.4; `_glist.py`).** A list that grows, nests,
+  starts empty, is shared or holds non-numbers, and a dict with constant string keys or an instance (a record, with its
+  class), is a block on the array heap held by pointer, as Python holds them: `sj_glist` (data, length, capacity, its
+  block) and a struct per record type, elements by value (numbers, a struct per tuple type, an array's return record, a
+  pointer per list, record or set). The type decides the layout, recursively; one element type per list; nothing that
+  compiled before got slower (rectangular lists keep their block, flat number lists their copy). Memory: marked through at
+  each sweep by a function per type; every block knows its heap (`owner`), a sweep's mark is unique to its heap and pass
+  (`sj_phase`), and at a function's exit only its own blocks are kept, as orphans its caller adopts or Python frees.
+  Passed in: built in memory Python owns (`_GLBuild`) and written back in place, on errors too, unchanged values keeping
+  their identity; lists of plain numbers compared as a byte snapshot (a sorted 1M list written back 4.3 s -> 171 ms).
+  `[]` is typed by its appends (`Pending`). Pointers inside cimo's wasm structs are 8 bytes, so decoders read them so.
+  Sorting is a stable merge sort per element type (Python's order without NaNs), `key=` rewritten to a comprehension of
+  keys over the list being sorted.
 - **Sets (built 2026-11-09, from 0.0.4).** Iteration order is observable, so a set is CPython's own table in C:
   the same hashes (ints modulo 2**61 - 1, `_Py_HashDouble`, xxHash for tuples; 31 bits and 32-bit primes on a 32-bit
   CPython such as Pyodide's), linear probes then perturbation, the resize policy, dummies, and each operation's own

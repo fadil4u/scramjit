@@ -22,7 +22,55 @@ import copy
 from . import _types as T
 from ._runtime import LIST_INDEX_ERROR, MEMORY_ERROR, VALUE_ERROR, VALUE_ERROR_MESSAGES
 
-GROWERS = ('append', 'pop', 'extend', 'insert', 'clear')
+GROWERS = ('append', 'pop', 'extend', 'insert', 'clear', 'sort')
+
+# A stable merge sort of n VT (runs of 32 by insertion, then merges; a merge whose halves are already in order is a
+# copy), as Python's sort is stable: for numbers and tuples of numbers that orders them as Python does.
+SORT_TEMPLATE = '''
+static int @N@(@V@ *a, int64_t n) {
+    int64_t i, j, w;
+    for (int64_t s = 0; s < n; s += 32) {
+        int64_t e = s + 32 < n ? s + 32 : n;
+        for (i = s + 1; i < e; i++) {
+            @V@ x = a[i]; j = i;
+            while (j > s && @L@(&x, &a[j - 1])) { a[j] = a[j - 1]; j--; }
+            a[j] = x;
+        }
+    }
+    if (n <= 32) return 1;
+    @V@ *t = (@V@ *)malloc(sizeof(@V@) * (size_t)n);
+    if (!t) return 0;
+    @V@ *src = a, *dst = t;
+    for (w = 32; w < n; w *= 2) {
+        for (int64_t lo = 0; lo < n; lo += 2 * w) {
+            int64_t mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n, k = lo;
+            if (mid >= hi || !@L@(&src[mid], &src[mid - 1])) { memcpy(dst + lo, src + lo, sizeof(@V@) * (size_t)(hi - lo)); continue; }
+            i = lo; j = mid;
+            while (i < mid && j < hi) dst[k++] = @L@(&src[j], &src[i]) ? src[j++] : src[i++];
+            while (i < mid) dst[k++] = src[i++];
+            while (j < hi) dst[k++] = src[j++];
+        }
+        @V@ *sw = src; src = dst; dst = sw;
+    }
+    if (src != a) memcpy(a, src, sizeof(@V@) * (size_t)n);
+    free(t);
+    return 1;
+}
+'''
+SORT_BY_TEMPLATE = '''
+static int @N@_by(const @K@ *keys, void *a, int64_t item, int64_t n) {
+    if (n < 2) return 1;
+    @V@ *p = (@V@ *)malloc(sizeof(@V@) * (size_t)n);
+    if (!p) return 0;
+    for (int64_t i = 0; i < n; i++) { p[i].k = keys[i]; p[i].i = i; }
+    char *t = (char *)malloc((size_t)(item * n));
+    if (!t || !@N@(p, n)) { free(p); free(t); return 0; }
+    memcpy(t, a, (size_t)(item * n));
+    for (int64_t i = 0; i < n; i++) memcpy((char *)a + i * item, t + p[i].i * item, (size_t)item);
+    free(t); free(p);
+    return 1;
+}
+'''
 
 SNIPPET = """
 typedef struct sj_glist { void *p; int64_t n, cap; sj_block *db; } sj_glist;
@@ -86,7 +134,7 @@ class Pending(Exception):
 def receiver(call):
     """For x.append(v) and the like: (the list expression, the method), else None."""
     f = call.func if isinstance(call, ast.Call) else None
-    if isinstance(f, ast.Attribute) and f.attr in GROWERS and not call.keywords:
+    if isinstance(f, ast.Attribute) and f.attr in GROWERS and (not call.keywords or f.attr == 'sort'):
         return f.value, f.attr
     return None
 
@@ -244,7 +292,7 @@ class GList:
             if isinstance(node, ast.Subscript) and not (self.gl_is(node.value) or self.rc_is(node.value)):
                 return False
             if isinstance(node, ast.Call) and not (receiver(node) and receiver(node)[1] == 'pop' and self.gl_is(receiver(node)[0])) \
-                    and self.callee_of(node) is None:
+                    and not self.gl_sorted(node) and self.callee_of(node) is None:
                 return False
             return self.typeof(node).kind == 'glist'
         return False
@@ -544,6 +592,11 @@ class GList:
             self.fail(call, f'.{meth}() of {lt.name}')
         self.makes = True
         args = call.args
+        if meth == 'sort':
+            if args:
+                self.fail(call, '.sort() with positional arguments')
+            self.gl_sort_types(call, lt)
+            return T.NONE
         want = {'append': 1, 'extend': 1, 'insert': 2, 'clear': 0}.get(meth)
         if any(isinstance(a, ast.Starred) for a in args) or (want is not None and len(args) != want) or (meth == 'pop' and len(args) > 1):
             self.fail(call, f'.{meth}() with these arguments')
@@ -563,6 +616,38 @@ class GList:
                 raise Pending()
             return lt.elem
         return T.NONE
+
+    def gl_sorted(self, e):
+        """Is e sorted(...), made by the rewrite into sorted([...], key=[...], reverse=r)?"""
+        return isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == 'sorted' and self.is_builtin('sorted', 'sorted') \
+            and len(e.args) == 1 and isinstance(e.args[0], (ast.List, ast.ListComp)) and all(k.arg in ('key', 'reverse') for k in e.keywords)
+
+    def gl_sorted_type(self, e):
+        t = self.gl_ctor_type(e.args[0])
+        self.makes = True
+        self.gl_sort_types(e, t)
+        return t
+
+    def gl_sort_types(self, call, lt):
+        """xs.sort(key=..., reverse=...) or sorted(...) of a list of lt: the type of what's compared."""
+        kws = {k.arg: k.value for k in call.keywords}
+        if len(kws) != len(call.keywords) or not set(kws) <= {'key', 'reverse'}:
+            self.fail(call, 'a sort with these arguments')
+        if lt.elem is T.PENDING:
+            raise Pending()
+        r = kws.get('reverse')
+        if r is not None and self.typeof(r).kind not in ('int', 'bool'):
+            self.fail(r, 'reverse= that is not an int or a bool')
+        kt, key = lt.elem, kws.get('key')
+        if key is not None:
+            if not (isinstance(key, ast.ListComp) and isinstance(key.generators[0].iter, ast.Name) and key.generators[0].iter.id.startswith('_sj_')):
+                self.fail(key, "a sort key that reads the list it sorts (Python's list is empty while it sorts)" if isinstance(key, ast.Lambda)
+                          else 'a sort key that is not a lambda or a function')
+            self.env[key.generators[0].iter.id] = lt         # the list being sorted, as the keys' comprehension reads it
+            kt = self.gl_ctor_type(key).elem
+        if not (kt.is_number or kt.kind == 'tuple' and all(x.is_number for x in leaves(kt))):
+            self.fail(call, f'a sort comparing {kt.name} (numbers and tuples of numbers compare; give key= for others)')
+        return kt
 
     def gl_slice_parts(self, e):
         for part in (e.slice.lower, e.slice.upper, e.slice.step):
@@ -759,6 +844,61 @@ class GList:
     def gl_size(self, t):
         return f'(int64_t)sizeof({self.gl_ctype(t.elem)})'
 
+    def gl_sort_fn(self, kt, keyed, desc):
+        """The C function sorting values of kt (keyed: pairs of a key and an index), ascending or not."""
+        reg = self.gl_registry('gl_sorts')
+        if (kt.name, keyed, desc) in reg:
+            return reg[(kt.name, keyed, desc)]
+        name = f'sjS{len(reg)}'
+        reg[(kt.name, keyed, desc)] = name
+        kc = self.gl_ctype(kt)
+        v = f'{name}p' if keyed else kc
+        if keyed:
+            self.unit.code.append(f'typedef struct {v} {{ {kc} k; int64_t i; }} {v};')
+        x, y = ('a->k', 'b->k') if keyed else ('(*a)', '(*b)')
+        if desc:
+            x, y = y, x
+        if kt.kind == 'tuple':                 # Python's: the first leaves that differ (not ==) decide, by <
+            m = len(leaves(kt))
+            body = ' '.join([f'if ({x}.f{i} != {y}.f{i}) return {x}.f{i} < {y}.f{i};' for i in range(m - 1)] + [f'return {x}.f{m - 1} < {y}.f{m - 1};'])
+        else:
+            body = f'return {x} < {y};'
+        self.unit.code.append(f'static inline int {name}_lt(const {v} *a, const {v} *b) {{ {body} }}')
+        self.unit.code.append(SORT_TEMPLATE.replace('@N@', name).replace('@V@', v).replace('@L@', f'{name}_lt'))
+        if keyed:
+            self.unit.code.append(SORT_BY_TEMPLATE.replace('@N@', name).replace('@V@', v).replace('@K@', kc))
+        return name
+
+    def gl_sort(self, call, l, lt):
+        """Sort list l (of type lt) in place: reverse= first, then the keys (one per element, in order), then the sort."""
+        kws = {k.arg: k.value for k in call.keywords}
+        r, key = kws.get('reverse'), kws.get('key')
+        if r is None or isinstance(r, ast.Constant):
+            rev = bool(r.value) if r is not None else False
+        else:
+            rev = self.hold(f'(int64_t)({self.expr(r)[0]})', T.INT)
+        et = lt.elem
+        ect = self.gl_ctype(et)
+        if key is not None:
+            self.emit(f'v_{key.generators[0].iter.id} = {l};')
+            kt = self.gl_ctor_type(key)
+            keys = self.gl_make_value(key, kt)
+            kt = kt.elem
+
+        def call_for(desc):
+            if key is None:
+                return f'{self.gl_sort_fn(et, False, desc)}(({ect} *){l}->p, {l}->n)'
+            return f'{self.gl_sort_fn(kt, True, desc)}_by(({self.gl_ctype(kt)} *){keys}->p, {l}->p, (int64_t)sizeof({ect}), {l}->n)'
+        c = call_for(rev) if isinstance(rev, bool) else f'({rev} ? {call_for(True)} : {call_for(False)})'
+        self.emit(f'if (!{c}) SJ_FAIL({MEMORY_ERROR}, {self.line(call)}, 0, 0);')
+
+    def gl_sorted_value(self, e):
+        """sorted(...): the new list (made by the rewrite's comprehension), sorted."""
+        t = self.typeof(e)
+        l = self.hold_ptr(self.gl_make_value(e.args[0], t))
+        self.gl_sort(e, l, t)
+        return l, '0'
+
     def gl_new(self, t, cap, line):
         self.helpers.add('glist')
         v = self.temp()
@@ -897,6 +1037,8 @@ class GList:
             self.gl_push(l, et, self.gl_value(call.args[0], et), line)
         elif meth == 'clear':
             self.emit(f'{l}->n = 0;')
+        elif meth == 'sort':
+            self.gl_sort(call, l, lt)
         elif meth == 'extend':
             src = self.gl_value(call.args[0], lt)          # a list made on the spot, or one held: evaluated first
             n = self.temp()

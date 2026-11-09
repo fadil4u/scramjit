@@ -17,11 +17,60 @@ floats, or Python and numpy numbers, stays Python.
 """
 
 import ast
+import copy
 
 from . import _types as T
-from ._runtime import LIST_INDEX_ERROR, MEMORY_ERROR
+from ._runtime import LIST_INDEX_ERROR, MEMORY_ERROR, VALUE_ERROR, VALUE_ERROR_MESSAGES
 
-GROWERS = ('append', 'pop', 'extend', 'insert', 'clear')
+GROWERS = ('append', 'pop', 'extend', 'insert', 'clear', 'sort')
+
+# A stable merge sort of n VT (runs of 32 by insertion, then merges; a merge whose halves are already in order is a
+# copy), as Python's sort is stable: for numbers and tuples of numbers that orders them as Python does.
+SORT_TEMPLATE = '''
+static int @N@(@V@ *a, int64_t n) {
+    int64_t i, j, w;
+    for (int64_t s = 0; s < n; s += 32) {
+        int64_t e = s + 32 < n ? s + 32 : n;
+        for (i = s + 1; i < e; i++) {
+            @V@ x = a[i]; j = i;
+            while (j > s && @L@(&x, &a[j - 1])) { a[j] = a[j - 1]; j--; }
+            a[j] = x;
+        }
+    }
+    if (n <= 32) return 1;
+    @V@ *t = (@V@ *)malloc(sizeof(@V@) * (size_t)n);
+    if (!t) return 0;
+    @V@ *src = a, *dst = t;
+    for (w = 32; w < n; w *= 2) {
+        for (int64_t lo = 0; lo < n; lo += 2 * w) {
+            int64_t mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n, k = lo;
+            if (mid >= hi || !@L@(&src[mid], &src[mid - 1])) { memcpy(dst + lo, src + lo, sizeof(@V@) * (size_t)(hi - lo)); continue; }
+            i = lo; j = mid;
+            while (i < mid && j < hi) dst[k++] = @L@(&src[j], &src[i]) ? src[j++] : src[i++];
+            while (i < mid) dst[k++] = src[i++];
+            while (j < hi) dst[k++] = src[j++];
+        }
+        @V@ *sw = src; src = dst; dst = sw;
+    }
+    if (src != a) memcpy(a, src, sizeof(@V@) * (size_t)n);
+    free(t);
+    return 1;
+}
+'''
+SORT_BY_TEMPLATE = '''
+static int @N@_by(const @K@ *keys, void *a, int64_t item, int64_t n) {
+    if (n < 2) return 1;
+    @V@ *p = (@V@ *)malloc(sizeof(@V@) * (size_t)n);
+    if (!p) return 0;
+    for (int64_t i = 0; i < n; i++) { p[i].k = keys[i]; p[i].i = i; }
+    char *t = (char *)malloc((size_t)(item * n));
+    if (!t || !@N@(p, n)) { free(p); free(t); return 0; }
+    memcpy(t, a, (size_t)(item * n));
+    for (int64_t i = 0; i < n; i++) memcpy((char *)a + i * item, t + p[i].i * item, (size_t)item);
+    free(t); free(p);
+    return 1;
+}
+'''
 
 SNIPPET = """
 typedef struct sj_glist { void *p; int64_t n, cap; sj_block *db; } sj_glist;
@@ -34,6 +83,37 @@ static int sj_glist_reserve(sj_heap *h, sj_glist *l, int64_t item, int64_t need)
     if (l->n) memcpy(d + 1, l->p, (size_t)(l->n * item));
     l->p = d + 1; l->db = d; l->cap = cap;
     return 1;
+}
+/* A block a list reaches. m: a sweep's phase (sj_phase), or 2 at a function's exit, which keeps only this heap's own
+   blocks (for the caller, or Python), as orphans; others it leaves as they are. */
+static void sj_keep(sj_heap *h, sj_block *b, int64_t m) {
+    if (!b) return;
+    if (m == 2) { if (b->owner == h) { b->mark = 2; b->owner = SJ_ORPHAN; } }
+    else b->mark = m;
+}
+/* A block a called function kept: this heap's now. */
+static void sj_take(sj_heap *h, sj_block *b, int64_t ph) {
+    if (!b) return;
+    if (b->owner == SJ_ORPHAN) { b->owner = h; b->next = h->all; h->all = b; h->since += b->bytes + 64; }
+    b->mark = ph;
+}
+/* A slice of a sequence of n, as PySlice_AdjustIndices: its first index and how many it holds (step is not 0). */
+static int64_t sj_gl_slice(int64_t n, int has_lo, int64_t lo, int has_hi, int64_t hi, int64_t step, int64_t *start) {
+    if (step > 0) {
+        if (!has_lo) lo = 0; else { if (lo < 0) { lo += n; if (lo < 0) lo = 0; } else if (lo > n) lo = n; }
+        if (!has_hi) hi = n; else { if (hi < 0) { hi += n; if (hi < 0) hi = 0; } else if (hi > n) hi = n; }
+        *start = lo;
+        return hi > lo ? (int64_t)(((uint64_t)hi - (uint64_t)lo - 1) / (uint64_t)step) + 1 : 0;
+    }
+    if (!has_lo) lo = n - 1; else { if (lo < 0) { lo += n; if (lo < 0) lo = -1; } else if (lo >= n) lo = n - 1; }
+    if (!has_hi) hi = -1; else { if (hi < 0) { hi += n; if (hi < 0) hi = -1; } else if (hi >= n) hi = n - 1; }
+    *start = lo;
+    return lo > hi ? (int64_t)(((uint64_t)lo - (uint64_t)hi - 1) / (0 - (uint64_t)step)) + 1 : 0;
+}
+static void *sj_record_new(sj_heap *h, int64_t size) {
+    int64_t one = 1;
+    sj_block *b = sj_make(h, 1, &one, size, 1);
+    return b ? (void *)(b + 1) : 0;
 }
 static sj_glist *sj_glist_new(sj_heap *h, int64_t item, int64_t cap) {
     int64_t one = 1;
@@ -54,14 +134,14 @@ class Pending(Exception):
 def receiver(call):
     """For x.append(v) and the like: (the list expression, the method), else None."""
     f = call.func if isinstance(call, ast.Call) else None
-    if isinstance(f, ast.Attribute) and f.attr in GROWERS and not call.keywords:
+    if isinstance(f, ast.Attribute) and f.attr in GROWERS and (not call.keywords or f.attr == 'sort'):
         return f.value, f.attr
     return None
 
 
-def grown_names(tree):
+def grown_names(tree, uses=True):
     """Names the function grows or empties (x.append(...), del x[i], x += [...]) or makes empty (x = []): these lists
-    are held by reference."""
+    are held by reference. uses: also those it slices or asks `in` of (which may be arrays)."""
     out = set()
     for n in ast.walk(tree):
         if isinstance(n, ast.Call) and receiver(n) and isinstance(receiver(n)[0], ast.Name):
@@ -73,6 +153,25 @@ def grown_names(tree):
             out.add(n.target.id)
         elif isinstance(n, ast.Assign) and isinstance(n.value, ast.List) and not n.value.elts:
             out |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+        elif uses and isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Slice) and isinstance(n.value, ast.Name):
+            out.add(n.value.id)                  # a slice: a new list, or one that resizes
+        elif uses and isinstance(n, ast.Compare) and any(isinstance(o, (ast.In, ast.NotIn)) for o in n.ops):
+            out |= {c.id for c in n.comparators if isinstance(c, ast.Name)}
+    return out
+
+
+def held_names(tree):
+    """Names a list passed in must be held by reference for: grown, put into another list, or given a second name."""
+    out = grown_names(tree)
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and receiver(n) and receiver(n)[1] in ('append', 'insert', 'extend'):
+            out |= {a.id for a in n.args if isinstance(a, ast.Name)}
+        elif isinstance(n, ast.List):
+            out |= {e.id for e in n.elts if isinstance(e, ast.Name)}
+        elif isinstance(n, ast.Assign) and isinstance(n.value, ast.Name):
+            out.add(n.value.id)
+        elif isinstance(n, ast.Assign) and any(isinstance(t, ast.Subscript) for t in n.targets) and isinstance(n.value, ast.Name):
+            out.add(n.value.id)
     return out
 
 
@@ -85,6 +184,11 @@ def unify(a, b):
     if a.kind == 'glist' and b.kind == 'glist':
         e = unify(a.elem, b.elem)
         return None if e is None else T.glist_of(e)
+    if a.kind == 'record' and b.kind == 'record':
+        if a.cls is not b.cls or [k for k, _ in a.elem] != [k for k, _ in b.elem]:
+            return None                          # other keys, or the same in another order (which a dict keeps)
+        fs = [unify(x, y) for (_, x), (_, y) in zip(a.elem, b.elem)]
+        return None if any(f is None for f in fs) else T.record_of([(k, f) for (k, _), f in zip(a.elem, fs)], a.cls)
     if a.kind == 'array' and b.kind == 'array' and a.elem is b.elem and a.ndim == b.ndim and not T.is_pylist(a) and not T.is_pylist(b):
         return T.array(a.elem, a.writable and b.writable, a.ndim, a.strided or b.strided)
     return None
@@ -96,7 +200,14 @@ def has_arrays(t):
         return True
     if t.kind in ('glist', 'tuple'):
         return any(has_arrays(e) for e in ([t.elem] if t.kind == 'glist' else t.elem))
+    if t.kind == 'record':
+        return any(has_arrays(e) for _, e in t.elem)
     return False
+
+
+def held(t):
+    """Is a value of type t held by reference here: a list or a dict (a pointer to its block)?"""
+    return t.kind in ('glist', 'record')
 
 
 class ArrayOf:
@@ -123,7 +234,7 @@ class GList:
     """The Compiler's part for these lists (mixed into Compiler)."""
 
     def gl_any(self):
-        return any(t.kind == 'glist' for t in self.env.values())
+        return any(held(t) for t in self.env.values())
 
     def gl_wants(self, v):
         """Is the list v made of something only these lists hold: lists, tuples, or one of these?"""
@@ -132,7 +243,7 @@ class GList:
         if isinstance(v, ast.ListComp):
             if self.is_list_ctor(v.elt) or isinstance(v.elt, ast.Tuple):
                 return True
-            return self.comp_types(v, any_elem=True).kind in ('glist', 'tuple')
+            return self.comp_types(v, any_elem=True).kind in ('glist', 'tuple', 'array')
         for x in v.elts:
             if self.is_list_ctor(x) or isinstance(x, ast.Tuple):
                 return True
@@ -163,6 +274,10 @@ class GList:
             for x in leaves(t):
                 self.gl_elem_ok(node, x)
             return
+        if t.kind == 'record':
+            for _, x in t.elem:
+                self.gl_elem_ok(node, x)
+            return
         if not t.is_number or t.np == 'dyn' or t is T.U64:
             self.fail(node, f'a list of {t.name}')
 
@@ -171,13 +286,248 @@ class GList:
         if isinstance(node, ast.Name):
             t = self.env.get(node.id)
             return t is not None and t.kind == 'glist'
+        if isinstance(node, ast.Attribute):
+            return self.rc_obj(node.value) and self.typeof(node).kind == 'glist'
         if isinstance(node, (ast.Subscript, ast.Call)):
-            if isinstance(node, ast.Subscript) and not self.gl_is(node.value):
+            if isinstance(node, ast.Subscript) and not (self.gl_is(node.value) or self.rc_is(node.value)):
                 return False
-            if isinstance(node, ast.Call) and not (receiver(node) and receiver(node)[1] == 'pop' and self.gl_is(receiver(node)[0])):
+            if isinstance(node, ast.Call) and not (receiver(node) and receiver(node)[1] == 'pop' and self.gl_is(receiver(node)[0])) \
+                    and not self.gl_sorted(node) and self.callee_of(node) is None:
                 return False
             return self.typeof(node).kind == 'glist'
         return False
+
+    def rc_is(self, node):
+        """Is node a dict held by reference (a record)?"""
+        if isinstance(node, ast.Name):
+            t = self.env.get(node.id)
+            return t is not None and t.kind == 'record'
+        if isinstance(node, (ast.Subscript, ast.Attribute)) and (self.gl_is(node.value) or self.rc_is(node.value)):
+            return self.typeof(node).kind == 'record'
+        if isinstance(node, ast.Dict):
+            return True
+        return False
+
+    def rc_dict_type(self, e):
+        """{'a': x, 'b': y}: a dict with constant string keys, each value of one type."""
+        if not e.keys:
+            self.fail(e, "dicts aren't compiled unless their keys are constant strings, written where the dict is made "
+                         '(an empty one would gain keys)')
+        fields = []
+        for k, v in zip(e.keys, e.values):
+            if k is None or not (isinstance(k, ast.Constant) and type(k.value) is str):
+                self.fail(e, 'a dict whose keys are not constant strings')
+            if any(k.value == f for f, _ in fields):
+                self.fail(e, f'a dict with the key {k.value!r} twice')
+            t = self.gl_value_type(v)
+            self.gl_elem_ok(v, t)
+            fields.append((k.value, t))
+        self.makes = True
+        return T.record_of(fields)
+
+    def rc_field(self, e):
+        """d['k'] or p.x: (the dict's or instance's type, the field's index)."""
+        rt = self.typeof(e.value)
+        keys = [f for f, _ in rt.elem]
+        if isinstance(e, ast.Attribute):
+            if e.attr not in keys:
+                self.fail(e, f'the attribute .{e.attr}, which {rt.cls.__qualname__}() doesn\'t give its instances')
+            return rt, keys.index(e.attr)
+        k = e.slice
+        if not (isinstance(k, ast.Constant) and type(k.value) is str):
+            self.fail(e, 'a dict indexed with something other than a constant string')
+        if k.value not in keys:
+            self.fail(e, f'the key {k.value!r}, which the dict doesn\'t have (KeyError)')
+        return rt, keys.index(k.value)
+
+    def rc_obj(self, node):
+        """Is node an instance held in one of these lists (a record with a class)?"""
+        return self.rc_is(node) and not isinstance(node, ast.Dict) and self.typeof(node).cls is not None
+
+    def rc_made_class(self, call):
+        """For Point(...) with Point a class this function makes instances of: its madeclass type."""
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in self.env \
+                and self.env[call.func.id].kind == 'madeclass':
+            return self.env[call.func.id]
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id not in self.env:
+            for n, t in self.env.items():
+                if t.kind == 'madeclass' and n.endswith(call.func.id) and t.cls.__name__ == call.func.id:
+                    return t
+        return None
+
+    def rc_init(self, call, mt):
+        """What __init__ assigns, from this call: [(attribute, ('arg', node) | ('const', value))], each attribute once."""
+        rec = mt.recipe
+        if rec.get('post_init'):
+            self.fail(call, f'{mt.cls.__qualname__}() with __post_init__, put into a list')
+        params = rec['params']
+        bound = {}
+        for (name, _, kwonly), a in zip(params, call.args):
+            if kwonly:
+                self.fail(call, f'{mt.cls.__qualname__}() given a keyword-only argument by position')
+            bound[name] = a
+        if len(call.args) > len(params) or any(isinstance(a, ast.Starred) for a in call.args):
+            self.fail(call, f'{mt.cls.__qualname__}() with these arguments')
+        for k in call.keywords:
+            if k.arg is None or k.arg in bound or k.arg not in [p for p, _, _ in params]:
+                self.fail(call, f'{mt.cls.__qualname__}() with these arguments')
+            bound[k.arg] = k.value
+        for name, default, _ in params:
+            if name not in bound:
+                if default is None:
+                    self.fail(call, f'{mt.cls.__qualname__}() missing {name}')
+                bound[name] = ast.copy_location(ast.Constant(default[1]), call)
+
+        class Put(ast.NodeTransformer):
+            def visit_Name(self, n):
+                return copy.deepcopy(bound[n.id]) if n.id in bound else n
+        out = {}
+        for attr, src in rec['assigns']:
+            if src[0] == 'param':
+                out[attr] = ('arg', bound[src[1]])
+            elif src[0] == 'const':
+                out[attr] = ('const', ast.copy_location(ast.Constant(src[1]), call))
+            elif isinstance(src[1], ast.Name) and src[1].id in bound:
+                out[attr] = ('arg', bound[src[1].id])
+            else:                                    # an expression of the parameters, each a plain value: evaluated per instance
+                used = {n.id for n in ast.walk(src[1]) if isinstance(n, ast.Name) and n.id in bound}
+                if not all(isinstance(bound[u], (ast.Name, ast.Constant)) for u in used):
+                    self.fail(call, f'{mt.cls.__qualname__}() whose __init__ computes an attribute from an argument that isn\'t a plain value')
+                e = Put().visit(copy.deepcopy(src[1]))
+                for n in ast.walk(e):
+                    ast.copy_location(n, call)
+                out[attr] = ('expr', e)
+        return list(out.items())
+
+    def rc_method(self, e):
+        """For p.m(args), p an instance held in these lists: (the method compiled for these types, the argument nodes).
+        self is the instance's record, so what the method assigns lands in it."""
+        cache = self.__dict__.setdefault('rc_methods', {})
+        if id(e) in cache:
+            return cache[id(e)]
+        import types as pytypes
+        from ._dispatch import _method, _in_class
+        from ._errors import Unsupported
+        recv, name = e.func.value, e.func.attr
+        t = self.typeof(recv)
+        c = _in_class(t.cls, name)
+        if type(c) is not pytypes.FunctionType and type(c).__name__ != 'Function':
+            self.fail(e, f'{t.cls.__qualname__}.{name} called on an instance in a list (not a plain method)')
+        if e.keywords or any(isinstance(a, ast.Starred) for a in e.args):
+            self.fail(e, f'{t.cls.__qualname__}.{name}() with keyword arguments, on an instance in a list')
+        fn = _method(c)
+        try:
+            spec = fn._callee()
+        except Unsupported as u:
+            self.fail(e, f'{t.cls.__qualname__}.{name}(): {u.reason}')
+        if spec.hidden:
+            self.fail(e, f'{t.cls.__qualname__}.{name}() reads globals, called on an instance in a list')
+        nodes = [recv] + list(e.args)
+        types_ = [self.typeof(x) for x in nodes]
+        for x, xt in zip(nodes, types_):
+            if not (xt.is_number or held(xt)) or xt.np == 'dyn':
+                self.fail(x, f'passes {xt.name} to {t.cls.__qualname__}.{name}(), called on an instance in a list')
+        if len(nodes) != fn._npos:
+            self.fail(e, f'{t.cls.__qualname__}.{name}() with {len(nodes) - 1} arguments')
+        try:
+            callee = self.unit.callee(spec, types_)
+        except Unsupported as u:
+            self.fail(e, f'{t.cls.__qualname__}.{name}(): {u.reason}')
+        for p, xt in zip(callee.params, types_):
+            if held(xt) and callee.env[p] is not xt:
+                self.fail(e, f'{t.cls.__qualname__}.{name}() changes what an attribute holds')
+        if callee.ret.kind in ('array', 'tuple'):
+            self.fail(e, f'{t.cls.__qualname__}.{name}() returns {callee.ret.name}, called on an instance in a list')
+        self.makes = True
+        cache[id(e)] = (callee, nodes)
+        return cache[id(e)]
+
+    def rc_is_method(self, e):
+        return isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and self.rc_obj(e.func.value)
+
+    def rc_call(self, e):
+        """p.m(args): the arguments in order, the call, what it kept adopted; its result as (C value, flag)."""
+        c, nodes = self.rc_method(e)
+        if not c.lines:
+            self.unit.code.append(c.generate())
+        self.calls = True
+        self.uses_libm = self.uses_libm or c.uses_libm
+        self.uses_stop = self.uses_stop or c.uses_stop
+        vals = []
+        for x in nodes:
+            xt = self.typeof(x)
+            v, f = self.expr(x)
+            if held(xt):
+                tmp = self.temp()
+                self.emit(f'void *{tmp} = {v};')
+                vals.append((tmp, xt))
+            else:
+                vals.append((self.hold(v, xt), xt))
+        cargs = [v for v, _ in vals] + (['sj_m'] if c.uses_libm else []) + (['sj_stop'] if c.uses_stop else [])
+        io, st = self.temp(), self.temp()
+        self.emit(f'int64_t {io}[{c.record_slot(0)}];')
+        self.emit(f'int {st} = {c.cname}({", ".join(cargs + ["sj_tb", io])});')
+        for v, xt in vals:
+            if held(xt):
+                self.gl_adopt_after_call(v, xt)
+        self.emit(f'if ({st}) {{ sj_tb[++sj_tb[0]] = ((int64_t){c.frame} << 32) | {io}[1]; sj_io[0] = {io}[0]; sj_io[4] = {io}[4]; '
+                  f'SJ_FAIL({st}, {self.line(e)}, {io}[2], {io}[3]); }}')
+        if c.ret is T.NONE:
+            return '0', '0'
+        if held(c.ret):
+            v = self.temp()
+            self.emit(f'void *{v} = (void *)(uintptr_t){io}[0];')
+            self.gl_adopt_after_call(v, c.ret)
+            return v, '0'
+        return self.number_result(c.ret, io, 0, 2)
+
+    def rc_obj_type(self, call, mt):
+        fields = []
+        for attr, (_, node) in self.rc_init(call, mt):
+            t = self.gl_value_type(node)
+            self.gl_elem_ok(node, t)
+            fields.append((attr, t))
+        self.makes = True
+        return T.record_of(fields, mt.cls)
+
+    def rc_make_obj(self, call, mt):
+        """Point(x, y): its arguments, in order, then the instance, as __init__ fills it."""
+        t = self.rc_obj_type(call, mt)
+        init = dict(self.rc_init(call, mt))
+        vals = {}
+        for a in list(call.args) + [k.value for k in call.keywords]:      # Python's order: the arguments as written
+            for attr, (_, node) in init.items():
+                if node is a and attr not in vals:
+                    vals[attr] = self.gl_value(node, dict(t.elem)[attr])
+        for attr, (_, node) in init.items():
+            if attr not in vals:
+                vals[attr] = self.gl_value(node, dict(t.elem)[attr])
+        self.helpers.add('glist')
+        st = self.rc_struct(t)
+        r = self.temp()
+        self.emit(f'void *{r} = sj_record_new(&sj_h, (int64_t)sizeof({st}));')
+        self.emit(f'if (!{r}) SJ_FAIL({MEMORY_ERROR}, {self.line(call)}, 0, 0);')
+        for k, (attr, _) in enumerate(t.elem):
+            self.emit(f'(({st} *){r})->f{k} = {vals[attr]};')
+        return r
+
+    def rc_subscript_type(self, e):
+        rt, i = self.rc_field(e)
+        ft = rt.elem[i][1]
+        if ft is T.PENDING:
+            raise Pending()
+        if ft.kind == 'array':
+            self.env[self.view_name(e)] = ft
+        return ft
+
+    def rc_store_type(self, target, t, s):
+        rt, i = self.rc_field(target)
+        self.gl_elem_ok(s, t)
+        u = unify(rt.elem[i][1], t)
+        if u is None:
+            self.fail(s, f'stores {t.name} at {rt.elem[i][0]!r}, which holds {rt.elem[i][1].name}')
+        if u is not rt.elem[i][1]:
+            self.gl_retype(target.value, T.record_of([(k, u if j == i else x) for j, (k, x) in enumerate(rt.elem)], rt.cls))
 
     def gl_ctor_type(self, v):
         """The type of a list made here: [..], [], [..] * n, a comprehension."""
@@ -202,6 +552,11 @@ class GList:
         """What putting x in a list puts there: a list made on the spot is one of these lists."""
         if self.is_list_ctor(x):
             return self.gl_ctor_type(x)
+        if isinstance(x, ast.Dict):
+            return self.rc_dict_type(x)
+        mt = self.rc_made_class(x)
+        if mt is not None:
+            return self.rc_obj_type(x, mt)
         t = self.typeof(x)
         if t.kind == 'list':
             self.fail(x, f'{x.id if isinstance(x, ast.Name) else "a list"} put into another list (make it with [] or append to it)')
@@ -212,8 +567,13 @@ class GList:
         if isinstance(node, ast.Name):
             self.env[node.id] = t
             return
-        if isinstance(node, ast.Subscript):
-            self.gl_retype(node.value, T.glist_of(t))
+        if isinstance(node, (ast.Subscript, ast.Attribute)):
+            pt = self.typeof(node.value)
+            if pt.kind == 'record':
+                _, i = self.rc_field(node)
+                self.gl_retype(node.value, T.record_of([(k, t if j == i else x) for j, (k, x) in enumerate(pt.elem)], pt.cls))
+            else:
+                self.gl_retype(node.value, T.glist_of(t))
             return
         self.fail(node, 'growing a list that is the result of a call')
 
@@ -232,6 +592,11 @@ class GList:
             self.fail(call, f'.{meth}() of {lt.name}')
         self.makes = True
         args = call.args
+        if meth == 'sort':
+            if args:
+                self.fail(call, '.sort() with positional arguments')
+            self.gl_sort_types(call, lt)
+            return T.NONE
         want = {'append': 1, 'extend': 1, 'insert': 2, 'clear': 0}.get(meth)
         if any(isinstance(a, ast.Starred) for a in args) or (want is not None and len(args) != want) or (meth == 'pop' and len(args) > 1):
             self.fail(call, f'.{meth}() with these arguments')
@@ -252,9 +617,48 @@ class GList:
             return lt.elem
         return T.NONE
 
+    def gl_sorted(self, e):
+        """Is e sorted(...), made by the rewrite into sorted([...], key=[...], reverse=r)?"""
+        return isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == 'sorted' and self.is_builtin('sorted', 'sorted') \
+            and len(e.args) == 1 and isinstance(e.args[0], (ast.List, ast.ListComp)) and all(k.arg in ('key', 'reverse') for k in e.keywords)
+
+    def gl_sorted_type(self, e):
+        t = self.gl_ctor_type(e.args[0])
+        self.makes = True
+        self.gl_sort_types(e, t)
+        return t
+
+    def gl_sort_types(self, call, lt):
+        """xs.sort(key=..., reverse=...) or sorted(...) of a list of lt: the type of what's compared."""
+        kws = {k.arg: k.value for k in call.keywords}
+        if len(kws) != len(call.keywords) or not set(kws) <= {'key', 'reverse'}:
+            self.fail(call, 'a sort with these arguments')
+        if lt.elem is T.PENDING:
+            raise Pending()
+        r = kws.get('reverse')
+        if r is not None and self.typeof(r).kind not in ('int', 'bool'):
+            self.fail(r, 'reverse= that is not an int or a bool')
+        kt, key = lt.elem, kws.get('key')
+        if key is not None:
+            if not (isinstance(key, ast.ListComp) and isinstance(key.generators[0].iter, ast.Name) and key.generators[0].iter.id.startswith('_sj_')):
+                self.fail(key, "a sort key that reads the list it sorts (Python's list is empty while it sorts)" if isinstance(key, ast.Lambda)
+                          else 'a sort key that is not a lambda or a function')
+            self.env[key.generators[0].iter.id] = lt         # the list being sorted, as the keys' comprehension reads it
+            kt = self.gl_ctor_type(key).elem
+        if not (kt.is_number or kt.kind == 'tuple' and all(x.is_number for x in leaves(kt))):
+            self.fail(call, f'a sort comparing {kt.name} (numbers and tuples of numbers compare; give key= for others)')
+        return kt
+
+    def gl_slice_parts(self, e):
+        for part in (e.slice.lower, e.slice.upper, e.slice.step):
+            if part is not None and (self.typeof(part).kind not in ('int', 'bool') or self.typeof(part) in (T.U64, T.NP_UINT64)):
+                self.fail(e, 'a slice of a list with a bound that is not an int')
+
     def gl_subscript_type(self, e):
-        if isinstance(e.slice, ast.Slice):
-            self.fail(e, 'a slice of a list (a copy in Python)')
+        if isinstance(e.slice, ast.Slice):           # a new list, a shallow copy of those elements
+            self.gl_slice_parts(e)
+            self.makes = True
+            return self.typeof(e.value)
         if self.typeof(e.slice).kind not in ('int', 'bool') or self.typeof(e.slice) in (T.U64, T.NP_UINT64):
             self.fail(e, f'a list indexed with {self.typeof(e.slice).name}')
         et = self.typeof(e.value).elem
@@ -266,13 +670,21 @@ class GList:
 
     def gl_store_type(self, target, t, s):
         lt = self.typeof(target.value)
+        if isinstance(target.slice, ast.Slice):      # xs[a:b] = ys: ys's elements in their place
+            self.gl_slice_parts(target)
+            if t.kind != 'glist':
+                self.fail(s, f'assigns {t.name} to a slice of a list (only a list compiles there)')
+            self.makes = True
+            self.gl_unify_into(target.value, lt, t.elem, 'assigns the elements of')
+            return
         self.gl_subscript_type_index(target)
         self.gl_elem_ok(s, t)
         self.gl_unify_into(target.value, lt, t, 'stores')
 
     def gl_subscript_type_index(self, e):
         if isinstance(e.slice, ast.Slice):
-            self.fail(e, 'assigning to a slice of a list')
+            self.gl_slice_parts(e)
+            return
         if self.typeof(e.slice).kind not in ('int', 'bool'):
             self.fail(e, f'a list indexed with {self.typeof(e.slice).name}')
 
@@ -301,6 +713,8 @@ class GList:
 
     # ---- C
     def gl_ctype(self, t):
+        if t.kind == 'record':
+            return 'void *'
         if t.kind == 'glist':
             return 'sj_glist *'
         if t.kind == 'tuple':
@@ -308,6 +722,24 @@ class GList:
         if t.kind == 'array':
             return self.gl_record(t.ndim)
         return t.ctype
+
+    def rc_struct(self, t):
+        """The C struct of a dict's fields, f0, f1, ... in key order."""
+        reg = self.gl_registry('rc_structs')
+        if t.name not in reg:
+            name = f'sjR{len(reg)}'
+            fields = ' '.join(f'{self.gl_ctype(x)} f{k};' for k, (_, x) in enumerate(t.elem))
+            self.unit.code.append(f'typedef struct {name} {{ {fields} }} {name};')
+            reg[t.name] = name
+        return reg[t.name]
+
+    def gl_child(self, t, c, fn):
+        """C visiting what a value of type t (C expression c) holds: fn 'mark' or 'adopt'."""
+        if t.kind in ('glist', 'record'):
+            return f' {self.gl_mark(t) if fn == "mark" else self.gl_adopt(t)}(h, {c}, {"m" if fn == "mark" else "ph"});'
+        if t.kind == 'array':
+            return f' {"sj_keep" if fn == "mark" else "sj_take"}(h, (sj_block *)(uintptr_t)({c}).r[3], {"m" if fn == "mark" else "ph"});'
+        return ''
 
     def gl_record(self, ndim):
         """An array in a list: the record a returned array has (array_record_slots), so the dispatcher reads both alike."""
@@ -355,22 +787,117 @@ class GList:
         return reg[t.name]
 
     def gl_mark(self, t):
-        """The name of the C function marking a list of type t and what it holds."""
+        """The name of the C function marking a list (or dict) of type t and what it holds."""
         reg = self.gl_registry('gl_marks')
-        if t.name not in reg:
-            inner = self.gl_mark(t.elem) if t.elem.kind == 'glist' else None
+        if t.name not in reg and t.kind == 'record':
+            st = self.rc_struct(t)
+            body = ''.join(self.gl_child(x, f'(({st} *)l)->f{k}', 'mark') for k, (_, x) in enumerate(t.elem))
             name = f'sjM{len(reg)}'
-            body = (f' for (int64_t i_ = 0; i_ < l->n; i_++) {inner}(((sj_glist **)l->p)[i_], m);' if inner else '')
+            reg[t.name] = name
+            self.unit.code.append(
+                f'static void {name}(sj_heap *h, void *l, int64_t m) {{ if (!l) return; sj_block *b = (sj_block *)l - 1; '
+                f'if (m == 2) {{ if (b->owner == SJ_ORPHAN) return; if (b->owner == h) {{ b->mark = 2; b->owner = SJ_ORPHAN; }} }} '
+                f'else {{ if (b->mark == m) return; b->mark = m; }}{body} }}')
+        if t.name not in reg:
+            inner = self.gl_mark(t.elem) if held(t.elem) else None
+            name = f'sjM{len(reg)}'
+            body = (f' for (int64_t i_ = 0; i_ < l->n; i_++) {inner}(h, (({self.gl_ctype(t.elem)} *)l->p)[i_], m);' if inner else '')
             if t.elem.kind == 'array':
                 rec = self.gl_record(t.elem.ndim)
-                body = f' for (int64_t i_ = 0; i_ < l->n; i_++) {{ sj_block *h_ = (sj_block *)(uintptr_t)(({rec} *)l->p)[i_].r[3]; if (h_) h_->mark = m; }}' 
-            self.unit.code.append(f'static void {name}(sj_glist *l, int m) {{ if (!l) return; sj_block *b = (sj_block *)l - 1; '
-                                  f'if (b->mark == m) return; b->mark = m; if (l->db) l->db->mark = m;{body} }}')
+                body = f' for (int64_t i_ = 0; i_ < l->n; i_++) sj_keep(h, (sj_block *)(uintptr_t)(({rec} *)l->p)[i_].r[3], m);'
+            # at a sweep a list is visited once (its mark is the phase); at an exit this heap's own are kept once (orphans),
+            # and lists of other heaps are walked through for what they hold of this one
+            self.unit.code.append(
+                f'static void {name}(sj_heap *h, sj_glist *l, int64_t m) {{ if (!l) return; sj_block *b = (sj_block *)l - 1; '
+                f'if (m == 2) {{ if (b->owner == SJ_ORPHAN) return; if (b->owner == h) {{ b->mark = 2; b->owner = SJ_ORPHAN; }} }} '
+                f'else {{ if (b->mark == m) return; b->mark = m; }} sj_keep(h, l->db, m);{body} }}')
             reg[t.name] = name
         return reg[t.name]
 
+    def gl_adopt(self, t):
+        """The C function making what a called function kept, reachable from a list of type t, this heap's."""
+        reg = self.gl_registry('gl_adopts')
+        if t.name not in reg and t.kind == 'record':
+            st = self.rc_struct(t)
+            name = f'sjD{len(reg)}'
+            reg[t.name] = name
+            body = ''.join(self.gl_child(x, f'(({st} *)l)->f{k}', 'adopt') for k, (_, x) in enumerate(t.elem))
+            self.unit.code.append(
+                f'static void {name}(sj_heap *h, void *l, int64_t ph) {{ if (!l) return; sj_block *b = (sj_block *)l - 1; '
+                f'if (b->owner != SJ_ORPHAN && b->mark == ph) return; sj_take(h, b, ph);{body} }}')
+        if t.name not in reg:
+            inner = self.gl_adopt(t.elem) if held(t.elem) else None
+            name = f'sjD{len(reg)}'
+            body = (f' for (int64_t i_ = 0; i_ < l->n; i_++) {inner}(h, (({self.gl_ctype(t.elem)} *)l->p)[i_], ph);' if inner else '')
+            if t.elem.kind == 'array':
+                rec = self.gl_record(t.elem.ndim)
+                body = f' for (int64_t i_ = 0; i_ < l->n; i_++) sj_take(h, (sj_block *)(uintptr_t)(({rec} *)l->p)[i_].r[3], ph);'
+            self.unit.code.append(
+                f'static void {name}(sj_heap *h, sj_glist *l, int64_t ph) {{ if (!l) return; sj_block *b = (sj_block *)l - 1; '
+                f'if (b->owner != SJ_ORPHAN && b->mark == ph) return; sj_take(h, b, ph); sj_take(h, l->db, ph);{body} }}')
+            reg[t.name] = name
+        return reg[t.name]
+
+    def gl_adopt_after_call(self, ptr, t):
+        self.emit(f'{self.gl_adopt(t)}(&sj_h, {ptr}, sj_phase(&sj_h));')
+
     def gl_size(self, t):
         return f'(int64_t)sizeof({self.gl_ctype(t.elem)})'
+
+    def gl_sort_fn(self, kt, keyed, desc):
+        """The C function sorting values of kt (keyed: pairs of a key and an index), ascending or not."""
+        reg = self.gl_registry('gl_sorts')
+        if (kt.name, keyed, desc) in reg:
+            return reg[(kt.name, keyed, desc)]
+        name = f'sjS{len(reg)}'
+        reg[(kt.name, keyed, desc)] = name
+        kc = self.gl_ctype(kt)
+        v = f'{name}p' if keyed else kc
+        if keyed:
+            self.unit.code.append(f'typedef struct {v} {{ {kc} k; int64_t i; }} {v};')
+        x, y = ('a->k', 'b->k') if keyed else ('(*a)', '(*b)')
+        if desc:
+            x, y = y, x
+        if kt.kind == 'tuple':                 # Python's: the first leaves that differ (not ==) decide, by <
+            m = len(leaves(kt))
+            body = ' '.join([f'if ({x}.f{i} != {y}.f{i}) return {x}.f{i} < {y}.f{i};' for i in range(m - 1)] + [f'return {x}.f{m - 1} < {y}.f{m - 1};'])
+        else:
+            body = f'return {x} < {y};'
+        self.unit.code.append(f'static inline int {name}_lt(const {v} *a, const {v} *b) {{ {body} }}')
+        self.unit.code.append(SORT_TEMPLATE.replace('@N@', name).replace('@V@', v).replace('@L@', f'{name}_lt'))
+        if keyed:
+            self.unit.code.append(SORT_BY_TEMPLATE.replace('@N@', name).replace('@V@', v).replace('@K@', kc))
+        return name
+
+    def gl_sort(self, call, l, lt):
+        """Sort list l (of type lt) in place: reverse= first, then the keys (one per element, in order), then the sort."""
+        kws = {k.arg: k.value for k in call.keywords}
+        r, key = kws.get('reverse'), kws.get('key')
+        if r is None or isinstance(r, ast.Constant):
+            rev = bool(r.value) if r is not None else False
+        else:
+            rev = self.hold(f'(int64_t)({self.expr(r)[0]})', T.INT)
+        et = lt.elem
+        ect = self.gl_ctype(et)
+        if key is not None:
+            self.emit(f'v_{key.generators[0].iter.id} = {l};')
+            kt = self.gl_ctor_type(key)
+            keys = self.gl_make_value(key, kt)
+            kt = kt.elem
+
+        def call_for(desc):
+            if key is None:
+                return f'{self.gl_sort_fn(et, False, desc)}(({ect} *){l}->p, {l}->n)'
+            return f'{self.gl_sort_fn(kt, True, desc)}_by(({self.gl_ctype(kt)} *){keys}->p, {l}->p, (int64_t)sizeof({ect}), {l}->n)'
+        c = call_for(rev) if isinstance(rev, bool) else f'({rev} ? {call_for(True)} : {call_for(False)})'
+        self.emit(f'if (!{c}) SJ_FAIL({MEMORY_ERROR}, {self.line(call)}, 0, 0);')
+
+    def gl_sorted_value(self, e):
+        """sorted(...): the new list (made by the rewrite's comprehension), sorted."""
+        t = self.typeof(e)
+        l = self.hold_ptr(self.gl_make_value(e.args[0], t))
+        self.gl_sort(e, l, t)
+        return l, '0'
 
     def gl_new(self, t, cap, line):
         self.helpers.add('glist')
@@ -401,9 +928,17 @@ class GList:
             self.emit(f'{self.gl_record(et.ndim)} {rec};')
             self.gl_fill_record(rec, src)
             return rec
+        if isinstance(x, ast.Dict):
+            return self.rc_make(x)
+        if self.rc_made_class(x) is not None:
+            return self.rc_make_obj(x, self.rc_made_class(x))
         c, _ = self.expr(x)
         if et.kind == 'glist':
             return self.hold_ptr(c)
+        if et.kind == 'record':
+            v = self.temp()
+            self.emit(f'void *{v} = {c};')
+            return v
         return self.hold(self.coerce(c, self.typeof(x), et), et)
 
     def hold_ptr(self, c):
@@ -471,7 +1006,9 @@ class GList:
         return i
 
     def gl_read(self, e):
-        """x[i]: (C value, flag)."""
+        """x[i]: (C value, flag). x[a:b]: a new list."""
+        if isinstance(e.slice, ast.Slice):
+            return self.gl_slice_read(e)
         l = self.hold_ptr(self.expr(e.value)[0])
         i = self.gl_index(l, e.slice, self.line(e), 0)
         et = self.typeof(e)
@@ -479,6 +1016,9 @@ class GList:
 
     def gl_store(self, target, v, vt):
         """x[i] = v: the list and index first, then the store (the value is already computed, as Python does)."""
+        if isinstance(target.slice, ast.Slice):
+            self.gl_slice_store(target, v[0])
+            return
         l = self.hold_ptr(self.expr(target.value)[0])
         i = self.gl_index(l, target.slice, self.line(target), 1)
         et = self.typeof(target.value).elem
@@ -497,6 +1037,8 @@ class GList:
             self.gl_push(l, et, self.gl_value(call.args[0], et), line)
         elif meth == 'clear':
             self.emit(f'{l}->n = 0;')
+        elif meth == 'sort':
+            self.gl_sort(call, l, lt)
         elif meth == 'extend':
             src = self.gl_value(call.args[0], lt)          # a list made on the spot, or one held: evaluated first
             n = self.temp()
@@ -527,7 +1069,173 @@ class GList:
                 return out, (flag_of(et) if et.kind != 'glist' else '0')
         return None
 
+    def gl_slice(self, l, e):
+        """The slice e of list l (bounds evaluated in order): (first index, step, how many)."""
+        sl = e.slice
+        line = self.line(e)
+        vals = []
+        for part in (sl.lower, sl.upper, sl.step):
+            vals.append(None if part is None else self.hold(self.coerce(self.expr(part)[0], self.typeof(part), T.INT), T.INT))
+        lo, hi, step = vals
+        st = step or '1LL'
+        if step is not None:
+            self.emit(f'if ({step} == 0) SJ_FAIL({VALUE_ERROR}, {line}, {VALUE_ERROR_MESSAGES.index("slice step cannot be zero")}, 0);')
+        start, n = self.temp(), self.temp()
+        self.emit(f'int64_t {start}; int64_t {n} = sj_gl_slice({l}->n, {int(lo is not None)}, {lo or "0LL"}, {int(hi is not None)}, '
+                  f'{hi or "0LL"}, {st}, &{start});')
+        return start, st, n
+
+    def gl_slice_read(self, e):
+        """xs[a:b:c]: a new list of those elements (shallow, as Python's)."""
+        t = self.typeof(e.value)
+        ct = self.gl_ctype(t.elem)
+        l = self.hold_ptr(self.expr(e.value)[0])
+        start, st, n = self.gl_slice(l, e)
+        out = self.gl_new(t, n, self.line(e))
+        k = self.temp()
+        self.emit(f'for (int64_t {k} = 0; {k} < {n}; {k}++) (({ct} *){out}->p)[{k}] = (({ct} *){l}->p)[{start} + {k} * {st}];')
+        self.emit(f'{out}->n = {n};')
+        return out, '0'
+
+    def gl_slice_store(self, target, src):
+        """xs[a:b] = ys (src, already evaluated): ys's elements in place of those, the list resizing for a step of 1; an
+        extended slice must be as long as ys. If ys is xs, its elements as they were before."""
+        t = self.typeof(target.value)
+        ct = self.gl_ctype(t.elem)
+        line = self.line(target)
+        l = self.hold_ptr(self.expr(target.value)[0])
+        start, st, n = self.gl_slice(l, target)
+        m, sp = self.temp(), self.temp()
+        self.emit(f'int64_t {m} = {src}->n; {ct} *{sp} = ({ct} *){src}->p;')
+        self.open(f'if ({src} == {l} && {m})')                        # xs[a:b] = xs: a copy first
+        tmp = self.gl_new(t, m, line)
+        self.emit(f'memcpy({tmp}->p, {sp}, sizeof({ct}) * (size_t){m}); {sp} = ({ct} *){tmp}->p;')
+        self.close()
+        self.open(f'if ({st} == 1)')
+        self.emit(f'int64_t nn_ = {l}->n - {n} + {m};')
+        self.emit(f'if (nn_ > {l}->cap && !sj_glist_reserve(&sj_h, {l}, (int64_t)sizeof({ct}), nn_)) SJ_FAIL({MEMORY_ERROR}, {line}, 0, 0);')
+        self.emit(f'memmove(({ct} *){l}->p + {start} + {m}, ({ct} *){l}->p + {start} + {n}, sizeof({ct}) * (size_t)({l}->n - {start} - {n}));')
+        self.emit(f'if ({m}) memcpy(({ct} *){l}->p + {start}, {sp}, sizeof({ct}) * (size_t){m}); {l}->n = nn_;')
+        self.close()
+        self.open('else')
+        msg = VALUE_ERROR_MESSAGES.index('attempt to assign sequence of size {} to extended slice of size {}')
+        self.emit(f'if ({m} != {n}) {{ sj_io[4] = {n}; SJ_FAIL({VALUE_ERROR}, {line}, {msg}, {m}); }}')
+        self.emit(f'for (int64_t k_ = 0; k_ < {n}; k_++) (({ct} *){l}->p)[{start} + k_ * {st}] = {sp}[k_];')
+        self.close()
+
+    def gl_slice_delete(self, target):
+        """del xs[a:b:c]: those elements out, the rest closing up, in order."""
+        t = self.typeof(target.value)
+        ct = self.gl_ctype(t.elem)
+        l = self.hold_ptr(self.expr(target.value)[0])
+        start, st, n = self.gl_slice(l, target)
+        self.open(f'if ({n})')
+        self.emit(f'int64_t lo_ = {st} > 0 ? {start} : {start} + ({n} - 1) * {st}, ast_ = {st} > 0 ? {st} : -{st}, w_ = lo_;')
+        self.emit(f'for (int64_t r_ = lo_; r_ < {l}->n; r_++) if (!(r_ <= lo_ + ({n} - 1) * ast_ && (r_ - lo_) % ast_ == 0)) '
+                  f'(({ct} *){l}->p)[w_++] = (({ct} *){l}->p)[r_];')
+        self.emit(f'{l}->n = w_;')
+        self.close()
+
+    def gl_in(self, e):
+        """x in xs, x not in xs: == against each element, in order; 'k' in d: whether the dict has that key."""
+        right = e.comparators[0]
+        negate = isinstance(e.ops[0], ast.NotIn)
+        if isinstance(right, (ast.List, ast.Tuple)):
+            xt = self.typeof(e.left)
+            x = self.texpr(e.left) if xt.kind == 'tuple' else self.hold(self.expr(e.left)[0], xt)
+            ys = [(self.texpr(y) if xt.kind == 'tuple' else self.hold(self.expr(y)[0], self.typeof(y)), self.typeof(y)) for y in right.elts]
+
+            def flat_(v):
+                out = []
+                for z in v:
+                    out += flat_(z) if isinstance(z, list) else [z[0]]
+                return out
+            conds = []
+            for y, yt in ys:
+                if xt.kind == 'tuple':
+                    conds.append('(' + ' && '.join(self.cmp(a, at_, b, bt_, '==') for a, at_, b, bt_ in
+                                                   zip(flat_(x), leaves(xt), flat_(y), leaves(yt))) + ')')
+                else:
+                    conds.append(f'({self.cmp(x, xt, y, yt, "==")})')
+            r = self.hold('(' + (' || '.join(conds) or '0') + ')', T.BOOL)
+            return (f'(!{r})' if negate else r), '0'
+        rt = self.typeof(right)
+        if rt.kind == 'record':                          # the key is a constant string: nothing to evaluate there
+            self.expr(right)
+            has = e.left.value in [k for k, _ in rt.elem]
+            return ('1' if has != negate else '0'), '0'
+        xt = self.typeof(e.left)
+        r = self.temp()
+        self.emit(f'int {r} = 0;')
+        if xt.kind == 'tuple':
+            xs = []
+
+            def walk(v):
+                for y in v:
+                    walk(y) if isinstance(y, list) else xs.append(y[0])
+            walk(self.texpr(e.left))
+        else:
+            x = self.hold(self.expr(e.left)[0], xt)
+        if rt.kind == 'glist':
+            l = self.hold_ptr(self.expr(right)[0])
+            n, elem = f'{l}->n', (lambda k: f'(({self.gl_ctype(rt.elem)} *){l}->p)[{k}]')
+            et = rt.elem
+        else:                                              # a list of numbers, the fast kind
+            name = self.materialize(right) if not isinstance(right, ast.Name) else right.id
+            n, elem, et = f'v_{name}__n', (lambda k: f'v_{name}[{k}]'), rt.elem
+        k = self.temp()
+        self.open(f'for (int64_t {k} = 0; {k} < {n}; {k}++)')
+        if xt.kind == 'tuple':
+            conds = [self.cmp(c, lt_, f'{elem(k)}.f{j}', et_, '==') for j, (c, lt_, et_) in enumerate(zip(xs, leaves(xt), leaves(et)))]
+            self.emit(f'if ({" && ".join(conds)}) {{ {r} = 1; break; }}')
+        else:
+            self.emit(f'if ({self.cmp(x, xt, elem(k), et, "==")}) {{ {r} = 1; break; }}')
+        self.close()
+        return (f'(!{r})' if negate else r), '0'
+
+    def gl_is_in(self, e):
+        """x in xs (one comparison) with xs a list or a dict held here, or a list of numbers."""
+        if len(e.ops) != 1 or not isinstance(e.ops[0], (ast.In, ast.NotIn)):
+            return False
+        right = e.comparators[0]
+        if self.gl_is(right) or (self.rc_is(right) and not isinstance(right, ast.Dict)):
+            return True
+        if isinstance(right, (ast.List, ast.Tuple)):        # x in [a, b], x in (1, 2): each element, made first
+            return True
+        return isinstance(right, ast.Name) and self.env.get(right.id) is not None and self.env[right.id].kind == 'list'
+
+    def gl_in_type(self, e):
+        right = e.comparators[0]
+        if isinstance(right, (ast.List, ast.Tuple)):
+            xt = self.typeof(e.left)
+            for y in right.elts:
+                yt = self.typeof(y)
+                ok = (xt.is_number and yt.is_number) or (xt.kind == 'tuple' and yt.kind == 'tuple' and len(leaves(xt)) == len(leaves(yt))
+                                                         and all(a.is_number and b.is_number for a, b in zip(leaves(xt), leaves(yt))))
+                if not ok or isinstance(y, ast.Starred):
+                    self.fail(e, f'{xt.name} in a list holding {yt.name}')
+            return T.BOOL
+        rt = self.typeof(right)
+        if rt.kind == 'record':
+            if not (isinstance(e.left, ast.Constant) and type(e.left.value) is str):
+                self.fail(e, 'in on a dict with something other than a constant string')
+            return T.BOOL
+        xt = self.typeof(e.left)
+        et = rt.elem
+        if et is T.PENDING:
+            raise Pending()
+        if xt.kind == 'tuple' and et.kind == 'tuple':
+            if len(leaves(xt)) != len(leaves(et)) or any(not (a.is_number and b.is_number) for a, b in zip(leaves(xt), leaves(et))):
+                self.fail(e, f'{xt.name} in {rt.name}')
+            return T.BOOL
+        if not (xt.is_number and et.is_number):
+            self.fail(e, f'{xt.name} in {rt.name} (in compiles for numbers and tuples of numbers)')
+        return T.BOOL
+
     def gl_delete(self, target):
+        if isinstance(target.slice, ast.Slice):
+            self.gl_slice_delete(target)
+            return
         l = self.hold_ptr(self.expr(target.value)[0])
         i = self.gl_index(l, target.slice, self.line(target), 1)
         ct = self.gl_ctype(self.typeof(target.value).elem)
@@ -557,9 +1265,57 @@ class GList:
             return f'(uint64_t){l}->n', lambda k: ArrayOf(f'(({ct} *){l}->p)[{k}]', et)
         return f'(uint64_t){l}->n', lambda k: (f'(({ct} *){l}->p)[{k}]', et, flag_of(et) if et.kind != 'glist' else '0')
 
+    def rc_read(self, e):
+        """d['k']: (C value, flag)."""
+        rt, i = self.rc_field(e)
+        p = self.temp()
+        self.emit(f'void *{p} = {self.expr(e.value)[0]};')
+        ft = rt.elem[i][1]
+        return f'(({self.rc_struct(rt)} *){p})->f{i}', (flag_of(ft) if not held(ft) and ft.kind != 'array' else '0')
+
+    def rc_store(self, target, v, vt):
+        rt, i = self.rc_field(target)
+        p = self.temp()
+        self.emit(f'void *{p} = {self.expr(target.value)[0]};')
+        ft = rt.elem[i][1]
+        val = v[0] if held(ft) or ft.kind in ('array', 'tuple') else self.coerce(v[0], vt, ft)
+        self.emit(f'(({self.rc_struct(rt)} *){p})->f{i} = {val};')
+
+    def rc_make(self, e):
+        """{'a': x, ...}: its values first, in order, then the dict."""
+        t = self.rc_dict_type(e)
+        self.helpers.add('glist')
+        vals = [self.gl_value(v, ft) for v, (_, ft) in zip(e.values, t.elem)]
+        st = self.rc_struct(t)
+        r = self.temp()
+        self.emit(f'void *{r} = sj_record_new(&sj_h, (int64_t)sizeof({st}));')
+        self.emit(f'if (!{r}) SJ_FAIL({MEMORY_ERROR}, {self.line(e)}, 0, 0);')
+        for k, val in enumerate(vals):
+            self.emit(f'(({st} *){r})->f{k} = {val};')
+        return r
+
+    def gl_augassign(self, s):
+        """x[i] += v, d['k'] += v: the container and the index once, as Python does, then read, compute, store."""
+        from ._compiler import ARITH
+        target = s.target
+        op = ARITH[type(s.op)]
+        if self.rc_is(target.value):
+            rt, i = self.rc_field(target)
+            p = self.temp()
+            self.emit(f'void *{p} = {self.expr(target.value)[0]};')
+            place, ct = f'(({self.rc_struct(rt)} *){p})->f{i}', rt.elem[i][1]
+        else:
+            l = self.hold_ptr(self.expr(target.value)[0])
+            i = self.gl_index(l, target.slice, self.line(target), 0)
+            ct = self.typeof(target.value).elem
+            place = f'(({self.gl_ctype(ct)} *){l}->p)[{i}]'
+        rt_ = self.binop_type(ct, self.typeof(s.value), op, s)
+        r = self.arith(op, (self.hold(place, ct), flag_of(ct)), ct, s.value, s)
+        self.emit(f'{place} = {self.coerce(r[0], rt_, ct)};')
+
     def gl_materialize(self, e):
-        """x[i] that is an array: its view variable, filled from the record."""
-        c, _ = self.gl_read(e)
+        """x[i] or d['k'] that is an array: its view variable, filled from the record."""
+        c, _ = self.rc_read(e) if self.rc_is(e.value) else self.gl_read(e)
         name = self.view_name(e)
         rec = self.temp()
         self.emit(f'{self.gl_record(self.env[name].ndim)} {rec} = {c};')
@@ -570,6 +1326,8 @@ class GList:
         """A tuple read from a list (x[i] or x.pop()): its leaves, held now."""
         if isinstance(e, ast.Call):
             c, _ = self.gl_method(e, want_value=True)
+        elif self.rc_is(e.value):
+            c, _ = self.rc_read(e)
         else:
             c, _ = self.gl_read(e)
         t = self.typeof(e)
@@ -593,15 +1351,17 @@ class GList:
         slot: its place among a returned tuple's values."""
         c, _ = self.expr(value)
         l = self.hold_ptr(c)
-        self.emit(f'{self.gl_mark(self.typeof(value))}({l}, 2);')
+        self.emit(f'{self.gl_mark(self.typeof(value))}(&sj_h, {l}, 2);')
         if slot is None:
             self.emit(f'sj_io[0] = (int64_t)(uintptr_t){l}; sj_io[5] = 0;')
         else:
             self.emit(f'sj_io[{slot}] = (int64_t)(uintptr_t){l}; sj_io[{slot + 1}] = 0;')
 
     def gl_marks(self):
-        """The roots for a sweep: every list variable."""
-        return ' '.join(f'{self.gl_mark(t)}(v_{n}, 1);' for n, t in self.env.items() if t.kind == 'glist')
+        """The roots for a sweep: every list variable, and the lists passed in. The sweep's phase first."""
+        marks = [f'{self.gl_mark(t)}(&sj_h, v_{n}, ph_);' for n, t in self.env.items() if t.kind == 'glist'] \
+            + [f'{self.gl_mark(self.env[p])}(&sj_h, v_{p}__orig, ph_);' for p in getattr(self, 'gl_params', ())]
+        return ('{ int64_t ph_ = sj_phase(&sj_h); ' + ' '.join(marks) + ' }') if marks else ''
 
 
 def flag_of(t):

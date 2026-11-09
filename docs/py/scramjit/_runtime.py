@@ -74,6 +74,7 @@ VALUE_ERROR_MESSAGES = [
     'attempt to get argmax of an empty sequence',
     'attempt to get argmin of an empty sequence',
     'negative shift count',
+    'attempt to assign sequence of size {} to extended slice of size {}',
 ]
 OVERFLOW_ERROR_MESSAGES = [
     'cannot convert float infinity to integer',
@@ -119,7 +120,8 @@ def exception(status, io):
     if status == ZERO_DIVISION:
         return ZeroDivisionError(ZERO_DIVISION_MESSAGES[io[2]])
     if status == VALUE_ERROR:
-        return ValueError(VALUE_ERROR_MESSAGES[io[2]])
+        msg = VALUE_ERROR_MESSAGES[io[2]]
+        return ValueError(msg.format(io[3], io[4]) if '{}' in msg else msg)
     if status == OVERFLOW_ERROR:
         if OVERFLOW_ERROR_MESSAGES[io[2]] is None:      # float_pow: the C library's errno, as CPython raises it
             return OverflowError(errno.ERANGE, os.strerror(errno.ERANGE))

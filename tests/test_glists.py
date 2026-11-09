@@ -745,3 +745,89 @@ def test_in():
     for q in (0, 9, 10, -1):
         same_passed(members, 6, q)
     same_passed(has_keys, {'a': [1], 'b': 2.0})
+
+
+def sorts(xs, r):
+    ys = [x for x in xs]
+    ys.sort()
+    zs = sorted(xs, reverse=r)
+    xs.sort(reverse=not r)
+    return ys, zs, sorted(range(len(xs), 0, -3)), sorted(x * 2 for x in xs)
+
+
+def sorts_tuples(n):
+    t = [((i * 7) % 5, (i * 3) % 4, -i) for i in range(n)]
+    by_mid = sorted(t, key=lambda p: p[1])                 # stable: ties keep their order
+    t.sort(reverse=True)
+    return t, by_mid, sorted(t, key=lambda p: (p[1], p[0]), reverse=True)
+
+
+@scram
+def sort_key(n):
+    return (n % 7) * 2 - n
+
+
+def sorts_by_function(n):
+    return sorted(range(n), key=sort_key)
+
+
+def sorts_rows(rows):
+    for r in rows:
+        r.sort()
+    rows.sort(key=len)
+    return rows
+
+
+def sorts_instances(pts):
+    pts.sort(key=lambda p: (p.y, -p.x))
+    return [p.x for p in pts]
+
+
+def median(xs):
+    ys = sorted(xs)
+    return ys[len(ys) // 2]
+
+
+def sorts_by_self(xs):
+    xs.sort(key=lambda x: len(xs) - x)                     # Python's xs is empty while it sorts
+    return xs
+
+
+def test_sort():
+    import random
+    rnd = random.Random(5)
+    for n in (1, 2, 31, 33, 100, 1000):                     # (an empty list passed in: its type is unknown, so Python)
+        same_passed(sorts, [rnd.randrange(50) for _ in range(n)], n % 2)
+        same_passed(sorts, [rnd.uniform(-1, 1) for _ in range(n)], 1)
+        same_passed(sorts_tuples, n - 1)
+    z = [0.0, -0.0, 1.0, -0.0, 0.0] * 20                    # equal, so they keep their order, as in Python's stable sort
+    assert repr(scram(median, fallback=False, cache=False)(z)) == repr(median(z))
+    assert repr(scram(sorts, fallback=False, cache=False)(list(z), 0)) == repr(sorts(list(z), 0))
+    same_passed(sorts, [True, False, True], 0)
+    same_passed(sorts_by_function, 50)
+    rows = [[rnd.randrange(9) for _ in range(rnd.randrange(5))] for _ in range(30)]
+    inner = rows[3]
+    same_passed(sorts_rows, rows)
+    assert any(r is inner for r in rows)                   # the caller's lists, moved
+    pts = [Pt(float(i), float(rnd.randrange(4))) for i in range(40)]
+    first = pts[0]
+    same_passed(sorts_instances, pts)
+    assert any(p is first for p in pts)
+    with pytest.raises(CompileError, match='reads the list it sorts'):
+        scram(sorts_by_self, fallback=False, cache=False)([3, 1, 2])
+    with pytest.raises(CompileError, match='a sort comparing'):
+        scram(lambda_free_sort, fallback=False, cache=False)([[2], [1]])
+
+
+def lambda_free_sort(rows):
+    rows.sort()                                             # lists compare in Python; not compiled yet
+    return rows
+
+
+def tuple_elements(pts):
+    sums = [p[0] + p[1] for p in pts]                       # a whole tuple as the comprehension's variable
+    return sums[0] + sums[-1], pts[0][1], pts[-1][0]
+
+
+def test_tuple_elements():
+    same_passed(tuple_elements, [(1, 2.5), (3, 4.0)])

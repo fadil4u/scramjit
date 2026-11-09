@@ -211,8 +211,36 @@ class Lazy(ast.NodeTransformer):
             return ast.copy_location(ast.Name(v, ast.Store()), e), e.args[1], load, cond
         return None
 
+    def sorting(self, e):
+        """xs.sort(key=f, reverse=r) and sorted(it, key=f, reverse=r): it as a list comprehension, and the key as one
+        too, over a name the compiler binds to the list being sorted: the keys, one per element, in order, as Python's."""
+        meth = isinstance(e.func, ast.Attribute) and e.func.attr == 'sort' and not e.args
+        fn = isinstance(e.func, ast.Name) and e.func.id == 'sorted' and 'sorted' not in self.bound and len(e.args) == 1
+        if not (meth or fn) or any(k.arg not in ('key', 'reverse') for k in e.keywords) or len({k.arg for k in e.keywords}) != len(e.keywords):
+            return e
+        if fn and isinstance(e.args[0], ast.GeneratorExp):
+            e.args[0] = ast.ListComp(e.args[0].elt, e.args[0].generators)
+        elif fn and not isinstance(e.args[0], (ast.List, ast.ListComp)):
+            v = self.fresh()
+            e.args[0] = ast.ListComp(ast.Name(v, ast.Load()), [ast.comprehension(ast.Name(v, ast.Store()), e.args[0], [], 0)])
+        kws = []
+        for k in e.keywords:
+            if k.arg == 'key' and isinstance(k.value, ast.Constant) and k.value.value is None:
+                continue
+            if k.arg == 'key':
+                src, v = self.fresh(), self.fresh()
+                body = self.apply(k.value, [ast.Name(v, ast.Load())], e)
+                if body is None or meth and isinstance(e.func.value, ast.Name) and \
+                        any(isinstance(n, ast.Name) and n.id == e.func.value.id for n in ast.walk(body)):
+                    return ast.fix_missing_locations(e)       # (Python's list is empty while its keys are made: stays Python)
+                k = ast.keyword('key', ast.ListComp(body, [ast.comprehension(ast.Name(v, ast.Store()), ast.Name(src, ast.Load()), [], 0)]))
+            kws.append(k)
+        e.keywords = kws
+        return ast.fix_missing_locations(e)
+
     def visit_Call(self, e):
         self.generic_visit(e)
+        e = self.sorting(e)
         if self.builtin(e, 'pow') and len(e.args) == 2:     # pow(a, b) is a ** b
             return ast.copy_location(ast.BinOp(e.args[0], ast.Pow(), e.args[1]), e)
         p = self.parts(e)
@@ -1990,6 +2018,7 @@ class Compiler(GList):
         self.uses_rerun = False    # the kernel can ask for the call to run as Python, before doing anything
         self.tracks = False        # the function returns an array, so views remember which argument they're of
         self.makes = False         # the function makes arrays, so views remember the block they're in
+        self.plain_calls = set()   # calls to compiled functions that touch no heap (callee_type)
         self.array_args = []       # for those: (argument index, dict key or None) of each array parameter
         self.ref_written = set()   # list parameters a callee given an element by reference writes
         local = {p.arg for p in fdef.args.posonlyargs + fdef.args.args}
@@ -2595,6 +2624,8 @@ class Compiler(GList):
         """Is e a tuple variable, or an element of one that is itself a tuple?"""
         if isinstance(e, ast.Name):
             return e.id in self.env and self.env[e.id].kind == 'tuple'
+        if isinstance(e, (ast.Subscript, ast.Attribute)) and (self.gl_is(e.value) or self.rc_is(e.value)):
+            return self.typeof(e).kind == 'tuple'           # a tuple in a list, a dict or an instance
         return isinstance(e, ast.Subscript) and self.tuple_typed(e.value) and self.typeof(e).kind == 'tuple'
 
     def tuple_index(self, sub):
@@ -3023,6 +3054,8 @@ class Compiler(GList):
             return T.tuple_of(ts)
         if isinstance(e, ast.Call) and receiver(e) and receiver(e)[1] == 'pop' and self.gl_is(receiver(e)[0]):
             return self.gl_infer_method(e)
+        if self.gl_sorted(e):
+            return self.gl_sorted_type(e)
         if self.rc_is_method(e):                 # a method of an instance held in a list
             return self.rc_method(e)[0].ret
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == 'len' and len(e.args) == 1 \
@@ -3377,6 +3410,8 @@ class Compiler(GList):
         if any(self.typeof(a) is T.U64 for a in e.args) or any(self.typeof(k.value) is T.U64 for k in e.keywords):
             self.fail(e, 'passes an int past int64 to a compiled function')
         c = self.compiled_callee(e)
+        if not c.makes and not held(c.ret) and c.ret.kind != 'array' and not any(held(c.env[p]) for p in c.params):
+            self.plain_calls.add(id(e))           # touches no heap: fine inside a comprehension
         if c.makes and ret_arrays(c.ret):
             self.makes = True
         if c.ret.kind == 'glist' or any(c.env[p].kind == 'glist' for p in c.params):
@@ -4884,8 +4919,6 @@ class Compiler(GList):
     def comp_bind_types(self, target, struct, saved, e):
         if isinstance(target, (ast.Tuple, ast.List)) and isinstance(struct, T.Type) and struct.kind == 'tuple':
             struct = list(struct.elem)           # a tuple element, unpacked
-        if isinstance(target, ast.Name) and isinstance(struct, T.Type) and struct.kind == 'tuple':
-            self.fail(e, 'a comprehension variable that is a tuple (unpack it: for a, b in ...)')
         if isinstance(target, ast.Name) and isinstance(struct, T.Type) and struct.kind == 'array' and target.id not in saved:
             old = self.env.get(target.id)              # an array from a list: a variable of its own, as a loop's is
             if old is not None and old is not struct:
@@ -5012,7 +5045,8 @@ class Compiler(GList):
         if self.makes:
             for n in ast.walk(self.f):
                 if isinstance(n, (ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)) \
-                        and any((isinstance(c, ast.Call) or self.elementwise_of(c)) and (self.make_of(c) is not None or self.callee_of(c) is not None) for c in ast.walk(n)):
+                        and any((isinstance(c, ast.Call) or self.elementwise_of(c)) and (self.make_of(c) is not None or self.callee_of(c) is not None
+                                                                                          and id(c) not in self.plain_calls) for c in ast.walk(n)):
                     self.fail(n, 'an array made inside a comprehension')
             self.f.body = self.add_safepoints(self.f.body)
         da_block(self, self.f.body, set(self.params))
@@ -6915,6 +6949,8 @@ class Compiler(GList):
             return self.hold(f'{arr}[{idx}]', self.env[name].elem), self.hold_flag(self.elem_flag(name, idx))
         if isinstance(e, ast.Call) and receiver(e) and receiver(e)[1] == 'pop' and self.gl_is(receiver(e)[0]):
             return self.gl_method(e, want_value=True)
+        if self.gl_sorted(e):
+            return self.gl_sorted_value(e)
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == 'len' and len(e.args) == 1 and self.gl_is(e.args[0]):
             return f'({self.expr(e.args[0])[0]})->n', '0'
         if isinstance(e, ast.Call):
@@ -7311,6 +7347,25 @@ class Compiler(GList):
             rec = self.temp()
             self.emit(f'{self.gl_record(v.t.ndim)} {rec} = {v.record};')
             self.gl_bind_array(target.id, rec)
+            return
+        if isinstance(v, list) and isinstance(target, ast.Name):       # a list's tuple element, as (value, type, flag)s
+
+            def whole(x):
+                if isinstance(x, list):
+                    parts = [whole(y) for y in x]
+                    return [p[0] for p in parts], T.tuple_of([p[1] for p in parts])
+                return (x[0], x[2]), x[1]
+            v = TupleOf(*whole(v))
+        if isinstance(v, TupleOf) and isinstance(target, ast.Name):    # a whole tuple: a C variable per number, in the loop
+            if target.id not in saved:
+                saved[target.id] = self.env.get(target.id)
+                saved_c[target.id] = self.cnames.get(target.id)
+            self.env[target.id] = v.t
+            self.cnames.pop(target.id, None)
+            for (cv, fv), et, (c, f) in zip(flat(self.tuple_var(target.id)), T.leaves(v.t), flat(v.vals)):
+                self.emit(f'{et.ctype} {cv} = {c};')
+                if et.np == 'dyn':
+                    self.emit(f'int {fv} = {f};')
             return
         if isinstance(v, TupleOf):
             v = [TupleOf(val, et) if et.kind == 'tuple' else (val[0], et, val[1]) for val, et in zip(v.vals, v.t.elem)]
@@ -7752,8 +7807,8 @@ def da_reads(c, node, assigned):
     local = {n.id for comp in ast.walk(node) if isinstance(comp, (ast.GeneratorExp, ast.ListComp))
              for g in comp.generators for n in ast.walk(g.target) if isinstance(n, ast.Name)}
     for n in ast.walk(node):
-        if isinstance(n, ast.Name) and n.id in local:
-            continue
+        if isinstance(n, ast.Name) and (n.id in local or n.id.startswith('_sj_')):
+            continue                                    # (_sj_: the compiler's own, bound where it reads them)
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in c.env \
                 and assigned is not ALL and n.id not in assigned:
             c.fail(n, f'{n.id} may be read before it is assigned')

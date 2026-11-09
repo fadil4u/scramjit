@@ -133,6 +133,36 @@ Built 2026-11-05 and 2026-11-06 (see "Object model" in `requirements.md`); tests
      WebGPU barely exposes matrix units, and Triton and CUDA already own that work.
    - **Decide first:** this contradicts the spec's "Not for: vectorized code" and the rule that public
      copy doesn't advertise ML use. Settle the positioning in `requirements.md` before any public page.
+7. **Proofs about `@scram` functions, in pure Python.** Agents write code faster than it can be
+   reviewed; a contract that is proven can't be gamed the way tests can. A Lean-style system written
+   in Python: the toolchain (kernel, elaborator, automation) stays pure Python, no Lean, z3 or other
+   native prover, so proofs check in Pyodide too.
+   - **Kernel:** a dependent type theory (inductives, universes, definitional equality), small and
+     audited, nothing clever in it. Everything else, automation included, is untrusted and emits
+     proof terms the kernel checks.
+   - **Reflection:** a terminating `@scram` function becomes a definition; `requires`/`ensures`,
+     `decreases` and `assert`s become theorem statements, still valid Python undecorated (a property
+     test for free). The semantics are the compiled ones, 64-bit wrapping included, stated explicitly;
+     the differential tests against CPython back the translation.
+   - **Automation, in order:** linear integer arithmetic (bounds, off-by-one, overflow), then
+     congruence closure, then induction. Success is measured by how many goals close with no
+     explicit proof.
+   - **Proof surface:** Python syntax for what automation can't close (intermediate lemmas,
+     invariants, induction hints), written by agents. No separate tactic language.
+   - **Preflight:** each assert and contract reports proven / runtime check / counterexample, as
+     bounds checks do now; `--json` for agents.
+   - **Library:** program-verification lemmas (integers, lists, arrays, inequalities), not Mathlib.
+     Optional later: check a slice of Mathlib from `lean4export` output as data (Lean runs once,
+     offline; the toolchain stays pure Python).
+   - **Measure first:** the kernel's speed on a realistic proof term (a list-sorting proof exported
+     from Lean) before building the elaborator; CPython is likely 50-100x slower than Lean's C.
+     Long term, scramjit compiles the prover's hot paths, which needs recursion, strings and
+     growing dicts to compile. Also measure: on ~50 agent-written kernels, what fraction of their
+     bugs linear integer arithmetic alone catches or proves absent.
+   - **First step (days):** assert discharge in preflight from the range facts bounds-check
+     elimination already computes, before any kernel.
+   - **Decide first:** this is a new positioning ("verified Python for agents"); settle it in
+     `requirements.md` before any public page.
 
 ## Adoption (priority order, below Directions; each is days, and has an oracle: the existing behavior, numpy, or Numba)
 
@@ -579,7 +609,14 @@ Spills per line, once cimo can report them.
       tuples, literal lists and tuples, a dict's keys). **Pyodide:** works (cimo's wasm code has 8-byte pointers inside, so
       the decoders read pointer fields as 8 bytes); `tools/run_pyodide_tests.mjs tests/test_glists.py
       tests/test_elementwise.py`, 27 passed. Not yet run in CI.
-    - **Left:** sets, `sort`.
+    - **Sorting:** `sort` and `sorted` with `key=` (a lambda or compiled function, rewritten to a comprehension of keys over
+      the list being sorted) and `reverse=`; a stable merge sort per element type, so without NaNs the order is Python's.
+      1M floats 4.7x Python's sort, 1M tuples 10.9x, keyed 6.1x. Lists as elements and keys reading the sorted list stay
+      Python. Along the way: a whole tuple as a comprehension variable, `t[0][1]` on a list of tuples, and calls to
+      compiled functions that touch no heap inside comprehensions in functions that make arrays.
+    - **Left:** sets. Comparing lists (`rows.sort()` on a list of lists, `xs < ys`).
+    - **Converting a list of floats in is slow:** 1M floats cost 60 ms to pass in (230 ms when the floats are scattered
+      in memory, as after `sorted`), against 25 ms (77 ms) for `array.array('d', xs)`. Find where the time goes.
 24. **Preflight's advice: boxed data, and the flags that would help.** Two kinds of note:
     - **Converting costs more than computing.** `preflight --run` splits each function's time into native and
       Python; split off the seconds converting arguments and results too (copying lists in, writing back, boxing the

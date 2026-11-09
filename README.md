@@ -129,7 +129,7 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 |:---|:---|
 | `for`, `while`, `break`, `continue`, `if`, conditional expressions | Masks and index arrays: `x[x > 0]` |
 | Lists of numbers and rectangular lists of lists, passed in, made in the function and returned (from 0.0.4) | Dicts that gain keys |
-| Lists that grow (`append`, `pop`, `extend`, `insert`, `del`), shared and nested, holding lists, tuples, arrays, dicts or instances, made or passed in (from 0.0.4) | `sort`, sets |
+| Lists that grow (`append`, `pop`, `extend`, `insert`, `del`), sliced, searched with `in` and sorted (`sort`, `sorted`, with `key=`), shared and nested, holding lists, tuples, arrays, dicts or instances, made or passed in (from 0.0.4) | Sets |
 | Views: `m[i]`, `x[a:b]`, `x[::-1]`, `m[:, j]`, `.T`, `for row in m`, as arguments and results | `x.reshape(...)`, `np.eye(n)` |
 | Making arrays: `np.zeros(n)`, `x.copy()`, `np.arange`, `np.linspace`, as locals and results | `np.where`, `np.concatenate` |
 | Assigning to a slice: `x[1:3] = 0.0`, `m[i] = row`, overlap included | `//`, `%` and comparisons on whole arrays |
@@ -240,7 +240,8 @@ Pre-release: the API may still change.
   differ. cimo also targets x86-64 Linux and macOS, where scramjit's tests haven't been run yet, and nothing runs in CI yet.
 - A function that doesn't compile whole has its loops compiled on their own, where they fit.
 - On `main`, from 0.0.4: lists that grow, nest and are shared, as Python's (`out.append((i, j))`, lists of lists of arrays, lists
-  of dicts and of dataclass instances), made in the function, passed in and written back, and returned.
+  of dicts and of dataclass instances), made in the function, passed in and written back, and returned; slices, `in`, and
+  `sort` and `sorted` with `key=` and `reverse=`.
 - On `main`, from 0.0.4: whole-array arithmetic (`a * 2 + b`, `np.sqrt(a)`, broadcasting) compiles, one pass per
   expression, with numpy's results bit for bit.
 - Data structures: dicts passed in with keys that don't change, tuples to any depth, enums, local lists, and module-level

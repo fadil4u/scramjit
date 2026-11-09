@@ -9,7 +9,7 @@ At a glance:
 | | Compiles | Stays Python |
 |:---|:---|:---|
 | Tuples | numbers and tuples of them, to any depth; as locals, arguments, results and globals; constant indexes, unpacking, loops over them | an index in a variable, slices, `+`, comparing tuples, a tuple holding arrays except as a result |
-| Lists | lists of numbers made in the function, passed in, returned, and at module level (from 0.0.4); `append`, `pop`, `extend`, `insert`, `del` and aliases on lists made in the function, holding lists, tuples or arrays to any depth (from 0.0.4) | `in`, slices, `sort`, mixed ints and floats |
+| Lists | lists of numbers made in the function, passed in, returned, and at module level (from 0.0.4); `append`, `pop`, `extend`, `insert`, `del` and aliases on lists made in the function, holding lists, tuples or arrays to any depth (from 0.0.4) | mixed ints and floats, sets |
 | Lists of lists | rectangular, passed in, made in the function and returned (from 0.0.4); ragged, shared rows and any depth when made in the function (from 0.0.4) | `m[i, j]`, slices |
 | Dicts | passed in, reading and writing the keys the function names; made with constant string keys, in lists and holding lists (from 0.0.4) | adding or deleting keys, `len`, `in`, `.get`, iterating, a key in a variable |
 | Instances (from 0.0.4) | passed in or at module level, made in the function, `@scram` methods; attributes read and written, objects in attributes; methods and operators (`a + b`), new instances from calls; one object under several names; passing them on, returning them, `isinstance`; lists of them; linked structures (`n = n.next`) and rebinding (`a.pos = b.pos`): plain classes, dataclasses, `__slots__`, namedtuples, `SimpleNamespace` | properties, static and class methods, adding an attribute, a list made in the function, keeping new instances in a linked structure |
@@ -126,7 +126,7 @@ Their element type is fixed by what they're made with. Storing a numpy scalar in
 
 Still Python, each for that function or the loop it's in:
 
-- **Methods and operators:** `sort`, `index`, `count`, `copy`, `remove`, `xs + ys`, `xs * 2` after it's made, `sorted(xs)`.
+- **Methods and operators:** `index`, `count`, `copy`, `remove`, `xs + ys`, `xs * 2` after it's made. (`sort`, `sorted(xs)`, slices and `in` compile from 0.0.4, the list then being held as in the next section.)
 - **Mixed element types:** `[1, 2.5]`, or `[1.0, n]` with an int `n`.
 
 ### Lists that grow, nest and are shared (from 0.0.4)
@@ -176,9 +176,10 @@ def record(hits, xs, r):
 
 - **Slices** (from 0.0.4): `xs[a:b:c]` is a new list, a shallow copy, as Python's; `xs[a:b] = ys` and `del xs[a:b]` resize the list, and an extended slice (`xs[::2] = ys`) must be as long, with Python's `ValueError` otherwise. A list sliced anywhere in a function is held this way.
 - **`in`** (from 0.0.4): `x in xs` and `not in` on a list of numbers or of tuples of numbers compare with `==`, in order, and `x in [a, b]` or `x in (1, 2, 3)` compares with each; `'k' in d` asks a dict whether it has that key. One difference: Python finds a NaN in a list when it is the very object there (`x in [x]` is true even for `x = nan`), while compiled code compares values, so it never finds a NaN.
+- **Sorting** (from 0.0.4): `xs.sort()` and `sorted(xs)`, with `reverse=` and `key=` (a lambda or a compiled function), on lists of numbers or of tuples of numbers, or on any of these lists with a key giving those: `pts.sort(key=lambda p: (p.y, -p.x))`. The sort is stable, as Python's, so equal elements keep their order and the result is Python's. `sorted` takes anything a loop can go over (`sorted(range(n, 0, -2))`, `sorted(x * 2 for x in xs)`, an array). The keys are made first, one per element, in order, as Python makes them. Lists compared as elements (`rows.sort()` on a list of lists) and a key reading the list being sorted (Python's list is empty meanwhile) stay Python. A list of NaN-holding floats is sorted in an order of its own, see [Gotchas](gotchas.md).
 - **Pyodide:** all of this runs there too (`tools/run_pyodide_tests.mjs tests/test_glists.py`).
 
-Not yet: sets, and `sort`.
+Not yet: sets.
 
 ### Lists passed in (from 0.0.4)
 

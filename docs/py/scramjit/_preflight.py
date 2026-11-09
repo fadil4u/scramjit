@@ -314,9 +314,13 @@ def assumed_signature(fdef, globals_=None, seen=()):
     for p, d in zip(params[len(params) - len(a.defaults):], a.defaults):
         if isinstance(d, ast.Constant) and type(d.value) in (int, float, bool):
             literal[p.arg] = {int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(d.value)]
+    from ._glist import grown_names
+    grown = grown_names(fdef, uses=False)
     for p in params:
         name = ast.unparse(p.annotation) if p.annotation is not None else None
-        if p.arg in lists and name not in ann:
+        if p.arg in grown and name is None:     # appended to: a list given empty, typed by what's appended (_glist)
+            sig.append(T.glist_of(T.PENDING))
+        elif p.arg in lists and name not in ann:
             methods = {}
             for k in [p.arg] + [k for k, v in alias.items() if v == p.arg]:
                 methods.update(passed_methods.get(k, {}))

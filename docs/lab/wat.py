@@ -1,5 +1,6 @@
 """A small WebAssembly disassembler: module bytes -> WebAssembly text (WAT) for chosen functions.
-Covers the instructions cimo emits. Used by the website's training demo (docs/nn.js)."""
+Covers the instructions cimo emits. Public API: disassemble(module.wasm) in Pyodide, or the bytes of
+cimo.wasm.build(src) anywhere. Standard library only."""
 
 import struct
 
@@ -69,7 +70,8 @@ def _fmt_f(x):
 
 
 def disassemble(mod, only=None):
-    """WAT text for the module's functions named in `only` (all if None), and a summary."""
+    """(text, sections, others): WebAssembly text of the module's functions named in `only` (all if None),
+    [(section name, bytes)], and the names of the functions left out."""
     mod = bytes(mod)
     r = _R(mod, 8)
     types, nimp, imports, ftypes, exports, bodies, names, sections = [], 0, [], [], {}, [], {}, []

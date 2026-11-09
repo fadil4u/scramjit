@@ -452,6 +452,7 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
         <li><b>Programs, not only loops.</b> A compiled function can call another: <code>reset</code>, <code>step</code> and <code>policy</code> stay separate functions, and small ones are inlined, so a call costs nothing.</li>
         <li><b>C where you want it.</b> <code>k = cimo.compile('...')</code>, then <code>k.mix(x)</code> in a compiled loop: the C goes in the same file, so it's inlined too.</li>
         <li><b>Settings in a dict.</b> A dict passed in compiles if its keys don't change, and a loop reading <code>p['k']</code> runs as fast as one reading a local. So does a constant at module level.</li>
+        <li><b>Lists as Python's (from 0.0.4).</b> <code>out.append((i, j))</code>, <code>pop</code>, slices, <code>in</code>, <code>sort</code> and <code>sorted(xs, key=...)</code> compile, on lists that nest and are shared, holding numbers, tuples, arrays, dicts or instances; a returned list is Python's own.</li>
         <li><b>Objects with state (from 0.0.4).</b> Put <code>@scram</code> on a method of a plain class or dataclass: <code>self.x</code> compiles to a local, <code>self.step(dt)</code> to a call, <code>Vec(x, y)</code> to two variables, a list of them to a list per attribute, and what it writes is on the objects afterwards. Properties and anything else with code of its own stay Python.</li>
       </ul>
     </div>

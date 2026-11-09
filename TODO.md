@@ -174,15 +174,14 @@ after with `bench/`, and write the numbers into the item when done.
 1. **Shipping a package built on scramjit: pure-Python wheel, native speed, no compile for the user.**
    cimo's `distribution.md` covers the dependency and the vendored one-file cimo; what's missing is
    the scramjit side and shipping compiled code so a user never waits for a compile.
-   - **Precompiled cache in the wheel.** When cimo's public cache export/import lands (cimo
-     `TODO.md`: "public cache export and import"), add `scramjit build <package>`: imports the
+   - **Precompiled cache in the wheel.** cimo's public cache export/import has landed (`module.cache_entry()`,
+     `cimo.add_cache_entry()`, 2026-11-07): add `scramjit build <package>`: imports the
      package in a subprocess with `SCRAMJIT_RECORD=1`, calls nothing, but compiles every `@scram`
      function for the signatures listed in a `scramjit.toml` (`[[precompile]] function = "pkg.mod.f"
      types = ["float64[:]", "float64[:]", "float"]`), one entry per target platform the build runs on
      (`linux-arm64`, `linux-x86_64`, `macos-arm64`, `windows-x86_64`, `windows-arm64`, `wasm32`), and
      writes the cache entries under `pkg/_scramjit_cache/<platform>/`. At import, `scram` looks
-     there before compiling. Until cimo's export exists, the item stops at the signature list and
-     the subprocess driver, tested with the private cache layout the LLM demo already uses.
+     there before compiling.
    - **Signatures without a call.** `@scram` needs argument types to compile; add
      `f.compile("float64[:], float64[:], float")` (the type-string syntax `_types.py` already prints)
      so a package can compile at import time deliberately, and `scramjit.toml` uses the same strings.
@@ -369,13 +368,12 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
   temporaries. Both help any compiler; revisit what else can go once cimo merges repeated
   expressions (cimo `TODO.md`: "Slower than gcc -O3 on scramjit's kernels").
 
-- **The LLM demo moves compiled code by listing what changes in `CIMO_CACHE_DIR`** (`docs/demos/llm/demo_py.py`: `precompile`), which depends on
-  cimo's cache layout. The same listing keeps compiles between visits. When cimo has public cache export and import (its `TODO.md`), use that for both.
-  The demo's tabs also read the private `fn._cache`, for the C and the inferred types.
+- **The LLM demo moves compiled code by listing what changes in `CIMO_CACHE_DIR`** (`docs/demos/llm/demo_py.py`:
+  `precompile`). cimo's public cache export and import has landed (`module.cache_entry()`, `cimo.add_cache_entry()`):
+  switch to it. The demo's tabs also read the private `fn._cache`, for the C and the inferred types.
 
-- **The demo's WebAssembly tab calls `cimo.wasm.build`** (`docs/lab/lab.py`: `wasm_text`) for the
-  module's bytes, which isn't cimo's documented API. When cimo exposes a compiled module's
-  WebAssembly (or a disassembly), use that.
+- **The demo's WebAssembly tab calls `cimo.wasm.build`** (`docs/lab/lab.py`: `wasm_text`). cimo now exposes
+  `module.wasm` and `cimo.wat.disassemble`: switch to them.
 
 ## Line counts, what's left
 
@@ -478,7 +476,7 @@ Spills per line, once cimo can report them.
    `s = n` from an int variable, each of which keeps the function in Python.
 11. **Rest of M3:** run the M0 kernels in Pyodide as a test, not only through the site; preflight's
    per-loop report once cimo exposes one (cimo's `TODO.md`), and a `disk` label in the compile column,
-   which needs cimo to say whether a compile hit its cache.
+   which cimo's `module.cached` now gives (see "From cimo").
 12. **`n ** k` with a negative `k` and `x ** 0.5` with a negative `x`, what's left:** a function that writes nothing
    reruns the call as Python there. One that writes still raises: resuming in Python alongside loop lifting would remove
    that difference too.
@@ -496,7 +494,7 @@ Spills per line, once cimo can report them.
     `bench/llm.py` through `gcc -O3`: 63 tok/s with, 82 without), probably the latency of the
     instruction the sum's next add waits on (not measured). Measure non-reductions (stencils) before making it fire or removing it.
 16. **Calls between compiled functions, what's left:** recursion, defaults other than numbers left out by a compiled caller, keyword-only parameters, dicts and lists as arguments, a function passed as an argument, `module.f()`, and a line profile of what's called.
-    **Calling C, what's left:** modules with state, which need calling across modules (cimo: a call by address crashes once the callee uses `malloc`), `include_dirs=` and `link=`, returning a pointer or `uint64_t`, a C function's module compiled with `fma=` on alongside exact math in one file (needs `FP_CONTRACT` in cimo).
+    **Calling C, what's left:** modules with state (calling across modules works in cimo since 2026-11-07, `malloc` included), `include_dirs=` and `link=`, returning a pointer or `uint64_t`, a C function's module compiled with `fma=` on alongside exact math in one file (cimo has `#pragma STDC FP_CONTRACT` since 2026-11-07).
 17. **Compile time on large functions, what's left:** versioning's copies are capped (`VERSION_TOTAL`, `VERSION_MIN` in
     `_compiler.py`), most deeply nested loops first: a generated 60-loop function 14.7 to 5.1 s, `bench/llm.py` unchanged.
     The cost was mostly cimo's, now much less (cimo 2026-11-05): this shape of function, 60 loops all versioned (4,150 lines
@@ -535,8 +533,8 @@ Spills per line, once cimo can report them.
       (2026-11-07): `reassoc=True`, separate from `parity` (reordering changes plain `+` everywhere, by more than
       a last bit under cancellation, and with the vector width; `parity=False` never reorders), emitting
       `#pragma omp simd reduction(+:s)` before a loop whose float sums (products, min, max) it lets go out of order,
-      and nothing else. **Blocked on cimo:** it drops the pragma today (dot 1.36 ms with or without, same bits; in
-      cimo's TODO). No flag until it does something.
+      and nothing else. **Unblocked (cimo 2026-11-07):** cimo honors the pragma now (four vectors of accumulators;
+      `+`, `-`, `*`, and fmin/fmax without it on arm64); re-measure dot with it before adding the flag.
     - **First call, 2 to 8x Numba's** (0.1 to 1 s against 0.04 to 0.12 s, cold, after one warm-up compile each): #19.
     - **Call overhead, 7 to 13x Numba's** (`bench/compare.py`'s per-call table, 2026-11-07): `a + b` on two floats
       829 ns a call, from 1,221 before `__call__` by argument count (#9) (CPython 36, Numba 112, Cython 24); `x[0]`
@@ -569,7 +567,7 @@ Spills per line, once cimo can report them.
       cimo's half is done too (2026-11-05: its key leaves out line markers, blank lines and indentation), so `#line` could name the real file again; `__LINE__`
       and `__FILE__` still go into the key wherever they're used.
     - **A warm first call (2026-11-05):** Gray-Scott about 47 ms: 13 generating C, 30 preprocessing it (14 of that the prelude), about 1 loading; `small` about 45, nearly all preprocessing.
-      A cold one is 96% cimo (496 ms, 13 generating). A cache keyed on the Python would save only warm time, and needs cimo's public cache export and import to skip the preprocessing.
+      A cold one is 96% cimo (496 ms, 13 generating). A cache keyed on the Python would save only warm time, and can use cimo's public cache export and import (`module.cache_entry()`, `cimo.add_cache_entry()`) to skip the preprocessing.
 20. **Split `_compiler.py` into a package.** 4.8k lines holding every lowering in one file. Make
     `scramjit/_compiler/` with one module per concern, in the order the compile runs: `infer` (types),
     `index` (indexing, views, slices), `checks` (bounds checks and versioning), `calls` (`@scram` and C

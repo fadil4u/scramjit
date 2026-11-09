@@ -360,8 +360,10 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
 - **Float `math.sumprod` falls back:** Python returns the int 0 when it's empty, so its type depends on
   the data. Same for float `math.prod` without `start=1.0`, where the fix is in the user's hands.
 - **Math functions call the host libm through a table of addresses** (`_dispatch._libm_table`,
-  `SJ_LIBM1` in the prelude), passed to each kernel that uses them, because cimo resolves `sin`
-  etc. to its bundled libm. When cimo can link the host libm for math calls: call them directly.
+  `SJ_LIBM1` in the prelude), passed to each kernel that uses them, because cimo resolved `sin`
+  etc. to its bundled libm. cimo now has `compile(libm='host')` (2026-11-09): the host's libm, the functions CPython's
+  `math` calls, bit for bit (not `hypot`, which CPython computes itself). Call them directly with it under
+  `parity=True` and drop the table.
 
 - **Code shaped around cimo's missing CSE:** wraparound indices hoisted to the top of the loop
   body (`hoist_wraps`), `//` and `%` computed as one division and one remainder into

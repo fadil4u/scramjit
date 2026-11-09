@@ -5,9 +5,9 @@ Biggest first. `requirements.md` is the spec; this is the work queue. Smaller it
 
 ## Release
 
-0. **0.0.4 released (2026-11-09),** with cimo 0.0.4. The rule stays: the README, site and
+0. **0.0.5 released (2026-11-09),** with cimo 0.0.5: CI on every platform, CPython 3.12+. The rule stays: the README, site and
    docs describe the released version, and a feature on `main` but not on PyPI is released the same day or marked
-   "from 0.0.5" wherever it's mentioned (`AGENTS.md`). `tests/test_version.py` checks the version agrees everywhere it's written.
+   "from 0.0.6" wherever it's mentioned (`AGENTS.md`). `tests/test_version.py` checks the version agrees everywhere it's written.
 
 ## Object model: what's left
 

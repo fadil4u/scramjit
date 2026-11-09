@@ -6,6 +6,7 @@ So every scalar type records whether it is a Python number or a numpy scalar.
 """
 
 import struct
+import sys
 
 
 class Type:
@@ -65,6 +66,11 @@ NARROW = {
 }
 INT_RANGE = {'int32': (-(1 << 31), (1 << 31) - 1), 'int16': (-(1 << 15), (1 << 15) - 1), 'int8': (-128, 127),
              'uint32': (0, (1 << 32) - 1), 'uint16': (0, 65535), 'uint8': (0, 255)}
+# On Windows a C long is 32 bits, np.int32 is np.long, and np.intc is a class of its own: numpy gives an intc when it
+# widens a signed and an unsigned scalar to 32 bits (np.int16 + np.uint16). Elsewhere np.intc is np.int32.
+if sys.platform == 'win32':
+    NARROW['intc'] = Type('np.intc', 'int32_t', 'int', np=True)
+    INT_RANGE['intc'] = INT_RANGE['int32']
 
 
 # A variable that starts as a literal and becomes a narrow scalar (total = 0.0, then total += x[i], which is
@@ -490,12 +496,13 @@ def promote(a, b):
     if a is NP_INT64 or b is NP_INT64:
         return NP_INT64
     ua, ub = a.ctype[0] == 'u', b.ctype[0] == 'u'
-    width = max(bits(a), bits(b))
     if ua != ub:                            # the signed one must hold the unsigned one's values
         unsigned_bits, signed_bits = (bits(a), bits(b)) if ua else (bits(b), bits(a))
-        width = signed_bits if signed_bits > unsigned_bits else unsigned_bits * 2
-        return NP_INT64 if width > 32 else NARROW[f'int{width}']
-    return NARROW[f'{"u" if ua else ""}int{width}']
+        if signed_bits > unsigned_bits:
+            return b if ua else a           # the signed one, an intc staying one
+        width = unsigned_bits * 2
+        return NP_INT64 if width > 32 else NARROW.get('intc' if width == 32 else '', NARROW[f'int{width}'])
+    return a if bits(a) >= bits(b) else b    # the wider one (an intc stays one)
 
 
 def narrow_result(a, b, op):

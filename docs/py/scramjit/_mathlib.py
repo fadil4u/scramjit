@@ -4,7 +4,21 @@ Portions copyright Python Software Foundation, under the PSF License Agreement. 
 the helpers it uses (SNIPPETS, with their dependencies), so these add nothing to other compiles.
 """
 
+import platform
+
 from ._runtime import LIBM
+
+# CPython's own math functions, ported here, give the bits CPython's compiler gave them: GCC fuses a * b + c across
+# statements on arm64 (cimo's default does the same), clang only within one expression, as the C standard's
+# FP_CONTRACT ON says. A clang-built CPython (python.org's macOS build, uv's) gets these compiled that way too.
+_PORTED = {'sinpi', 'lanczos', 'gamma', 'lgamma'}
+_CLANG = platform.python_compiler().lower().startswith('clang')
+
+
+def _contracted(name, text):
+    if name in _PORTED and _CLANG:
+        return '#pragma STDC FP_CONTRACT ON\n' + text + '#pragma STDC FP_CONTRACT DEFAULT\n'
+    return text
 
 
 def _f1(name):
@@ -17,6 +31,26 @@ def _f2(name):
 
 # Each returns 0, or 1 for a domain error and 2 for a range error, with the result in *r.
 SNIPPETS = {
+    # numpy's own loop for one element (see _nploops): its address and data pointer in sj_m[i] and sj_m[i + 1]. Strides
+    # 0, as numpy calls it for scalars: its power loop takes x * x, sqrt(x), 1 / x for a scalar exponent of 2, 0.5, -1
+    'nploop': ((), """
+typedef void (*sj_uloop)(char **, const int64_t *, const int64_t *, void *);
+static double sj_np1(const uint64_t *sj_m, int i, double x) {
+    double o; char *a[2] = {(char *)&x, (char *)&o}; int64_t n = 1, s[2] = {0, 0};
+    ((sj_uloop)(uintptr_t)sj_m[i])(a, &n, s, (void *)(uintptr_t)sj_m[i + 1]);
+    return o;
+}
+static double sj_np2(const uint64_t *sj_m, int i, double x, double y) {
+    double o; char *a[3] = {(char *)&x, (char *)&y, (char *)&o}; int64_t n = 1, s[3] = {0, 0, 0};
+    ((sj_uloop)(uintptr_t)sj_m[i])(a, &n, s, (void *)(uintptr_t)sj_m[i + 1]);
+    return o;
+}
+static float sj_np2f(const uint64_t *sj_m, int i, float x, float y) {
+    float o; char *a[3] = {(char *)&x, (char *)&y, (char *)&o}; int64_t n = 1, s[3] = {0, 0, 0};
+    ((sj_uloop)(uintptr_t)sj_m[i])(a, &n, s, (void *)(uintptr_t)sj_m[i + 1]);
+    return o;
+}
+"""),
     'sinpi': ((), f"""
 static double sj_m_sinpi(const uint64_t *sj_m, double x) {{
     const double pi = 3.141592653589793238462643383279502884197;
@@ -648,7 +682,7 @@ def snippets(names):
             seen.add(n)
             for d in SNIPPETS[n][0]:
                 add(d)
-            out.append(SNIPPETS[n][1])
+            out.append(_contracted(n, SNIPPETS[n][1]))
     for n in sorted(names):
         add(n)
     return ''.join(out)

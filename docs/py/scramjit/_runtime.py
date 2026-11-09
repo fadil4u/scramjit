@@ -7,6 +7,7 @@ Tuples return through slots 4 onward.
 """
 
 import errno
+import math
 import os
 import struct
 
@@ -32,6 +33,12 @@ def attribute_number(name):
 POOL_FULL = 14       # an instance made into a pool found no room left: the call is made again with more (nothing was written back)
 LINSPACE_ERROR = 12  # np.linspace of a number of samples, in io[2], that is negative or too many
 OPERANDS_ERROR = 15  # an array expression's operands don't broadcast: their shapes as for BROADCAST_ERROR
+MATH_ERROR = 17      # a math function's domain or range error, raised by calling the function in Python, so it's worded as
+                     # this Python words it (3.14: 'expected a positive input, got -1.0'). io[2] its index in MATH_ERROR_FUNCS,
+                     # its arguments' bits in io[3] and io[0], io[4] how many, plus 4 << k when the k-th is an int
+MATH_ERROR_FUNCS = ('sqrt', 'exp', 'exp2', 'expm1', 'log', 'log2', 'log10', 'log1p', 'sin', 'cos', 'tan', 'asin', 'acos',
+                    'atan', 'sinh', 'cosh', 'tanh', 'asinh', 'acosh', 'atanh', 'erf', 'erfc', 'cbrt', 'fabs', 'atan2', 'pow',
+                    'fmod', 'gamma', 'lgamma', 'remainder')
 KEY_ERROR = 16       # a set's remove() of what it doesn't hold: the value's bits in io[2], its kind in io[3] (0 int, 1 float,
                      # 2 bool); 3: pop from an empty set
 MAKE_DTYPES = ['float64', 'int64', 'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
@@ -130,6 +137,14 @@ def exception(status, io):
         return OverflowError(OVERFLOW_ERROR_MESSAGES[io[2]])
     if status == LIST_INDEX_ERROR:
         return IndexError(LIST_INDEX_MESSAGES[io[2]])
+    if status == MATH_ERROR:
+        n, kinds = io[4] & 3, io[4] >> 2
+        args = [b if kinds >> k & 1 else struct.unpack('<d', struct.pack('<q', b))[0] for k, b in enumerate((io[3], io[0])[:n])]
+        try:
+            getattr(math, MATH_ERROR_FUNCS[io[2]])(*args)
+        except Exception as e:  # noqa: BLE001
+            return e.with_traceback(None)
+        return ValueError('math domain error')
     if status == KEY_ERROR:
         if io[3] == 3:
             return KeyError('pop from an empty set')
@@ -208,6 +223,9 @@ static inline int64_t sj_slice(int has_a, int64_t a, int has_b, int64_t b, int64
 }
 
 #define SJ_FAIL(st, ln, a, b) do { sj_st = (st); sj_ln = (ln); sj_x = (a); sj_y = (b); goto sj_fail; } while (0)
+/* math.<f> failing on a and b (bits; k: how many, plus 4 << i when the i-th is an int): see MATH_ERROR */
+#define SJ_MATH_FAIL(ln, f, k, a, b) do { sj_io[0] = (b); sj_io[4] = (k); SJ_FAIL(17, (ln), (f), (a)); } while (0)
+static inline int64_t sj_dbits(double d) { int64_t b; memcpy(&b, &d, 8); return b; }
 
 /* int64 arithmetic that wraps instead of being undefined on overflow. Macros, not functions: a
  * function stops being inlined once its caller is large, and these are one instruction each. */
@@ -462,3 +480,4 @@ static inline double sj_hypot2(double a, double b) {
     return h * inv;
 }
 '''
+assert MATH_ERROR == 17 and 'SJ_FAIL(17,' in PRELUDE      # SJ_MATH_FAIL's status, written out in PRELUDE

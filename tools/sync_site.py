@@ -1,8 +1,8 @@
 """Copy what the site's live demo loads into Pyodide: cimo as one file, scramjit's package, and
 cimo's WebAssembly disassembler (cimo/wat.py in cimo's package).
 Run after changing scramjit (or to pick up a newer cimo):  python3 tools/sync_site.py
-cimo is the last commit of ../cimo next to this repository, never its uncommitted work; without a
-checkout, whatever cimo the environment has.
+cimo is the last commit of ../cimo next to this repository, never its uncommitted work, or the commit or tag in
+CIMO_REF (a release: CIMO_REF=v0.0.5); without a checkout, whatever cimo the environment has.
 """
 
 import io
@@ -24,7 +24,8 @@ def committed_cimo(tmp):
     repo = os.path.join(ROOT, '..', 'cimo')
     if not os.path.isdir(os.path.join(repo, '.git')):
         return None
-    archive = subprocess.run(['git', '-C', repo, 'archive', 'HEAD', 'python'], check=True, capture_output=True).stdout
+    ref = os.environ.get('CIMO_REF', 'HEAD')
+    archive = subprocess.run(['git', '-C', repo, 'archive', ref, 'python'], check=True, capture_output=True).stdout
     tarfile.open(fileobj=io.BytesIO(archive)).extractall(tmp)
     return tmp
 

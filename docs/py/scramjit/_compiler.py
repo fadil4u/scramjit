@@ -31,7 +31,7 @@ import sys
 
 from ._mathlib import snippets
 from . import _mathlib
-from ._runtime import (ATTRIBUTE_NONE, POOL_FULL, attribute_number, ARANGE_ERROR, BROADCAST_ERROR, OPERANDS_ERROR, INDEX_ERROR, INTERRUPTED, LINSPACE_ERROR, MAKE_DTYPES, MAKE_ERROR, NO_AXIS, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
+from ._runtime import (MATH_ERROR_FUNCS, ATTRIBUTE_NONE, POOL_FULL, attribute_number, ARANGE_ERROR, BROADCAST_ERROR, OPERANDS_ERROR, INDEX_ERROR, INTERRUPTED, LINSPACE_ERROR, MAKE_DTYPES, MAKE_ERROR, NO_AXIS, RERUN, RETURNS_INT, VALUE_ERROR_MESSAGES, INT_BOUNDS_ERROR, LIBM, LIST_INDEX_ERROR, MEMORY_ERROR, NARROW_INT_DTYPES,
                        OVERFLOW_ERROR, VALUE_ERROR, ZERO_DIVISION)
 
 BUILTINS = ('range', 'len', 'abs', 'min', 'max', 'int', 'float', 'round', 'sum', 'any', 'all')
@@ -410,15 +410,40 @@ def is_numpy(obj):
     return isinstance(obj, StaticNumpy) and obj.name is None or (obj is not None and obj is sys.modules.get('numpy'))
 
 
-def zero_rule(name):
-    """Which zero np.minimum gives for 0.0 and -0.0 depends on the platform: always 'negative', always 'positive', or by
-    position, 'first' or 'second'. The compiled code must agree with the numpy it stands in for."""
+def zero_rule(name, dtype='float64'):
+    """Which zero np.minimum gives for 0.0 and -0.0 depends on the platform, and on the dtype (numpy's float32 kernels
+    aren't its float64 ones): always 'negative', always 'positive', or by position, 'first' or 'second'. The compiled
+    code must agree with the numpy it stands in for."""
     np = sys.modules.get('numpy')
     if np is None:
         return 'negative' if name in ('minimum', 'fmin') else 'positive'
-    one = math.copysign(1.0, float(getattr(np, name)(0.0, -0.0))) < 0
-    two = math.copysign(1.0, float(getattr(np, name)(-0.0, 0.0))) < 0
+    z = getattr(np, dtype)
+    one = math.copysign(1.0, float(getattr(np, name)(z(0.0), z(-0.0)))) < 0
+    two = math.copysign(1.0, float(getattr(np, name)(z(-0.0), z(0.0)))) < 0
     return {(True, True): 'negative', (False, False): 'positive', (False, True): 'first', (True, False): 'second'}[one, two]
+
+
+_ARANGE_FUSED = []
+
+
+def arange_fused():
+    """Does the numpy present fill np.arange(start, stop, step) with fma(i, delta, start), one rounding, rather than
+    start + i * delta? It's how its C was compiled: MSVC fuses it on Windows arm64."""
+    np = sys.modules.get('numpy')
+    if np is None:
+        return False
+    if not _ARANGE_FUSED:
+        from fractions import Fraction
+        fused = plain = True
+        for a, c in ((0.1, 0.05), (-1.3, 0.33), (0.0, 0.1), (1.0, 0.1), (3.7, -0.019)):
+            got = np.arange(a, a + 40 * c, c)
+            d = (a + c) - a
+            for i in range(2, len(got)):
+                g = float(got[i])
+                fused = fused and g == float(Fraction(i) * Fraction(d) + Fraction(a))
+                plain = plain and g == a + i * d
+        _ARANGE_FUSED.append(fused and not plain)
+    return _ARANGE_FUSED[0]
 
 
 _SUM_CHUNK = []
@@ -4297,7 +4322,7 @@ class Compiler(GList, Compare, GSet):
             self.emit(f'if ({length} > 0) v_{name}[0] = {i}_f;')    # as numpy: the first two, then those give the rest
             self.emit(f'if ({length} > 1) v_{name}[1] = (double){a} + (double){c};')
             self.open(f'for (int64_t {i} = 2; {i} < {length}; {i}++)')
-            self.emit(f'v_{name}[{i}] = {i}_f + (double){i} * {i}_d;')
+            self.emit(f'v_{name}[{i}] = fma((double){i}, {i}_d, {i}_f);' if arange_fused() else f'v_{name}[{i}] = {i}_f + (double){i} * {i}_d;')
         else:
             self.open(f'for (int64_t {i} = 0; {i} < {length}; {i}++)')
             self.emit(f'v_{name}[{i}] = ({ctype})((uint64_t){a} + (uint64_t){i} * (uint64_t){c});')
@@ -4730,11 +4755,12 @@ class Compiler(GList, Compare, GSet):
             if T.is_narrow(rt):                        # the same function on doubles, then rounded once to the narrow type
                 wide = T.NP_FLOAT64 if rt.kind == 'float' else T.NP_INT64
                 ts = [wide if T.is_narrow(t) or t.np is False else t for t in ts]
-                c, f = self.numpy_on(name, vals, ts, wide)
+                c, f = self.numpy_on(name, vals, ts, wide, dtype=rt.name[3:])
                 return f'(({rt.ctype})({c}))', f
         return self.numpy_on(name, vals, ts, rt)
 
-    def numpy_on(self, name, vals, ts, rt):
+    def numpy_on(self, name, vals, ts, rt, dtype='float64'):
+        """dtype: the numpy dtype the result is rounded to, when it's computed in double for a narrow one."""
         xs = [self.hold(self.coerce(c, t, T.FLOAT), T.FLOAT) for c, t in zip(vals, ts)]
         x = xs[0]
         if name == 'int64':
@@ -4778,25 +4804,57 @@ class Compiler(GList, Compare, GSet):
         if name == 'copysign':
             return self.hold(f'copysign({x}, {xs[1]})', T.FLOAT), '1'
         if name in NP_MINMAX:
-            return self.numpy_minmax(name, x, xs[1]), '1'
+            return self.numpy_minmax(name, x, xs[1], dtype if dtype in ('float32', 'float64') else 'float64'), '1'
         c = NP_LIBM1.get(name) or NP_LIBM2[name]
         args = ', '.join(xs)
         if not self.exact:
             return self.hold(f'{c}({args})', T.FLOAT), '1'
         self.uses_libm = True
+        slot = self.np_loop(name, 'd->d' if len(xs) == 1 else 'dd->d', c)
+        if slot is not None:                        # numpy computes it otherwise than the C library (SVML): numpy's loop
+            return self.hold(f'sj_np{len(xs)}(sj_m, {slot}, {args})', T.FLOAT), '1'
         macro = 'SJ_LIBM1' if len(xs) == 1 else 'SJ_LIBM2'
         return self.hold(f'{macro}({LIBM.index(c)})({args})', T.FLOAT), '1'
 
-    def numpy_minmax(self, name, a, b):
+    def np_loop(self, name, sig, libm_name):
+        """The sj_m slot of numpy's own loop for name, when the numpy present's results aren't the C library's
+        libm_name's (see _nploops); None otherwise, and the C library is called."""
+        from . import _nploops
+        from ._dispatch import libm_address
+        name = _nploops.CANONICAL.get(name, name)
+        if (name, sig) not in _nploops.LOOPS or not _nploops.differs(name, sig, libm_address(libm_name)):
+            return None
+        self.helpers.add('nploop')
+        return len(LIBM) + 2 * _nploops.LOOPS.index((name, sig))
+
+    def np_pow_loop(self, at, bt, sig, libm_name):
+        """The sj_m slot of numpy's power loop for a ** b on these types, when that's what numpy computes it with and
+        not the C library: numpy's scalar math calls pow itself for two scalars of the result's type, and its ufunc,
+        which may be SVML's, otherwise. None: the C library."""
+        from . import _nploops
+        from ._dispatch import libm_address
+
+        def kind(t):
+            t = T.as_narrow(t) if t is not None else None
+            if t is None:
+                return None
+            return t.name[3:] if t.np is True else {'int': 'int', 'float': 'float', 'bool': 'bool'}.get(t.kind)
+        ka, kb = kind(at), kind(bt)
+        if ka is None or kb is None or not _nploops.pow_needs_loop(ka, kb, sig, libm_address(libm_name)):
+            return None
+        self.helpers.add('nploop')
+        return len(LIBM) + 2 * _nploops.LOOPS.index(('power', sig))
+
+    def numpy_minmax(self, name, a, b, dtype='float64'):
         op = '<' if name in ('minimum', 'fmin') else '>'
-        rule = zero_rule(name)
+        rule = zero_rule(name, dtype)
         equal = {'negative': f'(signbit({a}) ? {a} : {b})', 'positive': f'(signbit({a}) ? {b} : {a})', 'first': a, 'second': b}[rule]
         pick = f'({a} {op} {b} ? {a} : {b} {op} {a} ? {b} : {equal})'
         if name in ('minimum', 'maximum'):       # a NaN wins
             return self.hold(f'({a} != {a} ? {a} : {b} != {b} ? {b} : {pick})', T.FLOAT)
         # a NaN loses, and which of two NaNs comes back depends on the platform
         np = sys.modules.get('numpy')
-        second = np is not None and math.copysign(1.0, float(getattr(np, name)(math.nan, -math.nan))) < 0
+        second = np is not None and math.copysign(1.0, float(getattr(np, name)(getattr(np, dtype)(math.nan), getattr(np, dtype)(-math.nan)))) < 0
         return self.hold(f'({a} != {a} ? ({b} != {b} ? {b if second else a} : {b}) : {b} != {b} ? {a} : {pick})', T.FLOAT)
 
     def isinstance_of(self, e):
@@ -7028,7 +7086,7 @@ class Compiler(GList, Compare, GSet):
             return self.call(e)
         raise AssertionError(e)
 
-    def power(self, a, b, fa, fb, rt, npf, line, right):
+    def power(self, a, b, fa, fb, rt, npf, line, right, at=None, bt=None):
         """The value of a ** b. npf: 1 when numpy's rules apply."""
         out = self.temp()
         self.emit(f'{rt.ctype} {out} = 0;')
@@ -7041,10 +7099,12 @@ class Compiler(GList, Compare, GSet):
                 self.emit(f'if ((int64_t){b} < 0) SJ_FAIL({VALUE_ERROR}, {line}, 15, 0);')
                 self.emit(f'{out} = ({rt.ctype})sj_ipow((int64_t){a}, (int64_t){b});')
             elif rt.ctype == 'float':                  # numpy calls powf
+                slot = self.np_pow_loop(at, bt, 'ff->f', 'powf') if self.exact else None
                 f = f'((float (*)(float, float))(uintptr_t)sj_m[{LIBM.index("powf")}])' if self.exact else 'powf'
-                self.emit(f'{out} = {f}({fa}, {fb});')
+                self.emit(f'{out} = {f}({fa}, {fb});' if slot is None else f'{out} = sj_np2f(sj_m, {slot}, {fa}, {fb});')
             elif self.exact:
-                self.emit(f'{out} = {table}({fa}, {fb});')
+                slot = self.np_pow_loop(at, bt, 'dd->d', 'pow')
+                self.emit(f'{out} = {table}({fa}, {fb});' if slot is None else f'{out} = sj_np2(sj_m, {slot}, {fa}, {fb});')
             else:
                 fast()
 
@@ -7180,7 +7240,7 @@ class Compiler(GList, Compare, GSet):
         isfloat = rt.kind == 'float'
         fa, fb = self.coerce(a, at, rt if isfloat else T.FLOAT), self.coerce(b, bt, rt if isfloat else T.FLOAT)
         if op == 'Pow':
-            return self.power(a, b, fa, fb, rt, npf, line, right)
+            return self.power(a, b, fa, fb, rt, npf, line, right, at, bt)
         if op in ('Add', 'Sub', 'Mult'):
             if op == 'Mult' and self.exact and at.kind == 'float' and bt.kind == 'int' and npf != '1':
                 # CPython computes float * int(-1) as a negation, so a NaN's sign bit flips
@@ -7632,11 +7692,18 @@ class Compiler(GList, Compare, GSet):
         self.emit(f'double {ip} = trunc({x}), {fr} = isinf({x}) ? copysign(0.0, {x}) : copysign({x} - {ip}, {x});')
         return [(fr, '0'), (ip, '0')]
 
+    def math_fail(self, name, line, args):
+        """A statement raising what math.<name>(*args) raises, for Python to word: args are (C value, 'f' or 'i')."""
+        bits = [f'(int64_t)({c})' if how == 'i' else f'sj_dbits({c})' for c, how in args] + ['0', '0']
+        kinds = len(args) | sum(4 << k for k, (_, how) in enumerate(args) if how == 'i')
+        return f'SJ_MATH_FAIL({line}, {MATH_ERROR_FUNCS.index(name)}, {kinds}, {bits[0]}, {bits[1]})'
+
     def math_ported(self, e, name, kind, ts, vals, xs):
         """The functions ported from mathmodule.c that take numbers."""
         line = self.line(e)
-        dom = f'SJ_FAIL({VALUE_ERROR}, {line}, 4, 0)'
-        rng = f'SJ_FAIL({OVERFLOW_ERROR}, {line}, 1, 0)'
+        dom = rng = self.math_fail(name, line, [(x, 'f') for x in xs]) if name in MATH_ERROR_FUNCS else None
+        if kind == 'ldexp':
+            rng = f'SJ_FAIL({OVERFLOW_ERROR}, {line}, 1, 0)'
         kws = {k.arg: k.value for k in e.keywords}
         if kind == 'gamma':
             self.uses_libm = True
@@ -7740,8 +7807,9 @@ class Compiler(GList, Compare, GSet):
         xs = [self.coerce(c, t, T.FLOAT) for (c, _), t in zip(vals, ts)]
         if kind in ('gamma', 'remainder', 'nextafter', 'ulp', 'fma', 'ldexp', 'isclose'):
             return self.math_ported(e, name, kind, ts, vals, xs)
-        dom = f'SJ_FAIL({VALUE_ERROR}, {line}, 4, 0)'
-        rng = f'SJ_FAIL({OVERFLOW_ERROR}, {line}, 1, 0)'
+        # A domain or range error is raised by calling math.<name> on the same arguments, so it's worded as this Python
+        # words it (xs are values already held, so reading them again is free)
+        dom = rng = self.math_fail(name, line, [(x, 'f') for x in xs]) if name in MATH_ERROR_FUNCS else None
 
         def libm(n):
             self.uses_libm = True
@@ -7767,9 +7835,11 @@ class Compiler(GList, Compare, GSet):
                 self.emit(f'if (isinf({r}) && isfinite({x})) {rng if can_overflow else dom};')
             return r, '0'
         if kind == 'log':
+            ints = [t.kind in ('int', 'bool') and t.np is False for t in ts]
+            dom = self.math_fail(name, line, [(v[0], 'i') if i else (x, 'f') for v, x, i in zip(vals, xs, ints)])
+
             def loghelper(i, fn):
-                t = ts[i]
-                if t.kind in ('int', 'bool') and t.np is False:     # a Python int: checked directly
+                if ints[i]:                                 # a Python int: checked directly
                     self.emit(f'if ((int64_t){vals[i][0]} <= 0) {dom};')
                     return self.hold(f'sj_m_log(SJ_LIBM1({libm(fn)}), (double){vals[i][0]})', T.FLOAT)
                 x = self.hold(xs[i], T.FLOAT)
@@ -7781,7 +7851,7 @@ class Compiler(GList, Compare, GSet):
             if len(e.args) == 1:
                 return num, '0'
             den = loghelper(1, 'log')
-            self.emit(f'if ({den} == 0.0) SJ_FAIL({ZERO_DIVISION}, {line}, 1, 0);')
+            self.emit(f'if ({den} == 0.0) {dom};')         # Python's ZeroDivisionError, worded as this Python words it
             return f'({num} / {den})', '0'
         if kind == 'atan2':
             y, x = self.hold(xs[0], T.FLOAT), self.hold(xs[1], T.FLOAT)

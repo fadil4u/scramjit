@@ -13,7 +13,7 @@ The same decorated function runs unchanged on all of them; scramjit generates th
 
 ## Tested
 
-scramjit is developed and benchmarked on arm64 Linux and in Pyodide, where its whole test suite runs: about 2,800 differential tests against CPython and numpy. It has been run by hand on Windows arm64 and on Windows x86-64 under emulation, where a NaN's sign can differ from CPython's (`inf % 1.0` gives `nan` with the other sign bit). cimo runs on x86-64 Linux and macOS, but scramjit's tests haven't been run on them yet, and nothing runs in CI yet.
+About 3,000 differential tests compare each compiled function with CPython and numpy, bit for bit. CI runs them on Linux and Windows, x86-64 and arm64, macOS on Apple silicon, CPython 3.12, 3.13 (free-threaded too) and 3.14, and runs part of them in Pyodide. scramjit is developed and benchmarked on arm64 Linux. A NaN's sign bit may differ from CPython's (see [Gotchas](gotchas.md)). Intel Macs aren't supported: cimo doesn't generate code for them.
 
 ## Security
 

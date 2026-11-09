@@ -44,13 +44,20 @@ def _get_cimo():
 
 
 _libm = None
+_libm_np = False
 
 
 def _libm_table():
     """Addresses of the C library math functions CPython itself calls (LIBM's order), packed for
-    compiled code, which calls them through this table: the same functions, the same results."""
-    global _libm
+    compiled code, which calls them through this table: the same functions, the same results. Then numpy's own
+    loops, two slots each in _nploops.LOOPS' order (0 where there's none), for the functions whose results the
+    numpy present computes otherwise; read once numpy is imported."""
+    global _libm, _libm_np
+    np_loaded = 'numpy' in sys.modules
+    if _libm is not None and _libm_np != np_loaded:
+        _libm = None
     if _libm is None:
+        _libm_np = np_loaded
         import ctypes
         import ctypes.util
         import struct as st
@@ -63,7 +70,15 @@ def _libm_table():
         else:
             lib = ctypes.CDLL(ctypes.util.find_library('m') or 'libm.so.6')
         _libm = st.pack(f'<{len(LIBM)}Q', *(ctypes.cast(getattr(lib, n), ctypes.c_void_p).value for n in LIBM))
+        from . import _nploops
+        loops = [_nploops.loop(n, s) if np_loaded else None for n, s in _nploops.LOOPS]
+        _libm += st.pack(f'<{2 * len(loops)}Q', *(v for lp in loops for v in (lp or (0, 0))))
     return _libm
+
+
+def libm_address(name):
+    """The address compiled code calls for the C library's name."""
+    return struct.unpack_from('<Q', _libm_table(), 8 * LIBM.index(name))[0]
 
 
 def _arg_type(x):
@@ -1068,7 +1083,8 @@ def _in_class(cls, name):
     return _MISSING
 
 
-_DEFAULT_GET = (object.__dict__['__getattribute__'], tuple.__dict__['__getattribute__'])    # both Python's own lookup
+# Python's own lookup: object's, and tuple's (namedtuples), which 3.14 dropped for object's
+_DEFAULT_GET = tuple({object.__dict__['__getattribute__'], tuple.__dict__.get('__getattribute__', object.__dict__['__getattribute__'])})
 _DEFAULT_SET = object.__dict__['__setattr__']
 _TUPLE_FIELD = type(collections.namedtuple('_', 'a').a)     # a namedtuple's field; property if its C version is missing
 
@@ -2814,7 +2830,8 @@ class Function:
             if t is None and i >= real and self._hidden[i - real] not in self._hidden_names_read():
                 raise Unsupported(None, f'a function it calls reads the global {self._hidden_from[i - real][1]}, which is {_describe(x, t)}')
             if t is None and i >= real and getattr(self, '_made', None) and self._hidden[i - real] in self._made:
-                raise Unsupported(None, f'makes instances of {self._hidden[i - real]}: {getattr(self, "_made_why", "it can\'t be compiled")}')
+                why = getattr(self, '_made_why', "it can't be compiled")
+                raise Unsupported(None, f'makes instances of {self._hidden[i - real]}: {why}')
             if t is None:
                 fields = _object_fields(x, *self._attrs[i], nested=self._nested.get(i)) if i in self._attrs and type(x) not in (dict, list) else None
                 if type(fields) is str:

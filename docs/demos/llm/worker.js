@@ -2,7 +2,7 @@
 // weights and writes the story. A second, with no weights, compiles edits and hands over the compiled files.
 'use strict';
 const PYODIDE = 'https://cdn.jsdelivr.net/pyodide/v0.27.7/full/';
-const SJ = ['__init__.py', '_compare.py', '_compiler.py', '_dispatch.py', '_errors.py', '_glist.py', '_gset.py', '_interrupt.py', '_lift.py', '_mathlib.py', '_preflight.py', '_pysets.py', '_runtime.py', '_types.py', '_webs.py'];
+const SJ = ['__init__.py', '_compare.py', '_compiler.py', '_dispatch.py', '_errors.py', '_glist.py', '_gset.py', '_interrupt.py', '_lift.py', '_mathlib.py', '_nploops.py', '_preflight.py', '_pysets.py', '_runtime.py', '_types.py', '_webs.py'];
 const WEIGHTS = 'https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin';
 const TOKENIZER = 'https://raw.githubusercontent.com/karpathy/llama2.c/master/tokenizer.bin';
 const CACHE = 'scramjit-llm-1';

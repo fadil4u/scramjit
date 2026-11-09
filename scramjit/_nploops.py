@@ -150,11 +150,19 @@ def _probe_pow(ka, kb, sig, libm_address):
             y = rnd.uniform(-4, 6) if n % 3 else rnd.choice([-1.0, 0.5, -0.5, 2.0, 1.5, -2.5, 2.5, 0.25])
         xs.append(x)
         ys.append(y)
+    f, d = loop('power', sig)
+    uloop = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(f)
+    one, zeros = (ctypes.c_int64 * 1)(1), (ctypes.c_int64 * 3)(0, 0, 0)
+
+    def via_loop(x, y):                                 # as compiled code calls it: one element, strides 0
+        p, q, o = ct(x), ct(y), ct()
+        uloop((ctypes.c_void_p * 3)(ctypes.addressof(p), ctypes.addressof(q), ctypes.addressof(o)), one, zeros, d)
+        return o.value
     with np.errstate(all='ignore'):
-        a = np.array([float(dt(make(ka, x))) for x in xs], dt)
-        b = np.array([float(dt(make(kb, y))) for y in ys], dt)
-        by_loop = np.power(a, b)                         # numpy's loop for sig, on contiguous arrays
-        apart = [k for k in range(len(xs)) if struct.pack('<d', float(by_loop[k])) != struct.pack('<d', float(dt(lib(float(a[k]), float(b[k])))))]
+        a = [float(dt(make(ka, x))) for x in xs]
+        b = [float(dt(make(kb, y))) for y in ys]
+        by_loop = [float(dt(via_loop(p, q))) for p, q in zip(a, b)]
+        apart = [k for k in range(len(xs)) if struct.pack('<d', by_loop[k]) != struct.pack('<d', float(dt(lib(a[k], b[k]))))]
         if not apart:
             return True, True
         libm_ok = loop_ok = True
@@ -166,8 +174,8 @@ def _probe_pow(ka, kb, sig, libm_address):
             if not isinstance(want, (float, np.floating)):
                 return False, False
             w = struct.pack('<d', float(want))
-            libm_ok = libm_ok and struct.pack('<d', float(dt(lib(float(a[k]), float(b[k]))))) == w
-            loop_ok = loop_ok and struct.pack('<d', float(by_loop[k])) == w
+            libm_ok = libm_ok and struct.pack('<d', float(dt(lib(a[k], b[k])))) == w
+            loop_ok = loop_ok and struct.pack('<d', by_loop[k]) == w
     return libm_ok, loop_ok
 
 

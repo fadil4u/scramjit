@@ -4,7 +4,7 @@
 $ pip install scramjit
 ```
 
-scramjit is pure Python. Its only dependency is [cimo](https://www.cimo.dev), which is itself pure Python with nothing outside the standard library. It supports what cimo supports: CPython 3.9 or newer, and Pyodide.
+scramjit is pure Python. Its only dependency is [cimo](https://www.cimo.dev), which is itself pure Python with nothing outside the standard library. It runs on CPython 3.12 or newer, and in Pyodide.
 
 ## numpy
 

@@ -1068,7 +1068,8 @@ def _in_class(cls, name):
     return _MISSING
 
 
-_DEFAULT_GET = (object.__dict__['__getattribute__'], tuple.__dict__['__getattribute__'])    # both Python's own lookup
+# Python's own lookup: object's, and tuple's (namedtuples), which 3.14 dropped for object's
+_DEFAULT_GET = tuple({object.__dict__['__getattribute__'], tuple.__dict__.get('__getattribute__', object.__dict__['__getattribute__'])})
 _DEFAULT_SET = object.__dict__['__setattr__']
 _TUPLE_FIELD = type(collections.namedtuple('_', 'a').a)     # a namedtuple's field; property if its C version is missing
 
@@ -2814,7 +2815,8 @@ class Function:
             if t is None and i >= real and self._hidden[i - real] not in self._hidden_names_read():
                 raise Unsupported(None, f'a function it calls reads the global {self._hidden_from[i - real][1]}, which is {_describe(x, t)}')
             if t is None and i >= real and getattr(self, '_made', None) and self._hidden[i - real] in self._made:
-                raise Unsupported(None, f'makes instances of {self._hidden[i - real]}: {getattr(self, "_made_why", "it can\'t be compiled")}')
+                why = getattr(self, '_made_why', "it can't be compiled")
+                raise Unsupported(None, f'makes instances of {self._hidden[i - real]}: {why}')
             if t is None:
                 fields = _object_fields(x, *self._attrs[i], nested=self._nested.get(i)) if i in self._attrs and type(x) not in (dict, list) else None
                 if type(fields) is str:

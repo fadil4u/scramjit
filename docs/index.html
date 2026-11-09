@@ -422,7 +422,7 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
         <div class="pip"><span>pip install scramjit</span><button type="button" data-copy="pip install scramjit" aria-label="Copy" title="Copy"><svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg><svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button></div>
         <a class="btn btn-d" href="docs/">Read the docs</a>
       </div>
-      <p class="hero-note">Pure Python, with cimo as its only dependency. CPython 3.9+ on Linux, macOS and Windows, and Pyodide in the browser.</p>
+      <p class="hero-note">Pure Python, with cimo as its only dependency. CPython 3.12+ on Linux, macOS and Windows, and Pyodide in the browser.</p>
     </div>
   </div>
 </div>
@@ -432,7 +432,7 @@ footer.site{border-top:1px solid var(--line);padding:26px 0 34px;font-size:13px;
   <div class="pf"><b>1</b><p>decorator: the whole user-facing API</p><code>@scram</code></div>
   <div class="pf"><b>0</b><p>native dependencies: standard library plus cimo, both pure Python</p><code>from scramjit import scram</code></div>
   <div class="pf"><b>0</b><p>Python objects in generated code: arguments are unboxed at the call</p><code>double *, int64_t</code></div>
-  <div class="pf"><b>3.9+</b><p>CPython, plus Pyodide, JupyterLite, marimo and PyScript</p><code>micropip.install("scramjit")</code></div>
+  <div class="pf"><b>3.12+</b><p>CPython, plus Pyodide, JupyterLite, marimo and PyScript</p><code>micropip.install("scramjit")</code></div>
 </div></section>
 
 <section class="s" id="usage"><div class="wrap">
@@ -754,7 +754,7 @@ for (int64_t i = 0; i &lt; a_len; i++)
     <tr><td>Windows arm64 / x64</td><td>native arm64, amd64</td><td><code>VirtualAlloc</code> + <code>VirtualProtect</code></td></tr>
     <tr><td>Pyodide, JupyterLite, marimo</td><td>WebAssembly</td><td>a side module linked into Pyodide's memory</td></tr>
   </table></div>
-  <p class="note">CPython 3.9 or newer. Compiled code runs with the full privileges of your Python process, like an extension module. There is no sandbox.</p>
+  <p class="note">CPython 3.12 or newer. Compiled code runs with the full privileges of your Python process, like an extension module. There is no sandbox.</p>
   <p class="note">Tested: the full suite, about 2,800 differential tests against CPython and numpy, runs on arm64 Linux and in Pyodide, and has been run by hand on Windows arm64 and on Windows x86-64 under emulation. Not yet run on x86-64 Linux or macOS, and not in CI yet. Pre-release: the API may still change.</p>
   <p class="doclink"><a href="docs/?p=platforms">Docs: platforms →</a></p>
 </div></section>

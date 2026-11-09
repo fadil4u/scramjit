@@ -47,7 +47,7 @@ binary wheels. Arrays are passed without copying, and compiled code releases the
 pip install scramjit numpy
 ```
 
-Requires CPython 3.9 or newer. numpy is only needed for your arrays.
+Requires CPython 3.12 or newer. numpy is only needed for your arrays.
 
 ## Live demo
 

@@ -1,6 +1,6 @@
 # Platforms
 
-scramjit is pure Python and runs wherever cimo does: CPython 3.9 or newer, and Pyodide.
+scramjit is pure Python and runs wherever cimo does on CPython 3.12 or newer, and in Pyodide.
 
 | Platform | Code runs as | Loaded with |
 | --- | --- | --- |

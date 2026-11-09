@@ -9,7 +9,7 @@ description = "Python at native speed: a JIT written in pure Python, compiling t
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Fariz Rahman" }]
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = ["cimo>=0.0.4"]
 classifiers = [
     "Programming Language :: Python :: 3",

@@ -8,7 +8,7 @@ This is the living spec: what to build, why, what has been measured, and in what
 ## Engineering rules
 
 - **Pure Python** at runtime: standard library plus `cimo` (itself pure Python, standard library
-  only). No native extensions. Supports what cimo supports: CPython 3.9+ and Pyodide.
+  only). No native extensions. Supports CPython 3.12+ (cimo supports 3.9+; scramjit's own floor is numpy's) and Pyodide.
 - **Compiled code is a cache** (decided 2026-11-02). It's built on the machine that runs it, from the Python source, and can always be
   built again. It is never distributed, in a package, a wheel or a single HTML file: an app carries its source and the compiler, whose
   340 KB compressed and first-launch compile are worth keeping "no binaries" (measured: about 3% of a 12.2 MB single-file app, 0.7 s of a 3.5 s launch). The LLM demo keeps the last 8 compiled sources in the browser's

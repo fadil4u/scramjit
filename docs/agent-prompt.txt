@@ -8,7 +8,7 @@ On the first call per argument-type signature, `@scram` generates C for the func
 
 ## Install
 pip install scramjit numpy
-CPython 3.9+ on Linux, macOS and Windows, or Pyodide. numpy is only needed for arrays.
+CPython 3.12+ on Linux, macOS and Windows, or Pyodide. numpy is only needed for arrays.
 
 ## When
 Use: loops over numbers or arrays that don't vectorize (recurrences, data-dependent branches, DP, flood fill, simulation, byte scans); threads blocked by the GIL; environments that forbid native packages. Measured 11x-540x over CPython.

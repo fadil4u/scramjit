@@ -8,6 +8,7 @@ import pytest
 
 from scramjit import scram
 from scramjit._dispatch import Compiled
+from util import maxrss_kb
 
 NEP = np.dtype(int).name == 'int64'
 
@@ -486,9 +487,9 @@ def test_a_loop_making_arrays_does_not_keep_them():
         return total
     g = scram(f)
     assert g(2, 1000) == 2.0
-    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    before = maxrss_kb()
     assert g(4000, 125_000) == 4000.0        # 4 GB if kept
-    grew = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) / 1024
+    grew = (maxrss_kb() - before) / 1024
     assert grew < 200, f'{grew} MB'
 
 
@@ -640,10 +641,10 @@ def test_what_isnt_returned_is_freed():
     g = scram(f, cache=False)
     assert g(1000) == 1000.0
     resource = pytest.importorskip('resource', reason='not on this platform', exc_type=ImportError)
-    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    before = maxrss_kb()
     for _ in range(3000):
         g(1_000_000 // 8 * 8)
-    grew = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) / 1024
+    grew = (maxrss_kb() - before) / 1024
     assert grew < 200, f'{grew} MB'
 
 

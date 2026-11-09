@@ -11,12 +11,22 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def bits(a):
+    """An array's bytes, every NaN made the same one. A NaN's sign and payload from arithmetic aren't Python's
+    rule: they follow the C compiler CPython was built with (Ubuntu's 3.12 gives nan * -1 a sign bit, a
+    python.org build on the same machine doesn't) and the CPU (x86-64's default NaN has its sign set)."""
+    if a.dtype.kind in 'fc' and np.isnan(a).any():
+        a = a.copy()
+        a[np.isnan(a)] = np.nan
+    return a.tobytes()
+
+
 def _value(v):
-    """A comparable record of a value: its type and, for floats, its exact bits (NaN, -0.0)."""
+    """A comparable record of a value: its type and, for floats, its exact bits (-0.0; any NaN is 'nan', see bits)."""
     if isinstance(v, np.ndarray):
-        return ('array', str(v.dtype), v.tobytes())
+        return ('array', str(v.dtype), bits(v))
     if isinstance(v, (float, np.floating)):
-        return (type(v).__name__, struct.pack('<d', float(v)))
+        return (type(v).__name__, 'nan' if v != v else struct.pack('<d', float(v)))
     return (type(v).__name__, v)
 
 
@@ -41,10 +51,18 @@ def same(f, *args):
     assert got == want, f'{f.__name__}{tuple(args)!r}: compiled {got} != python {want}'
     for x, y in zip(a1, a2):
         if isinstance(x, np.ndarray):
-            assert x.tobytes() == y.tobytes(), f'{f.__name__}: arrays differ after the call'
+            assert bits(x) == bits(y), f"{f.__name__}: arrays differ after the call"
     return got
 
 
 INTS = [0, 1, -1, 2, -2, 3, 7, -7, 10, 1 << 31, -(1 << 31), (1 << 53) + 1, -(1 << 53) - 1]
 FLOATS = [0.0, -0.0, 1.0, -1.0, 0.5, -2.5, 3.75, 1e300, -1e-300, math.inf, -math.inf, math.nan,
           float(1 << 53), 2.0 ** 63, -(2.0 ** 63)]
+
+
+def maxrss_kb():
+    """Peak resident memory in KB: getrusage gives KB on Linux and bytes on macOS."""
+    import resource
+    import sys
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak // 1024 if sys.platform == 'darwin' else peak

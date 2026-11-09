@@ -11,6 +11,7 @@ import pytest
 
 from scramjit import scram
 from scramjit._errors import CompileError
+from util import maxrss_kb
 
 
 def same(f, *args):
@@ -302,9 +303,9 @@ def churn(n):
 def test_memory_is_freed():
     f = scram(churn, fallback=False, cache=False)
     f(10)
-    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    before = maxrss_kb()
     assert f(200_000) == 20_000_000                     # 20M ints made and dropped: 160 MB if nothing were freed
-    assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before < 60_000
+    assert maxrss_kb() - before < 60_000
 
 
 def arrays_equal(a, b):
@@ -387,9 +388,9 @@ def test_lists_of_arrays():
 def test_arrays_in_lists_are_freed():
     f = scram(churn_arrays, fallback=False, cache=False)
     f(10)
-    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    before = maxrss_kb()
     assert f(20_000) == churn_arrays(20_000)               # 200,000 arrays of 800 bytes: 160 MB if nothing were freed
-    assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before < 60_000
+    assert maxrss_kb() - before < 60_000
 
 
 # ---- passed in, written back (on errors too), shared and returned as themselves

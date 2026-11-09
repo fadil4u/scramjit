@@ -14,6 +14,7 @@ import calls_other_module as other
 from calls_other_module import from_table, scaled, set_scale
 from scramjit import scram
 from scramjit._dispatch import Compiled
+from util import maxrss_kb
 
 K = 100.0
 
@@ -379,10 +380,10 @@ def test_memory_stays_flat_across_calls():
     resource = pytest.importorskip('resource', reason='not on this platform', exc_type=ImportError)
     assert many_calls(2, 100) == 200.0
     assert many_blocks(2, 100) == 2.0
-    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    before = maxrss_kb()
     many_calls(3000, 125_000)       # 3 GB each if kept
     many_blocks(3000, 125_000)
-    grew = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) / 1024
+    grew = (maxrss_kb() - before) / 1024
     assert grew < 200, f'{grew} MB'
 
 

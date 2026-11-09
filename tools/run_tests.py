@@ -23,9 +23,9 @@ def main(argv):
     for i in range(0, len(files), step):
         chunk = files[i:i + step]
         t0 = time.perf_counter()
-        r = subprocess.run([sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider', *argv, *chunk], cwd=ROOT)
+        r = subprocess.run([sys.executable, '-X', 'faulthandler', '-m', 'pytest', '-q', '-rfE', '-p', 'no:cacheprovider', *argv, *chunk], cwd=ROOT)
         names = ' '.join(os.path.basename(f) for f in chunk)
-        print(f'== chunk {i // step}: {"ok" if r.returncode in (0, 5) else "FAILED"} in {time.perf_counter() - t0:.0f} s: {names}',
+        print(f'\n== chunk {i // step}: {"ok" if r.returncode in (0, 5) else f"FAILED (exit {r.returncode})"} in {time.perf_counter() - t0:.0f} s: {names}',
               flush=True)
         if r.returncode not in (0, 5):          # 5: no tests collected
             failed.append(names)

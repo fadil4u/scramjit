@@ -1,6 +1,7 @@
 # TODO
 
-Biggest first. `requirements.md` is the spec; this is the work queue.
+Biggest first. `requirements.md` is the spec; this is the work queue. Smaller items are GitHub issues
+(https://github.com/farizrahman4u/scramjit/issues): an item moved there leaves a one-line pointer here.
 
 ## Release
 
@@ -250,11 +251,7 @@ after with `bench/`, and write the numbers into the item when done.
      would give batch- and thread-invariant results, the property reproducible LLM inference needs.
      Measure what the fixed tree costs against a free one.
 
-5. **Torch, JAX and CuPy tensors through `__dlpack__`.** Accept any object with `__dlpack__` (CPU device)
-   as an array argument, zero-copy, in `_dispatch` (`_arg_type`, `_push`), so a `@scram` function can be
-   called from a PyTorch model without `.numpy()`. Tests skipped without `torch` (dev extra): writes
-   through the tensor are seen by torch; strides and dtypes match numpy's path; a GPU tensor is refused
-   with a clear message until the GPU direction lands.
+5. **Torch, JAX and CuPy tensors through `__dlpack__`:** issue #7.
 6. **`# scram: parallel` on a loop, checked.** Measured first (2026-11-06): splitting a loop by hand already
    scales, since compiled code releases the GIL. A `ThreadPoolExecutor.map` over four ranges of one array ran
    4.0x on 4 threads and 5.0x on 8 (Linux, 8 logical cores), bit-identical, and it's now documented ("Splitting one
@@ -273,19 +270,11 @@ after with `bench/`, and write the numbers into the item when done.
      (Linux, WSL). The hint is worth little more than the hand split while parts start from Python: threads started from
      the C would need cimo to offer them (not checked).
 
-7. **Arguments that need no wrapping.** The same app wraps every call's arguments: `float(pad)`, `int(n)`,
-   `np.ascontiguousarray(a, dtype=float)`. Find which are needed: numpy scalars (`np.float64`, `np.int64`) where
-   a Python number was seen before (a new signature, a second compile?), Python ints where floats were, arrays that
-   are views or of another dtype (the general path, a copy, or Python?). For each, make it unnecessary where it's cheap
-   (a numpy scalar taken as its Python number when that gives the same result, a strided 1-D view without a copy) or
-   say so in `docs/docs/content/` with what it costs. Oracle: the same call with and without the wrapping, same result
-   and same number of compiles (`f.signatures`).
+7. **Arguments that need no wrapping:** issue #6.
 
 ## From cimo
 
-- **A module's WebAssembly is public (cimo 2026-11-07):** `module.wasm` (bytes, in Pyodide) and
-  `cimo.wat.disassemble(mod, {'sj_kernel'})` -> (text, sections, others); `docs/lab/lab.py`'s `wasm_text` can use
-  them instead of `cimo.wasm.build` and a copy of `wat.py`.
+- **A module's WebAssembly is public (cimo 2026-11-07):** use it in the lab and LLM demo: issue #1.
 - **arm64: an accumulator's chain is no longer fused (cimo 2026-11-07):** `s += a * b` with `fma=True` runs at the
   unfused speed (dot 1.32x faster); its bits are now the uncontracted ones. scramjit's default (no contraction) is
   unaffected.
@@ -300,14 +289,9 @@ after with `bench/`, and write the numbers into the item when done.
   where Ctrl-C still waits for the kernel.
 - **`#pragma STDC FP_CONTRACT ON|OFF|DEFAULT` works (cimo 2026-11-07):** per block or from there on at file scope, so
   `fma=` code and exact math can share a module.
-- **`module.cached` (cimo 2026-11-07):** True when the compile came from the cache; `preflight --run` can show `disk`.
-- **Public cache export/import (cimo 2026-11-07):** `module.cache_entry()` (bytes) and `cimo.add_cache_entry(data)`,
-  native and Pyodide; an entry is used only by a compile of the same source and options. The LLM demo's
-  `CIMO_CACHE_DIR` listing can switch to these.
-- **The CLI framework is public (cimo 2026-11-07):** `cimo.cli.parse` (Command, parse, UsageError, complete),
-  `cimo.cli.term.Terminal`, `cimo.cli.completion.script(shell, prog)`; your terminal fixes (FORCE_COLOR,
-  CLICOLOR_FORCE, encoding fallback) are in, and the root's "did you mean" hint is `Command(..., unknown_hint=f)`.
-  The copies in `scramjit/cli/` (term, parse, completion) can be replaced by imports.
+- **`module.cached` (cimo 2026-11-07):** `preflight --run` can show `disk`: issue #4.
+- **Public cache export/import (cimo 2026-11-07):** the LLM demo can switch to it: issue #2.
+- **The CLI framework is public (cimo 2026-11-07):** replace the copies in `scramjit/cli/`: issue #3.
 - **Inlining spends its budget on the deepest loops first (cimo 2026-11-07),** and helpers no bigger than their call
   always inline: the four wrapping helpers made macros for this can go back to functions. llama2 tok/s not
   re-measured yet.
@@ -335,8 +319,8 @@ after with `bench/`, and write the numbers into the item when done.
   function's boundary now, as Emscripten's, so Pyodide's libm `frexp(double, int *)` by address works; the bit-level
   `frexp` workaround can go if wanted. A host `long` parameter still differs (Emscripten's is 32-bit).
 
-- **Large `malloc` in Pyodide returns NULL (cimo 2026-11-07),** where a 4 GiB request returned a small block and one just under
-  2 GiB killed Pyodide; and `module.free`/`reset_heap`/`heap_bytes` work there, so `sj_release` can go.
+- **Large `malloc` in Pyodide returns NULL (cimo 2026-11-07),** where a 4 GiB request returned a small block; and
+  `module.free` works there, so `sj_release` can go: issue #5.
 
 - **Signed overflow is now undefined in cimo, as in C** (`compile(wrapv=True)` for `-fwrapv`): `x + 1 > x` folds to true
   and `int` counters widen to 64 bits. Generated C must keep doing wrapping arithmetic through unsigned, as it
@@ -370,12 +354,9 @@ Each has a matching entry in cimo's `TODO.md`, which asks for a note here when i
   temporaries. Both help any compiler; revisit what else can go once cimo merges repeated
   expressions (cimo `TODO.md`: "Slower than gcc -O3 on scramjit's kernels").
 
-- **The LLM demo moves compiled code by listing what changes in `CIMO_CACHE_DIR`** (`docs/demos/llm/demo_py.py`:
-  `precompile`). cimo's public cache export and import has landed (`module.cache_entry()`, `cimo.add_cache_entry()`):
-  switch to it. The demo's tabs also read the private `fn._cache`, for the C and the inferred types.
+- **The LLM demo moves compiled code by listing what changes in `CIMO_CACHE_DIR`:** issue #2.
 
-- **The demo's WebAssembly tab calls `cimo.wasm.build`** (`docs/lab/lab.py`: `wasm_text`). cimo now exposes
-  `module.wasm` and `cimo.wat.disassemble`: switch to them.
+- **The demo's WebAssembly tab calls `cimo.wasm.build`:** issue #1.
 
 ## Line counts, what's left
 

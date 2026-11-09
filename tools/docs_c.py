@@ -66,11 +66,27 @@ def rewrite(text, where):
     return BLOCK.sub(one, text)
 
 
+# What the docs' C was generated with: numpy on arm64 Linux. A few constants in the C follow the numpy present (which
+# zero np.minimum gives, how np.clip breaks ties, how many elements a pairwise sum takes at a time), so elsewhere the
+# C differs there and --check has nothing to say.
+REFERENCE = (['negative', 'positive', 'negative', 'positive'] * 2, (False, False), False, 0)
+
+
+def numpy_like_reference():
+    import numpy  # noqa: F401  (the probes ask the numpy that's imported)
+    from scramjit._compiler import abs_flips_nan, clip_ties, sum_chunk, zero_rule
+    rules = [zero_rule(n, d) for d in ('float64', 'float32') for n in ('minimum', 'maximum', 'fmin', 'fmax')]
+    return (rules, clip_ties(), abs_flips_nan(), sum_chunk()) == REFERENCE
+
+
 def main():
     check = '--check' in sys.argv
+    if check and not numpy_like_reference():
+        print("skipped: this numpy's signed zeros, ties or sums differ from the docs' (arm64 Linux), and so does the C")
+        return 0
     stale = []
     for path in sorted(glob.glob(os.path.join(ROOT, 'docs', 'docs', 'content', '*.md'))):
-        with open(path) as f:
+        with open(path, encoding='utf-8') as f:
             text = f.read()
         if '<!-- c: ' not in text:
             continue
@@ -78,7 +94,7 @@ def main():
         if new != text:
             stale.append(os.path.basename(path))
             if not check:
-                with open(path, 'w') as f:
+                with open(path, 'w', encoding='utf-8', newline='\n') as f:      # LF, as committed, on Windows too
                     f.write(new)
     if check and stale:
         print('generated C out of date in:', ', '.join(stale), '(run python tools/docs_c.py)')

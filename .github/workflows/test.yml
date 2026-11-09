@@ -1,5 +1,5 @@
-# The test suite on every push and pull request, against cimo's main branch checked out next to this repository
-# (as tests/conftest.py expects): Linux, macOS and Windows on x86-64 and arm64, every supported CPython (3.12 on) on Linux
+# The test suite on every push and pull request, against cimo checked out next to this repository (as
+# tests/conftest.py expects): Linux and Windows on x86-64 and arm64, macOS on Apple silicon (cimo has no Intel Macs), every supported CPython (3.12 on) on Linux
 # x86-64, free-threaded CPython, and Pyodide under Node. One more job runs it against the cimo on PyPI that
 # pyproject.toml pins, as a user's `pip install scramjit` gets.
 name: test
@@ -8,6 +8,10 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+
+# the cimo every job but released-cimo tests against: main, or the exact tag being released
+env:
+  CIMO_REF: 4f09283f6ac6e3c9d00ed10cb4a3718ecbd22448      # cimo 0.0.5, being released
 
 # a newer push to the same branch cancels the run it supersedes
 concurrency:
@@ -26,7 +30,6 @@ jobs:
           - { name: linux-x64, os: ubuntu-24.04, python: "3.13" }
           - { name: linux-arm64, os: ubuntu-24.04-arm, python: "3.13" }
           - { name: macos-arm64, os: macos-15, python: "3.13", step: 4 }        # 7 GB: fewer test files per process
-          - { name: macos-x64, os: macos-15-intel, python: "3.13", step: 4 }
           - { name: windows-x64, os: windows-2025, python: "3.13" }
           - { name: windows-arm64, os: windows-11-arm, python: "3.13" }
           - { name: linux-x64, os: ubuntu-24.04, python: "3.12" }
@@ -46,6 +49,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: farizrahman4u/cimo
+          ref: ${{ env.CIMO_REF }}
           path: cimo
       - uses: actions/setup-python@v5
         with:
@@ -81,6 +85,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: farizrahman4u/cimo
+          ref: ${{ env.CIMO_REF }}
           path: cimo
           fetch-depth: 0
       - uses: actions/setup-python@v5

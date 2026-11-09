@@ -51,7 +51,7 @@ def test_viewshed():
     same(viewshed, dem, np.zeros((10, 9), np.uint8), 4, 4, 1.0)    # IndexError on vis
 
 
-def test_the_list_flood_fill_falls_back():
+def test_the_list_flood_fill_compiles():
     import warnings
     from scramjit import FallbackWarning
     f = scram(ff.flood_fill_list)
@@ -59,4 +59,4 @@ def test_the_list_flood_fill_falls_back():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter('always')
         same(f, grid, 2, 2, 5)
-    assert any(issubclass(x.category, FallbackWarning) for x in w)
+    assert not any(issubclass(x.category, FallbackWarning) for x in w)      # a list that grows, and `while todo:` (0.0.4)

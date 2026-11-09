@@ -58,7 +58,7 @@ static int @N@(@V@ *a, int64_t n) {
 }
 '''
 SORT_BY_TEMPLATE = '''
-static int @N@_by(const @K@ *keys, void *a, int64_t item, int64_t n) {
+static int @N@_by(@K@ const *keys, void *a, int64_t item, int64_t n) {
     if (n < 2) return 1;
     @V@ *p = (@V@ *)malloc(sizeof(@V@) * (size_t)n);
     if (!p) return 0;
@@ -157,6 +157,8 @@ def grown_names(tree, uses=True):
             out.add(n.value.id)                  # a slice: a new list, or one that resizes
         elif uses and isinstance(n, ast.Compare) and any(isinstance(o, (ast.In, ast.NotIn)) for o in n.ops):
             out |= {c.id for c in n.comparators if isinstance(c, ast.Name)}
+        elif uses and isinstance(n, ast.Compare) and any(isinstance(o, (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for o in n.ops):
+            out |= {c.id for c in [n.left] + n.comparators if isinstance(c, ast.Name)}   # a list compared is held (others: no effect)
     return out
 
 
@@ -170,6 +172,8 @@ def held_names(tree):
             out |= {e.id for e in n.elts if isinstance(e, ast.Name)}
         elif isinstance(n, ast.Assign) and isinstance(n.value, ast.Name):
             out.add(n.value.id)
+        elif isinstance(n, ast.Return) and isinstance(n.value, ast.Tuple):
+            out |= {e.id for e in n.value.elts if isinstance(e, ast.Name)}    # returned in a tuple
         elif isinstance(n, ast.Assign) and any(isinstance(t, ast.Subscript) for t in n.targets) and isinstance(n.value, ast.Name):
             out.add(n.value.id)
     return out
@@ -184,6 +188,9 @@ def unify(a, b):
     if a.kind == 'glist' and b.kind == 'glist':
         e = unify(a.elem, b.elem)
         return None if e is None else T.glist_of(e)
+    if a.kind == 'gset' and b.kind == 'gset':
+        e = a.elem if b.elem is T.PENDING else b.elem if a.elem is T.PENDING else (a.elem if a.elem is b.elem else None)
+        return None if e is None else T.gset_of(e)
     if a.kind == 'record' and b.kind == 'record':
         if a.cls is not b.cls or [k for k, _ in a.elem] != [k for k, _ in b.elem]:
             return None                          # other keys, or the same in another order (which a dict keeps)
@@ -207,7 +214,7 @@ def has_arrays(t):
 
 def held(t):
     """Is a value of type t held by reference here: a list or a dict (a pointer to its block)?"""
-    return t.kind in ('glist', 'record')
+    return t.kind in ('glist', 'record', 'gset')
 
 
 class ArrayOf:
@@ -264,7 +271,7 @@ class GList:
 
     # ---- types
     def gl_elem_ok(self, node, t):
-        if t is T.PENDING or t.kind == 'glist':
+        if t is T.PENDING or t.kind in ('glist', 'gset'):
             return
         if t.kind == 'array':
             if T.is_pylist(t):
@@ -552,6 +559,8 @@ class GList:
         """What putting x in a list puts there: a list made on the spot is one of these lists."""
         if self.is_list_ctor(x):
             return self.gl_ctor_type(x)
+        if self.gs_ctor(x) or (isinstance(x, (ast.BinOp, ast.Call)) and self.gs_is(x)):
+            return self.gs_type(x)
         if isinstance(x, ast.Dict):
             return self.rc_dict_type(x)
         mt = self.rc_made_class(x)
@@ -645,8 +654,9 @@ class GList:
                           else 'a sort key that is not a lambda or a function')
             self.env[key.generators[0].iter.id] = lt         # the list being sorted, as the keys' comprehension reads it
             kt = self.gl_ctor_type(key).elem
-        if not (kt.is_number or kt.kind == 'tuple' and all(x.is_number for x in leaves(kt))):
-            self.fail(call, f'a sort comparing {kt.name} (numbers and tuples of numbers compare; give key= for others)')
+        if kt.kind not in ('int', 'float', 'bool', 'tuple', 'glist', 'record'):
+            self.fail(call, f'a sort comparing {kt.name}')
+        self.cmp_check('<', kt, kt, call)
         return kt
 
     def gl_slice_parts(self, e):
@@ -735,7 +745,7 @@ class GList:
 
     def gl_child(self, t, c, fn):
         """C visiting what a value of type t (C expression c) holds: fn 'mark' or 'adopt'."""
-        if t.kind in ('glist', 'record'):
+        if t.kind in ('glist', 'record', 'gset'):
             return f' {self.gl_mark(t) if fn == "mark" else self.gl_adopt(t)}(h, {c}, {"m" if fn == "mark" else "ph"});'
         if t.kind == 'array':
             return f' {"sj_keep" if fn == "mark" else "sj_take"}(h, (sj_block *)(uintptr_t)({c}).r[3], {"m" if fn == "mark" else "ph"});'
@@ -789,6 +799,13 @@ class GList:
     def gl_mark(self, t):
         """The name of the C function marking a list (or dict) of type t and what it holds."""
         reg = self.gl_registry('gl_marks')
+        if t.name not in reg and t.kind == 'gset':
+            name = f'sjM{len(reg)}'
+            reg[t.name] = name
+            self.unit.code.append(
+                f'static void {name}(sj_heap *h, sj_gset *l, int64_t m) {{ if (!l) return; sj_block *b = (sj_block *)l - 1; '
+                f'if (m == 2) {{ if (b->owner == SJ_ORPHAN) return; if (b->owner == h) {{ b->mark = 2; b->owner = SJ_ORPHAN; }} }} '
+                f'else {{ if (b->mark == m) return; b->mark = m; }} sj_keep(h, l->db, m); }}')
         if t.name not in reg and t.kind == 'record':
             st = self.rc_struct(t)
             body = ''.join(self.gl_child(x, f'(({st} *)l)->f{k}', 'mark') for k, (_, x) in enumerate(t.elem))
@@ -817,6 +834,12 @@ class GList:
     def gl_adopt(self, t):
         """The C function making what a called function kept, reachable from a list of type t, this heap's."""
         reg = self.gl_registry('gl_adopts')
+        if t.name not in reg and t.kind == 'gset':
+            name = f'sjD{len(reg)}'
+            reg[t.name] = name
+            self.unit.code.append(
+                f'static void {name}(sj_heap *h, sj_gset *l, int64_t ph) {{ if (!l) return; sj_block *b = (sj_block *)l - 1; '
+                f'if (b->owner != SJ_ORPHAN && b->mark == ph) return; sj_take(h, b, ph); sj_take(h, l->db, ph); }}')
         if t.name not in reg and t.kind == 'record':
             st = self.rc_struct(t)
             name = f'sjD{len(reg)}'
@@ -852,18 +875,17 @@ class GList:
         name = f'sjS{len(reg)}'
         reg[(kt.name, keyed, desc)] = name
         kc = self.gl_ctype(kt)
+        if not kc.isidentifier():              # a pointer: one name for it, so `V *a, *b` declares what it says
+            self.unit.code.append(f'typedef {kc} {name}k;')
+            kc = f'{name}k'
         v = f'{name}p' if keyed else kc
         if keyed:
             self.unit.code.append(f'typedef struct {v} {{ {kc} k; int64_t i; }} {v};')
         x, y = ('a->k', 'b->k') if keyed else ('(*a)', '(*b)')
         if desc:
             x, y = y, x
-        if kt.kind == 'tuple':                 # Python's: the first leaves that differ (not ==) decide, by <
-            m = len(leaves(kt))
-            body = ' '.join([f'if ({x}.f{i} != {y}.f{i}) return {x}.f{i} < {y}.f{i};' for i in range(m - 1)] + [f'return {x}.f{m - 1} < {y}.f{m - 1};'])
-        else:
-            body = f'return {x} < {y};'
-        self.unit.code.append(f'static inline int {name}_lt(const {v} *a, const {v} *b) {{ {body} }}')
+        body = f'return {self.cmp_expr("<", kt, self.cmp_elem(kt, x), kt, self.cmp_elem(kt, y))};'   # Python's <, as its sort uses
+        self.unit.code.append(f'static inline int {name}_lt({v} const *a, {v} const *b) {{ {body} }}')
         self.unit.code.append(SORT_TEMPLATE.replace('@N@', name).replace('@V@', v).replace('@L@', f'{name}_lt'))
         if keyed:
             self.unit.code.append(SORT_BY_TEMPLATE.replace('@N@', name).replace('@V@', v).replace('@K@', kc))
@@ -922,6 +944,8 @@ class GList:
             return tmp
         if self.is_list_ctor(x):
             return self.gl_make_value(x, self.gl_ctor_type(x))
+        if et.kind == 'gset':
+            return self.gs_hold(self.gs_make(x, et)) if self.gs_ctor(x) else self.gs_ptr(x)
         if et.kind == 'array':
             src = self.materialize(x)
             rec = self.temp()
@@ -1137,59 +1161,36 @@ class GList:
         self.close()
 
     def gl_in(self, e):
-        """x in xs, x not in xs: == against each element, in order; 'k' in d: whether the dict has that key."""
+        """x in xs, x not in xs: the very object or == against each element, in order (as Python's); 'k' in d: whether
+        the dict has that key."""
         right = e.comparators[0]
         negate = isinstance(e.ops[0], ast.NotIn)
-        if isinstance(right, (ast.List, ast.Tuple)):
-            xt = self.typeof(e.left)
-            x = self.texpr(e.left) if xt.kind == 'tuple' else self.hold(self.expr(e.left)[0], xt)
-            ys = [(self.texpr(y) if xt.kind == 'tuple' else self.hold(self.expr(y)[0], self.typeof(y)), self.typeof(y)) for y in right.elts]
-
-            def flat_(v):
-                out = []
-                for z in v:
-                    out += flat_(z) if isinstance(z, list) else [z[0]]
-                return out
-            conds = []
-            for y, yt in ys:
-                if xt.kind == 'tuple':
-                    conds.append('(' + ' && '.join(self.cmp(a, at_, b, bt_, '==') for a, at_, b, bt_ in
-                                                   zip(flat_(x), leaves(xt), flat_(y), leaves(yt))) + ')')
-                else:
-                    conds.append(f'({self.cmp(x, xt, y, yt, "==")})')
-            r = self.hold('(' + (' || '.join(conds) or '0') + ')', T.BOOL)
-            return (f'(!{r})' if negate else r), '0'
-        rt = self.typeof(right)
-        if rt.kind == 'record':                          # the key is a constant string: nothing to evaluate there
+        rt = None if isinstance(right, (ast.List, ast.Tuple)) else self.typeof(right)
+        if rt is not None and rt.kind == 'record':       # the key is a constant string: nothing to evaluate there
             self.expr(right)
             has = e.left.value in [k for k, _ in rt.elem]
             return ('1' if has != negate else '0'), '0'
-        xt = self.typeof(e.left)
+        xt = self.cmp_type_of(e.left)
+        x = self.cmp_value(e.left, xt)
+        if rt is None:                                   # x in [a, b], x in (1, 2): each made first, in order
+            ys = []
+            for y in right.elts:
+                yt = self.cmp_type_of(y)
+                ys.append((self.cmp_value(y, yt), yt))
+            conds = [f'({self.cmp_eq_elem(xt, x, yt, y)})' for y, yt in ys]
+            r = self.hold('(' + (' || '.join(conds) or '0') + ')', T.BOOL)
+            return (f'(!{r})' if negate else r), '0'
         r = self.temp()
         self.emit(f'int {r} = 0;')
-        if xt.kind == 'tuple':
-            xs = []
-
-            def walk(v):
-                for y in v:
-                    walk(y) if isinstance(y, list) else xs.append(y[0])
-            walk(self.texpr(e.left))
-        else:
-            x = self.hold(self.expr(e.left)[0], xt)
         if rt.kind == 'glist':
             l = self.hold_ptr(self.expr(right)[0])
             n, elem = f'{l}->n', (lambda k: f'(({self.gl_ctype(rt.elem)} *){l}->p)[{k}]')
-            et = rt.elem
         else:                                              # a list of numbers, the fast kind
             name = self.materialize(right) if not isinstance(right, ast.Name) else right.id
-            n, elem, et = f'v_{name}__n', (lambda k: f'v_{name}[{k}]'), rt.elem
+            n, elem = f'v_{name}__n', (lambda k: f'v_{name}[{k}]')
         k = self.temp()
         self.open(f'for (int64_t {k} = 0; {k} < {n}; {k}++)')
-        if xt.kind == 'tuple':
-            conds = [self.cmp(c, lt_, f'{elem(k)}.f{j}', et_, '==') for j, (c, lt_, et_) in enumerate(zip(xs, leaves(xt), leaves(et)))]
-            self.emit(f'if ({" && ".join(conds)}) {{ {r} = 1; break; }}')
-        else:
-            self.emit(f'if ({self.cmp(x, xt, elem(k), et, "==")}) {{ {r} = 1; break; }}')
+        self.emit(f'if ({self.cmp_eq_elem(xt, x, rt.elem, elem(k))}) {{ {r} = 1; break; }}')
         self.close()
         return (f'(!{r})' if negate else r), '0'
 
@@ -1207,29 +1208,20 @@ class GList:
     def gl_in_type(self, e):
         right = e.comparators[0]
         if isinstance(right, (ast.List, ast.Tuple)):
-            xt = self.typeof(e.left)
+            xt = self.cmp_type_of(e.left)
             for y in right.elts:
-                yt = self.typeof(y)
-                ok = (xt.is_number and yt.is_number) or (xt.kind == 'tuple' and yt.kind == 'tuple' and len(leaves(xt)) == len(leaves(yt))
-                                                         and all(a.is_number and b.is_number for a, b in zip(leaves(xt), leaves(yt))))
-                if not ok or isinstance(y, ast.Starred):
-                    self.fail(e, f'{xt.name} in a list holding {yt.name}')
+                if isinstance(y, ast.Starred):
+                    self.fail(e, 'in on a list with * in it')
+                self.cmp_check('==', xt, self.cmp_type_of(y), e)
             return T.BOOL
         rt = self.typeof(right)
         if rt.kind == 'record':
             if not (isinstance(e.left, ast.Constant) and type(e.left.value) is str):
                 self.fail(e, 'in on a dict with something other than a constant string')
             return T.BOOL
-        xt = self.typeof(e.left)
-        et = rt.elem
-        if et is T.PENDING:
+        if rt.elem is T.PENDING:
             raise Pending()
-        if xt.kind == 'tuple' and et.kind == 'tuple':
-            if len(leaves(xt)) != len(leaves(et)) or any(not (a.is_number and b.is_number) for a, b in zip(leaves(xt), leaves(et))):
-                self.fail(e, f'{xt.name} in {rt.name}')
-            return T.BOOL
-        if not (xt.is_number and et.is_number):
-            self.fail(e, f'{xt.name} in {rt.name} (in compiles for numbers and tuples of numbers)')
+        self.cmp_check('==', self.cmp_type_of(e.left), rt.elem, e)
         return T.BOOL
 
     def gl_delete(self, target):
@@ -1350,7 +1342,8 @@ class GList:
         """Hand a list back: everything it reaches stays when the heap is freed, and the dispatcher reads and releases it.
         slot: its place among a returned tuple's values."""
         c, _ = self.expr(value)
-        l = self.hold_ptr(c)
+        l = self.temp()
+        self.emit(f'{self.gl_ctype(self.typeof(value))} {l} = {c};')
         self.emit(f'{self.gl_mark(self.typeof(value))}(&sj_h, {l}, 2);')
         if slot is None:
             self.emit(f'sj_io[0] = (int64_t)(uintptr_t){l}; sj_io[5] = 0;')
@@ -1359,7 +1352,7 @@ class GList:
 
     def gl_marks(self):
         """The roots for a sweep: every list variable, and the lists passed in. The sweep's phase first."""
-        marks = [f'{self.gl_mark(t)}(&sj_h, v_{n}, ph_);' for n, t in self.env.items() if t.kind == 'glist'] \
+        marks = [f'{self.gl_mark(t)}(&sj_h, v_{n}, ph_);' for n, t in self.env.items() if t.kind in ('glist', 'gset')] \
             + [f'{self.gl_mark(self.env[p])}(&sj_h, v_{p}__orig, ph_);' for p in getattr(self, 'gl_params', ())]
         return ('{ int64_t ph_ = sj_phase(&sj_h); ' + ' '.join(marks) + ' }') if marks else ''
 

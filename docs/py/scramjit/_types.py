@@ -417,6 +417,17 @@ def glist_of(elem):
     return _GLISTS[elem.name]
 
 
+_GSETS = {}
+
+
+def gset_of(elem):
+    """A set, held by reference (see _gset): its elements numbers or tuples of numbers. In C a pointer to a header
+    (table, fill, used, mask, finger), the table laid out as CPython's."""
+    if elem.name not in _GSETS:
+        _GSETS[elem.name] = Type(f'set[{elem.name}]', 'sj_gset *', 'gset', elem=elem)
+    return _GSETS[elem.name]
+
+
 _RECORDS = {}
 
 

@@ -112,6 +112,12 @@ Checking every operation would cost speed on every loop, and numeric code rarely
 
 From 0.0.4, `x in xs` compiles. Python checks identity before `==`, so `x in [x]` is true even when `x` is a NaN, the very object being in the list. Compiled code holds numbers, not objects, and compares values, so it never finds a NaN. Use `math.isnan` on the elements if a NaN may be what you look for.
 
+### NaN in sets, and in comparing lists and tuples
+
+From 0.0.4, sets compile. CPython hashes a NaN by its object's address, so two NaNs are different elements of a set even when equal, and where a NaN lands in the table depends on where it was allocated. Compiled code holds floats as values, not objects: every NaN added is an element of its own, with hash 0, so a set of floats holding NaNs can differ from Python's in its order and size. A set with a NaN passed in runs as Python.
+
+Comparing lists and tuples has the same root: Python finds the very same NaN object equal to itself (`[x] == [x]` is true for `x = nan`), while compiled code compares values. The same list compared with itself is still equal, as in Python.
+
 ### Sorting floats with NaN in them
 
 From 0.0.4, `sort` and `sorted` compile. Every comparison with a NaN is false, so a list holding one has no sorted order, and where its elements end up depends on the algorithm: CPython's own result changed between versions. Compiled code sorts it in an order of its own, also differing from CPython's. Without NaNs the result is Python's exactly, `-0.0` and `0.0` keeping their order as Python's stable sort keeps it. Drop the NaNs first, or sort with `key=` mapping them to a number, if they may be there.

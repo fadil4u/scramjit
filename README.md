@@ -129,7 +129,7 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 |:---|:---|
 | `for`, `while`, `break`, `continue`, `if`, conditional expressions | Masks and index arrays: `x[x > 0]` |
 | Lists of numbers and rectangular lists of lists, passed in, made in the function and returned (from 0.0.4) | Dicts that gain keys |
-| Lists that grow (`append`, `pop`, `extend`, `insert`, `del`), sliced, searched with `in` and sorted (`sort`, `sorted`, with `key=`), shared and nested, holding lists, tuples, arrays, dicts or instances, made or passed in (from 0.0.4) | Sets |
+| Lists that grow (`append`, `pop`, `extend`, `insert`, `del`), sliced, searched with `in` and sorted (`sort`, `sorted`, with `key=`), shared and nested, holding lists, tuples, arrays, dicts or instances, made or passed in; sets, kept as CPython keeps them, in its order; `==` and `<` on tuples, lists, dicts, instances and sets, nested (from 0.0.4) | `frozenset` |
 | Views: `m[i]`, `x[a:b]`, `x[::-1]`, `m[:, j]`, `.T`, `for row in m`, as arguments and results | `x.reshape(...)`, `np.eye(n)` |
 | Making arrays: `np.zeros(n)`, `x.copy()`, `np.arange`, `np.linspace`, as locals and results | `np.where`, `np.concatenate` |
 | Assigning to a slice: `x[1:3] = 0.0`, `m[i] = row`, overlap included | `//`, `%` and comparisons on whole arrays |
@@ -138,7 +138,7 @@ lowered to plain loops. Later calls with the same types go straight to the compi
 | `sum(gen, 0.0)`, `min`, `max`, `abs`, `**`, tuple unpacking | Calls to undecorated Python functions, recursion |
 | Calls to other `@scram` functions and to C from `cimo.compile`, usually inlined | Strings, objects |
 | Numbers and n-D numpy arrays, including dtypes like `uint8`; `Enum` and `IntEnum` members | Making instances; properties |
-| All of `math`, natively and in Pyodide (float `sumprod` excepted) | Sets, `str` |
+| All of `math`, natively and in Pyodide (float `sumprod` excepted) | `str` |
 | Dicts passed in, reading and writing keys it names | Dicts that gain keys, or built in the function |
 | Instances and dataclasses (from 0.0.4): attributes, objects in attributes, methods, making them, passing and returning them, `isinstance`, lists of them | Properties, `hasattr`, `vars()` |
 | numpy functions on single numbers: `np.sqrt(x[i])`, `np.sin`, `np.minimum` | `x.sum(axis=0)` and other reductions to arrays |
@@ -241,7 +241,8 @@ Pre-release: the API may still change.
 - A function that doesn't compile whole has its loops compiled on their own, where they fit.
 - On `main`, from 0.0.4: lists that grow, nest and are shared, as Python's (`out.append((i, j))`, lists of lists of arrays, lists
   of dicts and of dataclass instances), made in the function, passed in and written back, and returned; slices, `in`, and
-  `sort` and `sorted` with `key=` and `reverse=`.
+  `sort` and `sorted` with `key=` and `reverse=`; comparisons of tuples, lists, dicts and instances, nested; and sets,
+  which iterate and pop in CPython's own order.
 - On `main`, from 0.0.4: whole-array arithmetic (`a * 2 + b`, `np.sqrt(a)`, broadcasting) compiles, one pass per
   expression, with numpy's results bit for bit.
 - Data structures: dicts passed in with keys that don't change, tuples to any depth, enums, local lists, and module-level

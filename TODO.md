@@ -614,9 +614,21 @@ Spills per line, once cimo can report them.
       1M floats 4.7x Python's sort, 1M tuples 10.9x, keyed 6.1x. Lists as elements and keys reading the sorted list stay
       Python. Along the way: a whole tuple as a comprehension variable, `t[0][1]` on a list of tuples, and calls to
       compiled functions that touch no heap inside comprehensions in functions that make arrays.
-    - **Left:** sets. Comparing lists (`rows.sort()` on a list of lists, `xs < ys`).
-    - **Converting a list of floats in is slow:** 1M floats cost 60 ms to pass in (230 ms when the floats are scattered
-      in memory, as after `sorted`), against 25 ms (77 ms) for `array.array('d', xs)`. Find where the time goes.
+    - **Comparisons** (`_compare.py`): `==`, `!=`, `<`, ... on tuples, lists, dicts, instances (dataclass eq/order,
+      plain identity) and sets, nested, chained; `in` and `sort` use them, so lists of lists sort. Pointer identity
+      counts as equal inside containers, as Python's identity check does; NaN identity can't (gotchas.md).
+    - **Sets** (`_gset.py`, `_pysets.py`): CPython's table exactly (hashes, linear probes then perturbation, resize
+      policy, dummies, each operation's own order: merge's copy paths, intersection iterating the smaller, difference's
+      copy-then-discard when the other is small, the frozenset a constant literal compiles to), so iteration and `pop`
+      match; checked against a pure-Python model and 60 random programs. Sets passed in are read slot for slot, and
+      results and write-backs are given their table through CPython's struct (layout checked at import; elsewhere,
+      rebuilt in table order). 32-bit hashes in Pyodide. 1M int adds 10x Python, tuples 3x (cache-bound).
+    - **Left:** `frozenset`; sets of records or strings; numpy scalars in sets; `sorted()` of a set is via a list.
+    - **Converting a list in:** fixed. A list of numbers was walked element by element for inner lists (twice) and,
+      held by reference, compared element by element to write back (4 s for a sorted 1M list). Now: no walk for flat
+      lists, the element-type check in C (`set(map(type))`), a bytes snapshot at the call compared with the kernel's
+      memory after, and a refill in C when most changed. 1M floats in: 60 -> 31 ms; sorted in place: 4.3 s -> 171 ms
+      (Python's own sort: 174 ms). The rest is ctypes and `array` copies.
 24. **Preflight's advice: boxed data, and the flags that would help.** Two kinds of note:
     - **Converting costs more than computing.** `preflight --run` splits each function's time into native and
       Python; split off the seconds converting arguments and results too (copying lists in, writing back, boxing the

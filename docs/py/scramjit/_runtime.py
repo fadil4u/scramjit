@@ -32,6 +32,8 @@ def attribute_number(name):
 POOL_FULL = 14       # an instance made into a pool found no room left: the call is made again with more (nothing was written back)
 LINSPACE_ERROR = 12  # np.linspace of a number of samples, in io[2], that is negative or too many
 OPERANDS_ERROR = 15  # an array expression's operands don't broadcast: their shapes as for BROADCAST_ERROR
+KEY_ERROR = 16       # a set's remove() of what it doesn't hold: the value's bits in io[2], its kind in io[3] (0 int, 1 float,
+                     # 2 bool); 3: pop from an empty set
 MAKE_DTYPES = ['float64', 'int64', 'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8']
 RETURNS_INT = 2      # a returned float's flag, when the value is really a Python int
 NARROW_INT_DTYPES = ['int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8', 'int64', 'uint64']
@@ -128,6 +130,11 @@ def exception(status, io):
         return OverflowError(OVERFLOW_ERROR_MESSAGES[io[2]])
     if status == LIST_INDEX_ERROR:
         return IndexError(LIST_INDEX_MESSAGES[io[2]])
+    if status == KEY_ERROR:
+        if io[3] == 3:
+            return KeyError('pop from an empty set')
+        bits = io[2]
+        return KeyError(struct.unpack('<d', struct.pack('<q', bits))[0] if io[3] == 1 else bool(bits) if io[3] == 2 else bits)
     if status == ATTRIBUTE_NONE:
         return AttributeError(f"'NoneType' object has no attribute '{ATTRIBUTE_NAMES[io[2]]}'")
     if status == MEMORY_ERROR:

@@ -91,6 +91,8 @@ def _arg_type(x):
         if type(x[0]) is int and not (-(1 << 63) <= min(x) and max(x) < 1 << 63):
             return None
         return T.list_of({int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(x[0])])
+    if t is set:
+        return _set_arg_type(x)
     if t is tuple:
         elems = [_arg_type(v) for v in x]
         if not elems or any(e is None or not T.is_number_tree(e) or e is T.U64 or (e.kind == 'tuple' and T.U64 in T.leaves(e)) for e in elems):
@@ -879,16 +881,49 @@ def _pool_levels(pool, t):
 
 def _changed(a, before):
     """The places where the kernel's list a holds other bits than were copied in: what this call wrote. -0.0 differs from
-    0.0; a NaN it didn't write doesn't differ from itself."""
-    raw = a.tobytes()
-    if raw == before.tobytes():
+    0.0; a NaN it didn't write doesn't differ from itself. Compared a block at a time as bytes, then element by element
+    only in the blocks that differ."""
+    raw, old = a.tobytes(), before.tobytes()
+    if raw == old:
         return ()
-    if a.typecode == 'd':                       # compared as their bits
-        a, b = array.array('q'), array.array('q')
-        a.frombytes(raw)
-        b.frombytes(before.tobytes())
-        before = b
-    return list(itertools.compress(range(len(a)), map(operator.ne, a, before)))
+    size = a.itemsize
+    step = 4096 * size
+    out = []
+    for at in range(0, len(raw), step):
+        if raw[at:at + step] != old[at:at + step]:
+            x, y = array.array('q' if size == 8 else 'i'), array.array('q' if size == 8 else 'i')
+            x.frombytes(raw[at:at + step])
+            y.frombytes(old[at:at + step])
+            first = at // size
+            out.extend(first + k for k in itertools.compress(range(len(x)), map(operator.ne, x, y)))
+    return out
+
+
+def _write_numbers(x, new, et, before=None, now=None):
+    """A list of plain numbers passed in, held by reference, as the kernel left it (new): compared bit for bit in C, the
+    elements that didn't change kept as the very objects they were. before, now: their bytes, if known."""
+    m = min(len(x), len(new))
+    if before is not None and now is not None:
+        a, b = array.array('q', before[:8 * m]), array.array('q', now[:8 * m])
+    else:
+        code = 'd' if et is T.FLOAT else 'q'
+        a, b = array.array(code, x if len(x) == m else x[:m]), array.array(code, new if len(new) == m else new[:m])
+        if code == 'd':                          # bits: -0.0 isn't 0.0, and a NaN is itself
+            a, b = array.array('q', a.tobytes()), array.array('q', b.tobytes())
+    if a != b:
+        raw, old, step = a.tobytes(), b.tobytes(), 4096 * 8
+        blocks = sum(raw[at:at + step] != old[at:at + step] for at in range(0, len(raw), step))
+        if blocks * 4096 * 8 < m:                # a few places: found and assigned one by one
+            for k in _changed(b, a):
+                x[k] = new[k]
+        elif blocks * 4096 * 2 < m:
+            x[:m] = [o if same else v for o, v, same in zip(x, new, map(operator.eq, a, b))]
+        else:                                    # most of it (as after a sort): refilled, in C
+            x[:m] = new if len(new) == m else new[:m]
+    if len(new) > m:
+        x.extend(new[m:])
+    elif len(x) > m:
+        del x[m:]
 
 
 def _write_changed(lst, a, et, before):
@@ -1985,7 +2020,7 @@ def _make_plan(f, entry, args):
     dtype, dimension or layout, an empty one) goes to f._slow, so plans change only speed."""
     if any(t.kind == 'pool' for t in entry.types) and entry.counts is None:
         return _pooled_plan(f, entry, args)
-    if any(t.kind in ('glist', 'record') for t in entry.types) or entry.counts is not None or entry.ret.kind in ('list', 'glist', 'record') or (entry.ret.kind == 'tuple' and any(t.kind in ('glist', 'record') for t in entry.ret.elem)) or entry.instance_ret or any(t.kind in ('pool', 'ref') for t in entry.types):
+    if any(t.kind in ('glist', 'record', 'gset') for t in entry.types) or entry.counts is not None or entry.ret.kind in ('list', 'glist', 'record', 'gset') or (entry.ret.kind == 'tuple' and any(t.kind in ('glist', 'record', 'gset') for t in entry.ret.elem)) or entry.instance_ret or any(t.kind in ('pool', 'ref') for t in entry.types):
         return f._slow_call
     env = {'kernel': entry.kernel, 'slow': f._slow, 'failed': f._failed, 'box': f._box, 'ret': entry.ret, 'pool': [], 'compiled': entry,
            'addressof': ctypes.addressof, 'from_buffer': ctypes.c_char.from_buffer, 'bytearray': bytearray, 'memoryview': memoryview}
@@ -2224,13 +2259,13 @@ def _pack_glist(m, i, x, t, args):
     object, so a list in two places is one list; written back after the call."""
     if m.gl is None:
         m.gl = _GLBuild()
-    h = m.gl.build(x, t) if t.kind == 'glist' else m.gl.build_record(x, t)
+    h = m.gl.build(x, t) if t.kind == 'glist' else m.gl.build_set(x, t) if t.kind == 'gset' else m.gl.build_record(x, t)
     m.gl.top.append((i, h))
     m.cargs.append(h)
 
 
 _PACKERS = {'pool': _pack_pool, 'reflist': _pack_reflist, 'inlist': _pack_inlist, 'objlist': _pack_objlist, 'list': _pack_list,
-            'glist': _pack_glist, 'record': _pack_glist}
+            'glist': _pack_glist, 'record': _pack_glist, 'gset': _pack_glist}
 
 
 def _marshal(entry, args, room=None, prebuilt=None):
@@ -2827,7 +2862,7 @@ class Function:
             entry.tb_at = entry.io_size
             entry.io_size += 8 * (1 + len(c.unit.frames))
         entry.free = getattr(module, 'sj_release', None) if c.makes or c.ret.kind == 'list' else None
-        entry.gl_types = {i: c.env[p] for i, p in enumerate(c.params) if c.env[p].kind in ('glist', 'record')}   # as appends made them
+        entry.gl_types = {i: c.env[p] for i, p in enumerate(c.params) if c.env[p].kind in ('glist', 'record', 'gset')}   # as appends made them
         if counts:
             entry.counts = bytearray(8 * max(len(c.count_lines), 1))
             entry.count_lines, entry.count_heads, entry.count_rest = c.count_lines, c.count_heads, c.count_rest
@@ -2860,11 +2895,12 @@ class Function:
 
     def _key_of(self, args):
         key = tuple(map(_arg_type, args))
+        flat = [type(x) is list and t is not None and t.kind == 'list' for x, t in zip(args, key)]   # numbers only: no rows
         if any(type(x) is list for x in args):
             key = self._glist_key(args, key)
-        lists = [id(y) for x in args if type(x) is list for y in [x] + [r for r in x if type(r) is list]]
+        lists = [id(y) for x, f in zip(args, flat) if type(x) is list for y in [x] + ([] if f else [r for r in x if type(r) is list])]
         if len(set(lists)) != len(lists):        # one list under two names: one copy, the second name the first's
-            first, rows = {}, [id(r) for x in args if type(x) is list for r in x if type(r) is list]
+            first, rows = {}, [id(r) for x, f in zip(args, flat) if type(x) is list and not f for r in x if type(r) is list]
             out = list(key)
             for i, x in enumerate(args):
                 if type(x) is not list or (out[i] is not None and out[i].kind == 'glist'):   # held by reference: shared as it is
@@ -3030,9 +3066,9 @@ class Function:
             return build(cls, attrs)
         if r is T.NONE:
             return None
-        if r.kind in ('glist', 'record'):
+        if r.kind in ('glist', 'record', 'gset'):
             return self._glist_result(entry, io, args, m.gl)
-        if r.kind == 'tuple' and any(t.kind in ('glist', 'record') for t in r.elem):
+        if r.kind == 'tuple' and any(t.kind in ('glist', 'record', 'gset') for t in r.elem):
             return self._glist_tuple(entry, io, r, args, m.gl)
         if entry.records:
             return self._array_result(entry, io, args)
@@ -3096,9 +3132,12 @@ class Function:
         empty), those this function grows or gives another name, and lists shared between arguments."""
         self._held()
         ids = collections.Counter()
-        for x in args:
+        for x, t in zip(args, key):
             if type(x) is list:
-                _count_lists(x, ids)
+                if t is not None and t.kind == 'list':       # numbers only (_arg_type looked): nothing inside to count
+                    ids[id(x)] += 1
+                else:
+                    _count_lists(x, ids)
         shared = {k for k, c in ids.items() if c > 1}
         out = list(key)
         for i, x in enumerate(args):
@@ -3129,7 +3168,7 @@ class Function:
         reader = _array_reader_for(entry, args, gl)
         try:
             for i, et in enumerate(r.elem):
-                if et.kind in ('glist', 'record'):
+                if et.kind in ('glist', 'record', 'gset'):
                     out.append(_read_held(struct.unpack_from('<q', io, 32 + 16 * i)[0], et, memo, blocks, reader))
                 else:
                     out.append(self._box(io, 32 + 16 * i, 40 + 16 * i, et))
@@ -3311,7 +3350,57 @@ def _read_held(addr, t, memo, blocks, arrays=None):
     """A list or a dict the kernel holds by reference, as a Python object (None for a null pointer)."""
     if not addr:
         return None
+    if t.kind == 'gset':
+        return _read_set(addr, t, memo, blocks)
     return _read_glist(addr, t, memo, blocks, arrays) if t.kind == 'glist' else _read_record(addr, t, memo, blocks, arrays)
+
+
+def _gs_entry(et):
+    """ctypes for a set's table entry {hash, state, key} (_gset)."""
+    if ('s', et) not in _GL_STRUCTS:
+        import ctypes
+        k = _gl_struct(et)[0] if et.kind == 'tuple' else _gl_leaf(et)[0]
+        _GL_STRUCTS['s', et] = type('sjE', (ctypes.Structure,), {'_fields_': [('h', ctypes.c_int64), ('st', ctypes.c_int64), ('k', k)]})
+    return _GL_STRUCTS['s', et]
+
+
+def _gs_key_value(et):
+    """A table entry's key (as ctypes gives it) -> the Python value."""
+    if et.kind == 'tuple':
+        return lambda v: _gl_value(v, et, None, None, None)
+    return _gl_leaf(et)[1]
+
+
+def _read_set_table(addr, t):
+    """(fill, used, mask, finger, slots, table block) of the set whose header is at addr; slots as _pysets takes them,
+    with Python values for keys."""
+    import ctypes
+    from . import _pysets
+    raw = ctypes.string_at(addr, 48)                 # sj_gset: pointers are 8 bytes, natively and in cimo's wasm
+    table = int.from_bytes(raw[:8], 'little')
+    fill, used, mask, finger = struct.unpack_from('<qqqq', raw, 8)
+    db = int.from_bytes(raw[40:48], 'little')
+    slots = []
+    if t.elem is T.PENDING:                          # never given an element: empty, as made
+        slots = [(None, 0)] * (mask + 1)
+    else:
+        value = _gs_key_value(t.elem)
+        for e in (_gs_entry(t.elem) * (mask + 1)).from_address(table):
+            slots.append((None, 0) if e.st == 0 else (_pysets.DUMMY, -1) if e.st == 2 else (value(e.k), e.h))
+    return fill, used, mask, finger, slots, db
+
+
+def _read_set(addr, t, memo, blocks):
+    """The Python set for the header at addr: its table as the kernel left it, slot for slot (_pysets)."""
+    from . import _pysets
+    if addr in memo:
+        return memo[addr]
+    fill, used, mask, finger, slots, db = _read_set_table(addr, t)
+    blocks.append(addr - SJ_BLOCK)
+    if db:
+        blocks.append(db)
+    memo[addr] = out = _pysets.make(fill, used, mask, finger, slots)
+    return out
 
 
 _GL_STRUCTS = {}
@@ -3329,7 +3418,7 @@ def _rc_struct_new(t):
     import ctypes
     fields = []
     for k, (_, x) in enumerate(t.elem):
-        if x.kind in ('glist', 'record'):
+        if x.kind in ('glist', 'record', 'gset'):
             ct = ctypes.c_uint64          # a C pointer: 8 bytes, natively and in cimo's wasm
         elif x.kind == 'array':
             ct = ctypes.c_int64 * (10 + 2 * x.ndim)
@@ -3345,7 +3434,7 @@ def _rc_struct_new(t):
 
 def _gl_value(v, x, memo, blocks, arrays):
     """A C field or element of type x (as ctypes gives it) as a Python value."""
-    if x.kind in ('glist', 'record'):
+    if x.kind in ('glist', 'record', 'gset'):
         return _read_held(v, x, memo, blocks, arrays)
     if x.kind == 'array':
         value = ('array',) + tuple(v)
@@ -3404,7 +3493,7 @@ def _read_glist_values(addr, t, memo, blocks, arrays=None):
     et = t.elem
     if not n:
         return out
-    if et.kind in ('glist', 'record'):
+    if et.kind in ('glist', 'record', 'gset'):
         ptrs = (ctypes.c_uint64 * n).from_address(p)
         out.extend(_read_held(x, et, memo, blocks, arrays) for x in ptrs)
     elif et.kind == 'array':
@@ -3477,6 +3566,9 @@ def _glist_arg_type(x, depth=0):
     from ._glist import unify
     if depth > 32:
         return None
+    kinds = set(map(type, x))                         # numbers of one kind: looked at in C, not one by one
+    if len(kinds) == 1 and next(iter(kinds)) in (float, bool) or kinds == {int} and -(1 << 63) <= min(x) and max(x) < 1 << 63:
+        return T.glist_of({int: T.INT, float: T.FLOAT, bool: T.BOOL}[type(x[0])])
     et = T.PENDING
     for v in x:
         vt = _glist_elem_type(v, depth)
@@ -3489,8 +3581,36 @@ def _glist_arg_type(x, depth=0):
     return T.glist_of(et)
 
 
+def _set_elem_type(v):
+    """The type of a set's element (a number or a tuple of numbers), or None. A NaN: None (its hash is its address)."""
+    t = type(v)
+    if t is int:
+        return T.INT if -(1 << 63) <= v < (1 << 63) else None
+    if t is float:
+        return T.FLOAT if v == v else None
+    if t is bool:
+        return T.BOOL
+    if t is tuple:
+        es = [_set_elem_type(y) for y in v]
+        return None if any(e is None for e in es) else T.tuple_of(es)
+    return None
+
+
+def _set_arg_type(x):
+    """set[T], T what every element is, or None."""
+    et = T.PENDING
+    for v in x:
+        vt = _set_elem_type(v)
+        if vt is None or (et is not T.PENDING and vt is not et):
+            return None
+        et = vt
+    return T.gset_of(et)
+
+
 def _glist_elem_type(v, depth):
     t = type(v)
+    if t is set:
+        return _set_arg_type(v)
     if t is list:
         return _glist_arg_type(v, depth + 1)
     if t is not dict and t not in (int, float, bool, tuple, str, bytes) and not hasattr(v, '__array_interface__') \
@@ -3540,6 +3660,7 @@ class _GLBuild:
         self.arrays = {}          # an array's record values -> the array
         self.done = set()         # blocks already released
         self.top = []             # (argument index, header) of each list passed in
+        self.snap = {}            # header address -> the bytes of its numbers as passed in (lists of ints or floats)
 
     def buffer(self, size):
         b = (self.ctypes.c_char * (SJ_BLOCK + max(size, 8)))()
@@ -3568,6 +3689,8 @@ class _GLBuild:
             return self.build(v, ft)
         if ft.kind == 'record':
             return self.build_record(v, ft)
+        if ft.kind == 'gset':
+            return self.build_set(v, ft)
         if ft.kind == 'array':
             rec = [v.__array_interface__['data'][0], -1, 0, 0, 0, 0, 0, 0, 0, 0]
             for k in range(ft.ndim):
@@ -3587,6 +3710,35 @@ class _GLBuild:
             return 0
         return v.item() if ft.np is True else v
 
+    def build_set(self, x, t):
+        """A set passed in: its header and table, slot for slot as CPython has them (_pysets), in memory Python owns."""
+        from . import _pysets
+        if id(x) in self.headers:
+            return self.headers[id(x)]
+        ctypes = self.ctypes
+        table = _pysets.read(x) or _pysets.layout(x)
+        fill, used, mask, finger, slots = table
+        et = t.elem if t.elem is not T.PENDING else T.INT
+        E = _gs_entry(et)
+        h = self.buffer(48)
+        d = self.buffer(ctypes.sizeof(E) * (mask + 1))
+        ents = (E * (mask + 1)).from_address(d)
+        flat_tuple = et.kind == 'tuple'
+        for i, (o, hh) in enumerate(slots):
+            if o is None:
+                continue
+            if o is _pysets.DUMMY:
+                ents[i].st, ents[i].h = 2, -1
+                continue
+            ents[i].st, ents[i].h = 1, hh
+            ents[i].k = self.field(o, et) if flat_tuple else o
+        ctypes.memmove(h, struct.pack('<Qqqqq', d, fill, used, mask, finger) + struct.pack('<Q', d - SJ_BLOCK), 48)
+        self.headers[id(x)] = h
+        self.objs[h] = x
+        self.types[h] = t
+        self.snap[h] = ctypes.string_at(h, 48) + ctypes.string_at(d, ctypes.sizeof(E) * (mask + 1))
+        return h
+
     def build(self, x, t):
         if id(x) in self.headers:
             return self.headers[id(x)]
@@ -3597,7 +3749,7 @@ class _GLBuild:
         self.types[h] = t
         et = t.elem
         n = len(x)
-        if et.kind in ('glist', 'record'):
+        if et.kind in ('glist', 'record', 'gset'):
             esize = 8
         elif et.kind == 'array':
             esize = 8 * (10 + 2 * et.ndim)
@@ -3613,6 +3765,8 @@ class _GLBuild:
                 (ctypes.c_uint64 * n).from_address(d)[:] = [self.build(v, et) for v in x]
             elif et.kind == 'record':
                 (ctypes.c_uint64 * n).from_address(d)[:] = [self.build_record(v, et) for v in x]
+            elif et.kind == 'gset':
+                (ctypes.c_uint64 * n).from_address(d)[:] = [self.build_set(v, et) for v in x]
             elif et.kind == 'array':
                 recs = (ctypes.c_int64 * ((10 + 2 * et.ndim) * n)).from_address(d)
                 at = 0
@@ -3637,6 +3791,10 @@ class _GLBuild:
                             walk(z) if type(z) is tuple else flat.append(z)
                     walk(v)
                     arr[k] = cls(*flat)
+            elif et in (T.INT, T.FLOAT):          # one copy in C, and its bytes kept: what changed is found by comparing
+                a = array.array('q' if et is T.INT else 'd', x)
+                ctypes.memmove(d, a.buffer_info()[0], 8 * n)
+                self.snap[h] = a.tobytes()
             elif et is not T.PENDING:
                 ct, _ = _gl_leaf(et)
                 vals = [v.item() for v in x] if et.np is True else x
@@ -3673,17 +3831,40 @@ class _GLBuild:
         for i, h in self.top:
             if i in refined:
                 retype(h, refined[i], seen)
+        now = {}
+        for h in self.snap:                      # numbers: their bytes now, and nothing more read if they're the same
+            if self.types[h].kind == 'gset':
+                now[h] = self._set_bytes(h, self.types[h])
+                continue
+            p, n = struct.unpack_from('<qq', (self.ctypes.c_char * 16).from_address(h), 0)
+            now[h] = self.ctypes.string_at(p, 8 * n) if n else b''
         for h, x in self.objs.items():
+            if now.get(h) == self.snap.get(h, 0):
+                continue
             if reader is None:
                 reader = _array_reader_for(entry, args, self)
             t = self.types[h]
+            if t.kind == 'gset':
+                news[h] = _read_set_table(h, t)
+                if news[h][5] and news[h][5] + SJ_BLOCK not in self.own:
+                    blocks.append(news[h][5])
+                continue
             if t.kind == 'record':
                 rec = _rc_struct(t).from_address(h)
                 news[h] = {key: _gl_value(getattr(rec, f'f{k}'), ft, memo, blocks, reader) for k, (key, ft) in enumerate(t.elem)}
             else:
                 news[h] = _read_glist_values(h, t, memo, blocks, reader)
         for h, x in self.objs.items():
+            if h not in news:
+                continue
             new = news[h]
+            if self.types[h].kind == 'gset':     # its table as the kernel left it; elements it had, the very objects
+                from . import _pysets
+                fill, used, mask, finger, slots, _ = new
+                had = {_gs_identity(o): o for o in x}
+                slots = [(had.get(_gs_identity(o), o), hh) if o is not None and o is not _pysets.DUMMY else (o, hh) for o, hh in slots]
+                _pysets.replace(x, fill, used, mask, finger, slots)
+                continue
             if type(x) is dict:                  # its keys stay; the values that changed are assigned, in place
                 for key, v in new.items():
                     if not _same_value(x[key], v):
@@ -3694,17 +3875,31 @@ class _GLBuild:
                     if not _same_value(getattr(x, key), v):
                         setattr(x, key, v)
                 continue
+            if self.types[h].elem in (T.INT, T.FLOAT, T.BOOL):
+                _write_numbers(x, new, self.types[h].elem, self.snap.get(h), now.get(h))
+                continue
             if len(new) == len(x) and all(_same_value(a, b) for a, b in zip(x, new)):
                 continue
             x[:] = [x[k] if k < len(x) and _same_value(x[k], a) else a for k, a in enumerate(new)]
         self.release(entry, blocks)
         self.memo = memo
 
+    def _set_bytes(self, h, t):
+        table = int.from_bytes(self.ctypes.string_at(h, 8), 'little')
+        mask = struct.unpack_from('<q', self.ctypes.string_at(h + 24, 8))[0]
+        et = t.elem if t.elem is not T.PENDING else T.INT
+        return self.ctypes.string_at(h, 48) + self.ctypes.string_at(table, self.ctypes.sizeof(_gs_entry(et)) * (mask + 1))
+
     def release(self, entry, blocks):
         for b in blocks:
             if b not in self.own and b not in self.done:
                 self.done.add(b)
                 entry.free(b)
+
+
+def _gs_identity(v):
+    """What tells a set's element from another of the same type: a float by its bits (-0.0 isn't 0.0 here)."""
+    return (type(v), struct.pack('<d', v)) if type(v) is float else (type(v), v)
 
 
 def _same_value(a, b):

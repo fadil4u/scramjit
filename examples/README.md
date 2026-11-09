@@ -34,6 +34,7 @@ Python and through scramjit, and asserts the results are identical. They need nu
 | [`config_dict.py`](config_dict.py) | An epidemic model with its settings and results in dicts | Each day depends on the one before | 0.081 s | 4.4 ms | 18x |
 | [`grow_lists.py`](grow_lists.py) (from 0.0.4) | Pairs of points closer than a radius, from a grid that is a list of lists built by `append`, returned as a list of `(i, j)` tuples | How many points share a cell, and which pairs are close, depends on the data | 0.42 s | 77 ms | 5x |
 | [`sorting.py`](sorting.py) (from 0.0.4) | The busiest hour of a day of requests: each hour's intervals built as a list of tuples, sorted with `key=` and merged, the hours ranked with `sorted(..., reverse=True)` | Merging depends on the order and on how far the last interval reached | 0.51 s | 33 ms | 15x |
+| [`sets.py`](sets.py) (from 0.0.4) | Islands on a sparse map, the land a set of `(x, y)` cells, flood-filled with a frontier set | Each island's extent depends on the cells found so far | 0.17 s | 64 ms | 3x |
 | [`records.py`](records.py) (from 0.0.4) | Runs above a level in a signal: a list of dataclass instances passed in and appended to, a list of dicts returned | Each run depends on where the last one ended | 40 ms | 3.0 ms | 13x |
 | [`whole_array.py`](whole_array.py) (from 0.0.4) | 1,000 damped oscillators stepped with `a = -k * x - c * v + drive` on whole arrays | numpy does this, a call and a temporary array per operator; compiled, one pass per line | 0.010 s | 2.3 ms | 4x |
 

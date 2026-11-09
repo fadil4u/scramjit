@@ -24,7 +24,9 @@ import re
 from . import _types as T
 from . import _webs
 from ._errors import Unsupported
-from ._glist import GList, Pending, ArrayOf, grown_names, has_arrays, held, receiver, unify_lists, SNIPPET as GLIST_SNIPPET
+from ._compare import Compare
+from ._gset import GSet, set_receiver, SNIPPET as GSET_SNIPPET
+from ._glist import GList, Pending, ArrayOf, grown_names, held_names, has_arrays, held, receiver, unify_lists, SNIPPET as GLIST_SNIPPET
 import sys
 
 from ._mathlib import snippets
@@ -333,6 +335,7 @@ NP_FUNCS = {'float32', 'int32', 'int16', 'int8', 'uint32', 'uint16', 'uint8', 'u
 
 
 _mathlib.SNIPPETS['glist'] = (('np_make',), GLIST_SNIPPET)
+_mathlib.SNIPPETS['gset'] = (('glist',), GSET_SNIPPET)
 
 
 class Tables(ast.NodeTransformer):
@@ -762,6 +765,8 @@ def flatten_dicts(fdef, arg_types):
             into |= {id(x) for x in n.elts}
         elif isinstance(n, ast.Dict):
             into |= {id(x) for x in n.values}
+        elif isinstance(n, ast.Compare) and not any(isinstance(o, (ast.Is, ast.IsNot, ast.In, ast.NotIn)) for o in n.ops):
+            into |= {id(x) for x in [n.left] + n.comparators}     # compared as an object: made there
         elif isinstance(n, ast.Assign) and any(isinstance(t, (ast.Subscript, ast.Attribute)) for t in n.targets):
             into.add(id(n.value))
     made_local = {}
@@ -1579,7 +1584,7 @@ def flatten_dicts(fdef, arg_types):
                     if isinstance(v, ast.AST):
                         setattr(e, field, walk(v, cond or later))
                     elif isinstance(v, list):
-                        setattr(e, field, [walk(x, cond or (later and (k > 0 or not isinstance(e, ast.BoolOp)))) if isinstance(x, ast.AST) else x
+                        setattr(e, field, [walk(x, cond or (later and (k > 0 or not isinstance(e, (ast.BoolOp, ast.Compare))))) if isinstance(x, ast.AST) else x
                                            for k, x in enumerate(v)])
                 if isinstance(e, ast.Call):
                     c = makes_new(e) if id(e) not in into else None
@@ -1991,7 +1996,7 @@ class Unit:
         return c
 
 
-class Compiler(GList):
+class Compiler(GList, Compare, GSet):
     def __init__(self, fdef, arg_types, globals_, filename, line_offset, boundscheck=True, parity=True, counts=False, unit=None, hidden_map=None):
         fdef, arg_types, self.dict_slots = flatten_dicts(fdef, arg_types)
         self.instance_ret = getattr(fdef, 'sj_instance_ret', None)
@@ -2129,7 +2134,7 @@ class Compiler(GList):
 
     # ---- type inference
     def infer(self):
-        self.gl_names = grown_names(self.f)
+        self.gl_names = held_names(self.f)     # grown, or put into a list, or given another name
         for _ in range(8):
             before = dict(self.env)
             self.returns = []
@@ -2159,10 +2164,10 @@ class Compiler(GList):
                 self.fail(v, f'returns {self.env[v.id].name}, whose elements may be numpy scalars')
             return self.env[v.id]          # handed back whole: copied into a new list, or the one passed in
         if isinstance(v, ast.Tuple) and self.has_views(v):        # only a return can hold arrays in a tuple
-            if any(self.gl_is(x) or self.rc_is(x) for x in v.elts):
+            if any(self.gl_is(x) or self.rc_is(x) or self.gs_is(x) for x in v.elts):
                 self.fail(v, 'returns a tuple of lists and arrays (or a rectangular list of lists)')
             return T.tuple_of([self.typeof(x) for x in v.elts])
-        if isinstance(v, ast.Tuple) and any(self.gl_is(x) or self.rc_is(x) for x in v.elts):   # lists in a returned tuple: a level deep
+        if isinstance(v, ast.Tuple) and any(self.gl_is(x) or self.rc_is(x) or self.gs_is(x) for x in v.elts):   # lists in a returned tuple: a level deep
             ts = [self.typeof(x) for x in v.elts]
             if not all(held(t) or t.is_number for t in ts):
                 self.fail(v, 'returns a tuple of lists and something other than numbers (an array, or a rectangular list of lists)')
@@ -2192,7 +2197,7 @@ class Compiler(GList):
         if t is T.NONE:
             self.fail(node, f'{name} would be None')
         old = self.env.get(name)
-        if old is not None and old.kind in ('glist', 'record') and t.kind == old.kind:
+        if old is not None and old.kind in ('glist', 'record', 'gset') and t.kind == old.kind:
             u = unify_lists(old, t)
             if u is None:
                 self.fail(node, f'{name} is {old.name} and later {t.name}; a variable must keep one type')
@@ -2321,6 +2326,8 @@ class Compiler(GList):
             if s.value is None:
                 self.fail(s, 'annotation without a value')
             self.infer_target(s.target, self.typeof(s.value), s)
+        elif isinstance(s, ast.AugAssign) and self.gs_is(s.target):
+            self.gs_aug_type(s)
         elif isinstance(s, ast.AugAssign) and isinstance(s.op, ast.Add) and self.gl_is(s.target):
             self.gl_infer_method(self.gl_extend_call(s))
         elif isinstance(s, ast.AugAssign) and ((isinstance(s.target, ast.Subscript) and (self.rc_is(s.target.value) or self.gl_is(s.target.value)))
@@ -2347,6 +2354,8 @@ class Compiler(GList):
         elif isinstance(s, ast.For):
             self.infer_block(s.orelse)
             self.gl_loop_check(s)
+            if self.gs_is(s.iter):
+                self.gs_loop_check(s, s.iter)
             self.bind_types(s.target, self.elem_struct(self.iterable(s.iter)), s)
             lists = {n.id for n in ast.walk(s.iter) if isinstance(n, ast.Name)
                      and self.env.get(n.id) is not None and self.env[n.id].kind in ('list', 'array')}
@@ -2363,6 +2372,8 @@ class Compiler(GList):
             pass
         elif isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and receiver(s.value) and self.gl_is(receiver(s.value)[0]):
             self.gl_infer_method(s.value)
+        elif isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and set_receiver(s.value) and self.gs_is(set_receiver(s.value)[0]):
+            self.gs_infer_method(s.value)
         elif isinstance(s, ast.Expr) and self.rc_is_method(s.value):
             self.typeof(s.value)
         elif isinstance(s, ast.Expr) and self.calls_out(s.value):
@@ -2415,6 +2426,8 @@ class Compiler(GList):
 
     def check_test(self, test):
         t = self.typeof(test)
+        if t.kind in ('glist', 'gset'):
+            return
         if not t.is_number and t.kind != 'enum':
             self.fail(test, f'a condition of type {t.name}')
 
@@ -2433,6 +2446,8 @@ class Compiler(GList):
     def iterable(self, it):
         if self.gl_is(it):
             return ('glist', it)
+        if self.gs_is(it):
+            return ('gset', it)
         if isinstance(it, ast.Name) and it.id in self.env and self.env[it.id].kind in ('array', 'list'):
             if self.env[it.id].kind == 'array' and self.env[it.id].ndim != 1:
                 return ('rows', it.id, None)
@@ -2488,6 +2503,11 @@ class Compiler(GList):
 
     def elem_struct(self, d):
         kind = d[0]
+        if kind == 'gset':
+            et = self.gs_type(d[1]).elem
+            if et is T.PENDING:
+                raise Pending()
+            return et
         if kind == 'glist':
             et = self.typeof(d[1]).elem
             if et is T.PENDING:
@@ -2974,6 +2994,8 @@ class Compiler(GList):
             self.fail(e, f'the attribute .{e.attr}')
         if isinstance(e, (ast.BinOp, ast.UnaryOp)) and self.elementwise_of(e):
             return self.make_type(e, self.make_of(e))
+        if isinstance(e, ast.BinOp) and self.gs_is(e):
+            return self.gs_type(e)
         if isinstance(e, ast.BinOp) and folds(e) is not None:
             return T.U64 if folds(e) > INT64_MAX else T.INT
         if isinstance(e, ast.BinOp):
@@ -3002,8 +3024,12 @@ class Compiler(GList):
             if t is T.NP_UINT64:                     # wraps, as numpy's does
                 return t
             return T.INT if t is T.BOOL else t
+        if isinstance(e, ast.Compare) and len(e.ops) == 1 and isinstance(e.ops[0], (ast.In, ast.NotIn)) and self.gs_is(e.comparators[0]):
+            return self.gs_in_type(e)
         if isinstance(e, ast.Compare) and self.gl_is_in(e):
             return self.gl_in_type(e)
+        if isinstance(e, ast.Compare) and self.cmp_is(e):
+            return self.cmp_type(e)
         if isinstance(e, ast.Compare):
             ts = [self.typeof(x) for x in [e.left] + e.comparators]
             if any(t.kind == 'enum' for t in ts):
@@ -3056,6 +3082,13 @@ class Compiler(GList):
             return self.gl_infer_method(e)
         if self.gl_sorted(e):
             return self.gl_sorted_type(e)
+        if self.gs_ctor(e) or (isinstance(e, ast.BinOp) and self.gs_is(e)):
+            return self.gs_type(e)
+        if isinstance(e, ast.Call) and set_receiver(e) and self.gs_is(set_receiver(e)[0]):
+            return self.gs_infer_method(e)
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == 'len' and len(e.args) == 1 \
+                and self.is_builtin('len', 'len') and self.gs_is(e.args[0]):
+            return T.INT
         if self.rc_is_method(e):                 # a method of an instance held in a list
             return self.rc_method(e)[0].ret
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == 'len' and len(e.args) == 1 \
@@ -5295,6 +5328,13 @@ class Compiler(GList):
             self.mark(s)
             self.rc_call(s.value)
             return
+        if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and set_receiver(s.value) and self.gs_is(set_receiver(s.value)[0]) \
+                and not (receiver(s.value) and self.gl_is(receiver(s.value)[0])):
+            self.mark(s)
+            if self.counts:
+                self.count(s)
+            self.gs_method(s.value)
+            return
         if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and receiver(s.value) and self.gl_is(receiver(s.value)[0]):
             self.mark(s)
             if self.counts:
@@ -5305,6 +5345,10 @@ class Compiler(GList):
             self.mark(s)
             for t in s.targets:
                 self.gl_delete(t)
+            return
+        if isinstance(s, ast.AugAssign) and self.gs_is(s.target):
+            self.mark(s)
+            self.gs_augassign(s)
             return
         if isinstance(s, ast.AugAssign) and isinstance(s.op, ast.Add) and self.gl_is(s.target):
             self.mark(s)
@@ -5342,6 +5386,10 @@ class Compiler(GList):
                 self.rc_store(s.targets[0], (v, '0'), self.typeof(s.targets[0]))
             else:
                 self.gl_store(s.targets[0], (v, '0'), self.typeof(s.targets[0].value).elem)
+            return
+        if isinstance(s, ast.Assign) and self.gs_ctor(s.value) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
+            v = self.gs_make(s.value, self.env[s.targets[0].id])      # its type as the whole function made it
+            self.emit(f'v_{s.targets[0].id} = {v};')
             return
         if isinstance(s, ast.Assign) and self.is_list_ctor(s.value) and self.env[s.targets[0].id].kind == 'glist':
             v = self.gl_make_value(s.value, self.env[s.targets[0].id])
@@ -5743,6 +5791,8 @@ class Compiler(GList):
         kind = d[0]
         if kind == 'glist':
             return self.gl_iter_prep(d[1])
+        if kind == 'gset':
+            return self.gs_iter_prep(d[1])
         if kind == 'rows':
             name = self.materialize(d[2]) if d[2] is not None else d[1]
             first = self.hold(self.stride(name, 0), T.INT)
@@ -6770,6 +6820,9 @@ class Compiler(GList):
             return self.math_tuple(e, self.math_func(e.func))
         if self.callee_of(e) is not None:
             return self.call_results(e)
+        if isinstance(e, ast.Call) and set_receiver(e) and self.gs_is(set_receiver(e)[0]):     # s.pop() of a set of tuples
+            v = self.gs_method(e, want_value=True)[0]
+            return self.gs_tree_vals(self.cmp_tree(t, v))
         raise AssertionError(e)
 
     def extent(self, name, k):
@@ -6814,6 +6867,10 @@ class Compiler(GList):
             return f'({c}) != 0.0'
         if t.kind == 'int':
             return f'({c}) != 0'
+        if t.kind == 'glist':
+            return f'(({c})->n != 0)'
+        if t.kind == 'gset':
+            return f'(({c})->used != 0)'
         return c
 
     def hold(self, c, t):
@@ -6870,6 +6927,8 @@ class Compiler(GList):
                     return f'{t.ndim}LL', '0'
                 return '(' + ' * '.join(self.extent(e.value.id, k) for k in range(t.ndim)) + ')', '0'
             return c_float(MATH_CONSTANTS[e.attr]), '0'
+        if isinstance(e, ast.BinOp) and self.gs_is(e):
+            return self.gs_binop(e)
         if isinstance(e, ast.BinOp) and folds(e) is not None:
             v = folds(e)
             return (f'{v}ULL' if v > INT64_MAX else c_int(v)), '0'
@@ -6889,8 +6948,12 @@ class Compiler(GList):
             if t.kind == 'float':
                 return f'(-({c}))', f
             return f'{cast}sj_neg((int64_t)({c}))', f
+        if isinstance(e, ast.Compare) and len(e.ops) == 1 and isinstance(e.ops[0], (ast.In, ast.NotIn)) and self.gs_is(e.comparators[0]):
+            return self.gs_in(e)
         if isinstance(e, ast.Compare) and self.gl_is_in(e):
             return self.gl_in(e)
+        if isinstance(e, ast.Compare) and self.cmp_is(e):
+            return self.cmp_compare(e)
         if isinstance(e, ast.Compare):
             return self.compare(e)
         if isinstance(e, ast.BoolOp):
@@ -6951,6 +7014,14 @@ class Compiler(GList):
             return self.gl_method(e, want_value=True)
         if self.gl_sorted(e):
             return self.gl_sorted_value(e)
+        if self.gs_ctor(e):
+            return self.gs_make(e, self.typeof(e)), '0'
+        if isinstance(e, ast.BinOp) and self.gs_is(e):
+            return self.gs_binop(e)
+        if isinstance(e, ast.Call) and set_receiver(e) and self.gs_is(set_receiver(e)[0]) and not (receiver(e) and self.gl_is(receiver(e)[0])):
+            return self.gs_method(e, want_value=True)
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == 'len' and len(e.args) == 1 and self.gs_is(e.args[0]):
+            return f'({self.gs_ptr(e.args[0])})->used', '0'
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == 'len' and len(e.args) == 1 and self.gl_is(e.args[0]):
             return f'({self.expr(e.args[0])[0]})->n', '0'
         if isinstance(e, ast.Call):
@@ -7804,7 +7875,7 @@ ALL = None   # "every name": the set after a statement that never completes (ret
 
 
 def da_reads(c, node, assigned):
-    local = {n.id for comp in ast.walk(node) if isinstance(comp, (ast.GeneratorExp, ast.ListComp))
+    local = {n.id for comp in ast.walk(node) if isinstance(comp, (ast.GeneratorExp, ast.ListComp, ast.SetComp))
              for g in comp.generators for n in ast.walk(g.target) if isinstance(n, ast.Name)}
     for n in ast.walk(node):
         if isinstance(n, ast.Name) and (n.id in local or n.id.startswith('_sj_')):

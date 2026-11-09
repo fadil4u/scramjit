@@ -815,13 +815,12 @@ def test_sort():
     assert any(p is first for p in pts)
     with pytest.raises(CompileError, match='reads the list it sorts'):
         scram(sorts_by_self, fallback=False, cache=False)([3, 1, 2])
-    with pytest.raises(CompileError, match='a sort comparing'):
-        scram(lambda_free_sort, fallback=False, cache=False)([[2], [1]])
+    same_passed(sorts_lists, [[2, 1], [1, 3], [1], [], [1, 3, 0], [2]])
 
 
-def lambda_free_sort(rows):
-    rows.sort()                                             # lists compare in Python; not compiled yet
-    return rows
+def sorts_lists(rows):
+    rows.sort()                                             # lists compare as Python's: element by element, then length
+    return sorted(rows, reverse=True)
 
 
 def tuple_elements(pts):

@@ -268,8 +268,6 @@ after with `bench/`, and write the numbers into the item when done.
 
 ## From cimo
 
-- **A module's WebAssembly is public (cimo 2026-11-07):** use it in the lab and LLM demo: issue #1.
-
 - **Ctrl-C stops a running kernel (cimo 2026-11-07, Linux and macOS):** the generated `if (*sj_stop) SJ_FAIL(...)` check
   in every loop can go, once cimo leaves a kernel running under a SIGINT handler of the program's own (its TODO,
   "Big"; `tests/test_interrupt.py::test_a_custom_handler_doesnt_stop_the_kernel` fails until then). Keep it for Windows.
